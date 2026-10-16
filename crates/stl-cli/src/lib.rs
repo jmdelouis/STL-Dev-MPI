@@ -175,6 +175,20 @@ fn downsample(v: &[f64], factor: usize) -> Vec<f64> {
     v.chunks(factor).map(|c| c.iter().sum::<f64>() / factor as f64).collect()
 }
 
+/// A memory counter of this process from `/proc/self/status`, in bytes
+/// (`VmRSS`: resident now, `VmHWM`: peak resident); 0 where unavailable.
+pub fn proc_memory(key: &str) -> i64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<i64>().ok())
+        })
+        .map_or(0, |kb| kb * 1024)
+}
+
 /// Full-sky map from the ranks' owned slices (on rank 0; `None` elsewhere).
 fn gather_map<C: Comm>(comm: &C, local: &[f64]) -> Option<Vec<f64>> {
     let size = comm.size();
@@ -227,6 +241,9 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         }
     };
 
+    // Resident memory once the inputs are read (the full-sky target and
+    // initial maps are held by every rank in this version).
+    let rss_baseline = proc_memory("VmRSS:");
     let started_setup = Instant::now();
     // Target statistics with the same distributed engine.
     let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
@@ -257,6 +274,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let floors: Vec<i64> = comm.allgather_i64(
         floor.as_object().unwrap().iter().filter_map(|(_, v)| v.as_i64()).sum(),
     );
+    let peaks = comm.allgather_i64(proc_memory("VmHWM:"));
+    let baselines = comm.allgather_i64(rss_baseline);
     let result = gather_map(comm, &x);
     let Some(result) = result else { return Ok(None) };
 
@@ -289,6 +308,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "init": init_info,
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
+        "memory_peak_bytes_per_rank": peaks,
+        "rss_baseline_bytes_per_rank": baselines,
         "timers_seconds": timers,
     });
     std::fs::write(file(".json"), serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;

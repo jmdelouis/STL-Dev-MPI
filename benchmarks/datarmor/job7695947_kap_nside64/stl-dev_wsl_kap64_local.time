@@ -1,0 +1,27 @@
+/home/jmdeloui/stl-work/STL_main/TorchGeometry.py:489: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/Context.cpp:848.)
+  forward = torch.sparse_coo_tensor(torch.stack([rows, cols]), w, (n_out, n_in)).coalesce().to_sparse_csr()
+/home/jmdeloui/stl-work/STL_main/TorchGeometry.py:489: UserWarning: Sparse CSR tensor support is in beta state. If you miss a functionality in the sparse tensor support, please submit a feature request to https://github.com/pytorch/pytorch/issues. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/SparseCsrTensorImpl.cpp:49.)
+  forward = torch.sparse_coo_tensor(torch.stack([rows, cols]), w, (n_out, n_in)).coalesce().to_sparse_csr()
+	Command being timed: "/home/jmdeloui/stl-deps/venv-cpu/bin/python -m benchmarks.scripts.benchmark_synthesis --mode local --variables map --target /home/jmdeloui/stl-data/websky/kap_nside64_nested.npy --niter 20 --threads 4 --output none --fits none --quiet"
+	User time (seconds): 1581.97
+	System time (seconds): 351.17
+	Percent of CPU this job got: 411%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 7:49.66
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1903296
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1632
+	Minor (reclaiming a frame) page faults: 35704691
+	Voluntary context switches: 1248546
+	Involuntary context switches: 291035
+	Swaps: 0
+	File system inputs: 408192
+	File system outputs: 88
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

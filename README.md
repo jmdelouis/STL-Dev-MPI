@@ -11,8 +11,12 @@ see `CLAUDE.md` for the model, the architecture and the milestones.
 | Path | Content |
 |---|---|
 | `crates/stl-core` | HEALPix geometry (centres, `ring2nest`, bilinear interpolation, stencil rotation, binding), wavelet kernel, partial convolution and its adjoint, smooth decimation, block-wise `wave` / `decimate` / pieces and their transposes (`local.rs`); no MPI, `f64` |
+| `crates/stl-mpi` | decomposition, halo exchange, ghost accumulation (`Comm`: threads or MPI), distributed objective (`synthesis.rs`), npy / HEALPix FITS I/O |
+| `crates/stl-cli` | `stl-synth`: synthesis from a target map |
 | `tools/dump_reference.py` | dumps STL-Dev outputs as fixtures |
+| `tools/datarmor/` | environment and PBS script for Datarmor |
 | `fixtures/<suite>/` | `.npy` arrays + `meta.json` per case, `index.json` per suite |
+| `benchmarks/datarmor/` | reports of the Datarmor runs |
 
 ## Tests
 
@@ -32,7 +36,33 @@ Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
 `~/stl-deps/venv-cpu`; override with `STL_DEV` / `STL_PYTHON`):
 
 ```bash
-tools/dump_reference.sh geometry block stats
+tools/dump_reference.sh geometry block stats synthesis
+```
+
+The 20-iteration trajectory comparison (minutes):
+
+```bash
+STL_RANKS=4 cargo test --release -p stl-mpi --test synthesis -- --ignored --nocapture
+```
+
+## Synthesis
+
+```bash
+stl-synth --target kap_nside64_nested.npy --niter 20 --ranks 4 --out run
+mpirun -n 28 stl-synth --target kap_nside64_nested.npy --niter 20 --out run   # --features stl-cli/mpi
+```
+
+writes `run.json` (fields of `benchmark_synthesis.py`: `loss_history`,
+`memory_floor_bytes`, `timers_seconds`, plus per-rank peak memory),
+`run_synthesis.fits` / `run_target.fits` (NESTED HEALPix binary tables) and
+`run_synthesis_nested.npy`.
+
+On Datarmor (PBS Pro, Intel MPI 2019; no Rust module, so a rustup toolchain
+in the work directory; `datawork` was over quota, the test used `scratch`):
+
+```bash
+source $W/env.sh && cargo build --release -p stl-cli --features mpi
+qsub -v W=$W $W/src/tools/datarmor/synth_nside64.pbs
 ```
 
 ## Status
@@ -101,6 +131,38 @@ evaluation (forward + gradient) drops by 1.8x at 2 ranks and 2.4x to 3.0x
 at 4 ranks on the nside 16/32 fixtures, where the halo is still a large
 fraction of each slice (at nside 32 and 4 ranks a rank holds 46 % to 65 %
 of level 0).
+
+Milestone 5: L-BFGS with strong Wolfe ported line by line from
+`torch.optim.LBFGS` (torch 2.14), map variable, loss
+`sum |S(x) - S_target|^2`, against STL-Dev's
+`benchmark_synthesis.py --mode local --variables map` on the WebSky kappa
+map at nside 64 (J 5, L 2, kernel 5, 362 coefficients, 20 iterations = 25
+evaluations, same initial map). One Datarmor node (2 x Xeon E5-2680 v4,
+28 cores), Intel MPI 2019, PBS job 7695947:
+
+| Ranks | Blocks | Loss values identical to STL-Dev (`%.6e`) | Max relative difference | s / evaluation | Speed-up | Peak RSS per rank (MB) |
+|---|---|---|---|---|---|---|
+| 1 | 16384 | 25 / 25 | 2.3e-10 | 9.15 | 1.0 | 316 |
+| 4 | 16384 | 25 / 25 | 9.7e-11 | 3.27 | 2.8 | 216 - 259 |
+| 16 | 16384 | 25 / 25 | 3.1e-11 | 1.45 | 6.3 | 97 - 115 |
+| 28 | 16384 | 25 / 25 | 2.0e-11 | 1.19 | 7.7 | 81 - 99 |
+| 1 | 4096 | 25 / 25 | 9.4e-12 | 11.85 | 0.77 | 124 |
+| 1 | 1024 | 25 / 25 | 1.3e-11 | 19.04 | 0.48 | 65 |
+
+STL-Dev on the same case (WSL, 4 torch threads): 12.6 to 18 s per
+evaluation, 1.90 GB peak RSS (1.55 GB above its baseline).
+
+Memory. The block-independent state (maps, stored moduli, their
+cotangents, L-BFGS history) is 11 MB on one rank at nside 64 and shrinks
+with the share of the sky (0.84 MB per rank at 28 ranks); the inputs read
+by every rank add 18 to 29 MB. The peak is set by the transients of one
+block, about 18 kB per block pixel at L = 2, kernel 5 (316 MB for blocks
+of 16384, 65 MB for 1024): the convolution geometry of the block domain is
+built with 8-byte positions and keeps the raw interpolation buffers until
+the binding is done. This cost is independent of nside; it is the first
+target of milestone 6 (narrower indices, streaming binding, geometry by
+sub-blocks), together with the halo of small levels that every rank holds
+(the per-rank peak stops shrinking beyond 16 ranks at nside 64).
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
