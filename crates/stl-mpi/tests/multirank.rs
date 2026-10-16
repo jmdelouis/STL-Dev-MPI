@@ -57,6 +57,56 @@ fn gather_to_root_assembles_the_same_result() {
     assert_eq!(round.bands, direct.bands);
 }
 
+/// Level-0 ranges that do not align with the coarse levels (parents owned
+/// by a neighbour of their children's owner): same results.
+#[test]
+fn misaligned_ranges() {
+    let fx = fixtures().into_iter().find(|f| f.name().contains("C2_B2_full_b64")).unwrap();
+    let reference = assemble(&run_ranks(1, |c| run_rank(&fx, c)), rows(&fx));
+    for (size, unit) in [(3usize, 1i64), (5, 4), (7, 1)] {
+        let a = assemble(&run_ranks(size, |c| stl_mpi::check::run_rank_unit(&fx, c, Some(unit))), rows(&fx));
+        let report = compare(&fx, &a, Some(&reference));
+        eprintln!("{} P={size} unit={unit}: vs P=1 {:?}", fx.name(), report.other_diff);
+        assert!(report.passed(), "P={size} unit={unit}: {report:?}");
+    }
+}
+
+/// More ranks than cells at the coarsest level: some ranks own no coarse
+/// cell.  Synthetic nside 8, J = 3 (48 coarse cells), 64 ranks, against the
+/// serial engine.
+#[test]
+fn more_ranks_than_coarse_cells() {
+    use num_complex::Complex64;
+    use stl_core::local::LocalGeometry;
+    use stl_core::plan::{build_plan, Family};
+    use stl_core::stencil::Gauge;
+    let geo = LocalGeometry::new(8, 3, 2, Gauge::Cosmo, 64);
+    let cfg = EngineConfig::new(3, false);
+    let plan = build_plan(3, 2, &cfg.j_to_dg, 1, None, &Family::ALL);
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let map0: Vec<f64> = (0..geo.pixels(0)).map(|_| next()).collect();
+    let gradient: Vec<Complex64> = plan.iter().map(|_| Complex64::new(next(), next())).collect();
+    let mut engine = LocalEngine::new(&geo, &cfg, map0.clone(), 1, 1);
+    let values = engine.forward(&plan);
+    let mg = engine.reverse(&plan, &gradient);
+    let (_, bands) = engine.analysis_vjp(mg.clone());
+    let results = run_ranks(64, |c| stl_mpi::check::run_problem(&geo, &cfg, &plan, &map0, &gradient, 1, 1, c, None));
+    let empty = results.iter().filter(|r| r.owned[2].0 == r.owned[2].1).count();
+    let a = assemble(&results, 1);
+    let diff = |x: &[f64], y: &[f64]| x.iter().zip(y).fold(0f64, |m, (a, b)| m.max((a - b).abs()));
+    let dv = a.values.iter().zip(&values).fold(0f64, |m, (x, y)| m.max((x - y).norm()));
+    let dg = (0..3).map(|d| diff(&a.maps_gradient[d], &mg[d]).max(diff(&a.bands[d], &bands[d]))).fold(0f64, f64::max);
+    eprintln!("64 ranks, {empty} without coarse cells: statistics {dv:.1e}, gradients {dg:.1e}");
+    assert!(empty > 0);
+    assert!(dv <= 1e-13 && dg <= 1e-13, "{dv:e} {dg:e}");
+}
+
 #[test]
 fn ranks_agree_with_fixtures_and_each_other() {
     for fx in fixtures() {

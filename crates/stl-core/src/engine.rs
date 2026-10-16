@@ -24,7 +24,7 @@
 
 use crate::conv::ConvPlan;
 use crate::local::{modulus_vjp, positions, LocalGeometry};
-use crate::neighbours::{dilate_fine, parents};
+use crate::neighbours::{children, dilate_fine, parents};
 use crate::plan::{Coefficient, Family};
 use num_complex::Complex64;
 use std::collections::BTreeMap;
@@ -256,19 +256,19 @@ impl<'a> LocalEngine<'a> {
         self.gather(level, field, &ids)
     }
 
-    /// `maps[dg] -> maps[dg + 1]` on the owned cells, block by block
-    /// (`LocalGeometry.decimate`).
+    /// `maps[dg] -> maps[dg + 1]` on the owned cells, by blocks of owned
+    /// coarse cells: each row is exact on the domain of its children plus
+    /// the doubled decimation halo, the same rows (to the bit) as
+    /// `LocalGeometry.decimate` computes from the fine blocks.
     fn decimate(&self, dg: usize) -> Vec<f64> {
         let x = &self.maps[dg];
         let rows = self.batch * self.channels;
         let mut out = vec![0.0; rows * self.part.layouts[dg + 1].len()];
-        let rings = 2 * self.geo.down_rings(dg);
-        for block in &self.part.blocks[dg] {
-            let domain = dilate_fine(block, self.geo.nside(dg), rings);
+        for coarse in &self.part.blocks[dg + 1] {
+            let domain = decimation_domain(self.geo, dg, coarse);
             let down = self.geo.down(dg, &domain);
             let y = down.apply(&self.gather(dg, x, &domain));
-            let coarse = parents(block);
-            let picked = gather_cols(&y, down.out_ids.len(), &positions(&down.out_ids, &coarse));
+            let picked = gather_cols(&y, down.out_ids.len(), &positions(&down.out_ids, coarse));
             let layout = &self.part.layouts[dg + 1];
             let nl = layout.len();
             for r in 0..rows {
@@ -398,7 +398,9 @@ impl<'a> LocalEngine<'a> {
         }
         let g0 = maps_gradient.swap_remove(0);
         let mut bands = vec![g0.clone()];
-        // Up-sampling adjoint: sum of the four children (owned with their parent).
+        // Up-sampling adjoint: sum of the four children.  A parent may be
+        // owned by another rank (coarse levels shared by more ranks than
+        // cells): its contributions are reduced to the owner.
         for d in 0..self.levels() - 1 {
             let fine = bands.last().unwrap();
             let (lf, lc) = (&self.part.layouts[d], &self.part.layouts[d + 1]);
@@ -409,10 +411,17 @@ impl<'a> LocalEngine<'a> {
                     coarse[r * lc.len() + lc.pos(p / 4)] += fine[r * lf.len() + lf.pos(p)];
                 }
             }
+            self.ex.reduce_ghosts(d + 1, &mut coarse, bc);
             bands.push(coarse);
         }
         (g0, bands)
     }
+}
+
+/// Fine cells read by the decimation of the coarse cells `coarse` (level
+/// `dg + 1`): their children plus the doubled decimation halo.
+pub fn decimation_domain(geo: &LocalGeometry, dg: usize, coarse: &[i64]) -> Vec<i64> {
+    dilate_fine(&children(coarse), geo.nside(dg), 2 * geo.down_rings(dg))
 }
 
 /// Supports of the decimation chain of a block of level `n`, one per level
