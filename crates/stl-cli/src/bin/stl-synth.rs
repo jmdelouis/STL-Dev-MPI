@@ -5,7 +5,30 @@
 
 use stl_cli::{run, Args};
 
+/// glibc raises its mmap threshold after the first large free, so the
+/// per-block buffers (tens of MB) then come from the heap and are never
+/// returned: the resident peak grows to the sum of retained blocks.  A
+/// fixed threshold (128 kB) keeps every large buffer in its own mapping,
+/// released when dropped.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn fix_malloc_threshold() {
+    extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_MMAP_THRESHOLD: i32 = -3;
+    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+        // SAFETY: mallopt only changes allocator parameters, before any thread starts.
+        unsafe {
+            mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn fix_malloc_threshold() {}
+
 fn main() {
+    fix_malloc_threshold();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match Args::parse(&argv) {
         Ok(a) => a,

@@ -1,71 +1,42 @@
 //! Convolution geometry on a partial grid: rotated stencils, bilinear
 //! interpolation, binding on the grid with renormalised weights
 //! (port of `TorchGeometry.TorchConv` and `bind_support`), and the linear
-//! convolution forward of `AdjointOps.convolution_forward`.
+//! convolution forward / adjoint of `AdjointOps`.
 //!
 //! The geometry is computed on the fly for one domain (a block plus its
-//! halo) and never stored for the full sky.
+//! halo) and never stored for the full sky.  Memory: the binding is done
+//! pixel by pixel (no `[G, 4, K * P]` raw buffers), positions are `u32`,
+//! and the geometry covers only the output rows that are used, so a bound
+//! stencil costs `4 G P (4 + 8)` bytes per output row (2.4 kB at `L = 2`,
+//! kernel 5).  [`ConvPlan`] can also rebuild it by sub-blocks of rows at
+//! every application, bounding it by the sub-block size.
 
 use crate::healpix::{deg2rad, interp_weights_nested, order_of, pix2ang_nest, rad2deg};
 use crate::stencil::{apply, local_kernel_grid, rotation_matrices, Gauge};
 use std::f64::consts::PI;
 
-/// Bound stencil of every pixel of a sorted partial grid.
+/// Bound stencils of output rows `rows` reading the sorted grid `grid`.
 ///
 /// Layout follows `TorchConv._pos_safe` / `_w_norm`: entry
 /// `((n * G + g) * K + k) * P + p` for bilinear neighbour `n < 4`, gauge
-/// `g`, output pixel `k` and stencil tap `p`.  Positions index the grid.
+/// `g`, output row `k` and stencil tap `p`.  Positions index the grid.
 #[derive(Clone, Debug)]
 pub struct ConvGeometry {
     pub nside: i64,
     pub kernel_sz: usize,
     /// Number of gauges (orientations), `G`.
     pub g: usize,
-    /// Number of pixels of the grid, `K`.
+    /// Number of output rows, `K`.
     pub k: usize,
+    /// Number of grid cells (inputs).
+    pub n_in: usize,
     /// Number of stencil taps, `P = kernel_sz^2`.
     pub p: usize,
-    pub pos: Vec<usize>,
+    pub pos: Vec<u32>,
     pub w: Vec<f64>,
-    /// `complete[k]`: every read of pixel `k` (all taps, gauges and bilinear
+    /// `complete[k]`: every read of row `k` (all taps, gauges and bilinear
     /// neighbours) is inside the grid, so its row equals the full-sky one.
     pub complete: Vec<bool>,
-}
-
-impl ConvGeometry {
-    /// Geometry of the grid `ids` (NESTED, sorted, unique) at `nside`.
-    pub fn new(ids: &[i64], nside: i64, kernel_sz: usize, g_count: usize, gauge: Gauge) -> Self {
-        assert!(ids.windows(2).all(|w| w[0] < w[1]), "cell ids must be sorted and unique");
-        let order = order_of(nside);
-        let (kk, pp, gg) = (ids.len(), kernel_sz * kernel_sz, g_count);
-        let m = kk * pp;
-        let stencil = local_kernel_grid(kernel_sz, nside);
-        // Raw interpolation, layout [G, 4, K * P] as in bind_support.
-        let mut idx = vec![0i64; gg * 4 * m];
-        let mut wt = vec![0f64; gg * 4 * m];
-        for (k, &id) in ids.iter().enumerate() {
-            let (theta, phi) = pix2ang_nest(id, nside);
-            // The library rounds pixel centres through degrees (healpix_geo output).
-            let theta = deg2rad(90.0 - rad2deg(PI / 2.0 - theta));
-            let phi = deg2rad(rad2deg(phi));
-            for (g, r) in rotation_matrices(theta, phi, gg, gauge).iter().enumerate() {
-                for (p, v) in stencil.iter().enumerate() {
-                    let (pix, w) = interp_weights_nested(apply(r, v), order);
-                    for n in 0..4 {
-                        let at = (g * 4 + n) * m + k * pp + p;
-                        idx[at] = pix[n];
-                        wt[at] = w[n];
-                    }
-                }
-            }
-        }
-        bind_support(idx, wt, ids, kernel_sz, kk, gg, nside)
-    }
-
-    #[inline]
-    pub fn at(&self, n: usize, g: usize, k: usize, p: usize) -> usize {
-        ((n * self.g + g) * self.k + k) * self.p + p
-    }
 }
 
 /// Position of `v` in `sorted` if present.
@@ -75,87 +46,78 @@ fn search(sorted: &[i64], v: i64) -> Option<usize> {
     (pos < sorted.len() && sorted[pos] == v).then_some(pos)
 }
 
-/// `_bind_support_batched` of healpix-analyse on raw `[G, 4, K * P]` buffers.
-fn bind_support(
-    mut idx: Vec<i64>,
-    mut wt: Vec<f64>,
-    ids: &[i64],
-    kernel_sz: usize,
-    kk: usize,
-    gg: usize,
-    nside: i64,
-) -> ConvGeometry {
-    let pp = kernel_sz * kernel_sz;
-    let m = kk * pp;
-    let p_ref = (kernel_sz / 2) * (kernel_sz + 1);
-    let mut present = vec![false; gg * 4 * m];
-    let mut pos = vec![0usize; gg * 4 * m];
-    for (i, &v) in idx.iter().enumerate() {
-        if let Some(q) = search(ids, v) {
-            present[i] = true;
-            pos[i] = q;
-        }
+impl ConvGeometry {
+    /// Geometry of the grid `ids` (NESTED, sorted, unique) at `nside`, one
+    /// output row per grid cell (`TorchConv(ids, ...)`).
+    pub fn new(ids: &[i64], nside: i64, kernel_sz: usize, g_count: usize, gauge: Gauge) -> Self {
+        Self::rows(ids, ids, nside, kernel_sz, g_count, gauge)
     }
-    for g in 0..gg {
-        for col in 0..m {
-            let any = (0..4).any(|n| present[(g * 4 + n) * m + col]);
-            if any {
-                continue;
-            }
-            // Empty tap: fall back to the central tap of the same pixel.
-            let r = (col / pp) * pp + p_ref;
-            for n in 0..4 {
-                let (a, b) = ((g * 4 + n) * m + col, (g * 4 + n) * m + r);
-                idx[a] = idx[b];
-                wt[a] = wt[b];
-                let q = ids.partition_point(|&s| s < idx[a]).min(ids.len().saturating_sub(1));
-                present[a] = q < ids.len() && ids[q] == idx[a];
-                pos[a] = q;
-            }
-        }
-    }
-    let mut w_norm = vec![0f64; gg * 4 * m];
-    for g in 0..gg {
-        for col in 0..m {
-            let at = |n: usize| (g * 4 + n) * m + col;
-            let mut w = [0f64; 4];
-            for n in 0..4 {
-                w[n] = wt[at(n)] * if present[at(n)] { 1.0 } else { 0.0 };
-            }
-            let mut colsum = w[0] + w[1] + w[2] + w[3];
-            if colsum == 0.0 {
-                w[0] = if present[at(0)] { 1.0 } else { 0.0 };
-                colsum = w[0] + w[1] + w[2] + w[3];
-            }
-            for n in 0..4 {
-                w_norm[at(n)] = w[n] / colsum.max(1e-12);
-            }
-        }
-    }
-    // Rows whose every read is present.
-    let mut complete = vec![true; kk];
-    for g in 0..gg {
-        for n in 0..4 {
-            for col in 0..m {
-                if !present[(g * 4 + n) * m + col] {
-                    complete[col / pp] = false;
+
+    /// Geometry of the output rows `rows` (any NESTED cells, in the order of
+    /// the output) reading the grid `grid` (sorted, unique).  Row `k` is the
+    /// row of `rows[k]` in `TorchConv(grid, ...)` when `rows[k]` is in `grid`.
+    pub fn rows(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g_count: usize, gauge: Gauge) -> Self {
+        assert!(grid.windows(2).all(|w| w[0] < w[1]), "cell ids must be sorted and unique");
+        assert!(grid.len() < u32::MAX as usize, "grid too large for u32 positions");
+        let order = order_of(nside);
+        let (kk, pp, gg) = (rows.len(), kernel_sz * kernel_sz, g_count);
+        let p_ref = (kernel_sz / 2) * (kernel_sz + 1);
+        let stencil = local_kernel_grid(kernel_sz, nside);
+        let at = |n: usize, g: usize, k: usize, p: usize| ((n * gg + g) * kk + k) * pp + p;
+        let mut pos = vec![0u32; 4 * gg * kk * pp];
+        let mut wout = vec![0f64; 4 * gg * kk * pp];
+        let mut complete = vec![true; kk];
+        // Per (row, gauge): raw interpolation of the P taps, then binding
+        // (`_bind_support_batched` of healpix-analyse, one column at a time).
+        let mut idx = vec![[0i64; 4]; pp];
+        let mut wt = vec![[0f64; 4]; pp];
+        for (k, &id) in rows.iter().enumerate() {
+            let (theta, phi) = pix2ang_nest(id, nside);
+            // The library rounds pixel centres through degrees (healpix_geo output).
+            let theta = deg2rad(90.0 - rad2deg(PI / 2.0 - theta));
+            let phi = deg2rad(rad2deg(phi));
+            for (g, r) in rotation_matrices(theta, phi, gg, gauge).iter().enumerate() {
+                for (p, v) in stencil.iter().enumerate() {
+                    (idx[p], wt[p]) = interp_weights_nested(apply(r, v), order);
+                }
+                for p in 0..pp {
+                    let (mut ix, mut wx) = (idx[p], wt[p]);
+                    let mut found = ix.map(|v| search(grid, v));
+                    if found.iter().all(Option::is_none) {
+                        // Empty tap: fall back to the central tap of the same row.
+                        (ix, wx) = (idx[p_ref], wt[p_ref]);
+                        found = ix.map(|v| search(grid, v));
+                    }
+                    let mut w = [0f64; 4];
+                    for n in 0..4 {
+                        w[n] = wx[n] * if found[n].is_some() { 1.0 } else { 0.0 };
+                    }
+                    let mut colsum = w[0] + w[1] + w[2] + w[3];
+                    if colsum == 0.0 {
+                        w[0] = if found[0].is_some() { 1.0 } else { 0.0 };
+                        colsum = w[0] + w[1] + w[2] + w[3];
+                    }
+                    for n in 0..4 {
+                        let a = at(n, g, k, p);
+                        wout[a] = w[n] / colsum.max(1e-12);
+                        pos[a] = found[n].unwrap_or(0) as u32;
+                        complete[k] &= found[n].is_some();
+                    }
                 }
             }
         }
+        ConvGeometry { nside, kernel_sz, g: gg, k: kk, n_in: grid.len(), p: pp, pos, w: wout, complete }
     }
-    // Permute [G, 4, K*P] -> [4, G, K*P] like TorchConv; absent reads point at 0.
-    let mut pos_out = vec![0usize; gg * 4 * m];
-    let mut w_out = vec![0f64; gg * 4 * m];
-    for g in 0..gg {
-        for n in 0..4 {
-            let (src, dst) = ((g * 4 + n) * m, (n * gg + g) * m);
-            for col in 0..m {
-                pos_out[dst + col] = if present[src + col] { pos[src + col] } else { 0 };
-                w_out[dst + col] = w_norm[src + col];
-            }
-        }
+
+    #[inline]
+    pub fn at(&self, n: usize, g: usize, k: usize, p: usize) -> usize {
+        ((n * self.g + g) * self.k + k) * self.p + p
     }
-    ConvGeometry { nside, kernel_sz, g: gg, k: kk, p: pp, pos: pos_out, w: w_out, complete }
+
+    /// Bytes held by the bound stencils.
+    pub fn nbytes(&self) -> usize {
+        self.pos.len() * 4 + self.w.len() * 8 + self.complete.len()
+    }
 }
 
 /// Convolution kernel `[G, C_in, C_out, P]`, cast through `f32` like
@@ -185,60 +147,104 @@ impl Kernel {
 }
 
 /// Transpose of [`convolution_forward`] (`AdjointOps.convolution_adjoint`):
-/// `g` `[B, G * C_out, K]` -> `[B, C_in, K]`, scattering in the reference
-/// order (gauge, bilinear neighbour, pixel, tap).
+/// `g` `[B, G * C_out, K]` -> `[B, C_in, n_in]`, scattering in the reference
+/// order (gauge, bilinear neighbour, row, tap).
 pub fn convolution_adjoint(geo: &ConvGeometry, ker: &Kernel, g: &[f64], batch: usize) -> Vec<f64> {
-    let (kk, pp, gg) = (geo.k, geo.p, geo.g);
+    let mut out = vec![0f64; batch * ker.c_in * geo.n_in];
+    adjoint_add(geo, ker, g, batch, None, 0, geo.k, &mut out);
+    out
+}
+
+/// Rows of the geometry to apply: `sel` (indices) or all of them.
+fn selected(geo: &ConvGeometry, sel: Option<&[usize]>) -> Vec<usize> {
+    sel.map_or_else(|| (0..geo.k).collect(), <[usize]>::to_vec)
+}
+
+/// Adds the adjoint of the geometry rows `sel` (all by default), read from
+/// rows `r0 + i` of a `[B, G * C_out, k_total]` cotangent, into `out`
+/// `[B, C_in, n_in]`.
+#[allow(clippy::too_many_arguments)]
+fn adjoint_add(
+    geo: &ConvGeometry,
+    ker: &Kernel,
+    g: &[f64],
+    batch: usize,
+    sel: Option<&[usize]>,
+    r0: usize,
+    k_total: usize,
+    out: &mut [f64],
+) {
+    let (pp, gg, ni) = (geo.p, geo.g, geo.n_in);
     assert_eq!(ker.g, gg);
     assert_eq!(ker.p, pp);
     let co = ker.c_out;
-    assert_eq!(g.len(), batch * gg * co * kk);
-    let mut out = vec![0f64; batch * ker.c_in * kk];
-    let mut taps = vec![0f64; kk * pp];
+    assert_eq!(g.len(), batch * gg * co * k_total);
+    assert_eq!(out.len(), batch * ker.c_in * ni);
+    let rows = selected(geo, sel);
+    let mut taps = vec![0f64; rows.len() * pp];
     for b in 0..batch {
         for gi in 0..gg {
             for c in 0..ker.c_in {
-                for k in 0..kk {
+                for i in 0..rows.len() {
                     for p in 0..pp {
                         let mut s = 0.0;
                         for o in 0..co {
-                            s += g[(b * gg * co + gi * co + o) * kk + k] * ker.at(gi, c, o, p);
+                            s += g[(b * gg * co + gi * co + o) * k_total + r0 + i] * ker.at(gi, c, o, p);
                         }
-                        taps[k * pp + p] = s;
+                        taps[i * pp + p] = s;
                     }
                 }
-                let dst = &mut out[(b * ker.c_in + c) * kk..][..kk];
+                let dst = &mut out[(b * ker.c_in + c) * ni..][..ni];
                 for n in 0..4 {
-                    let base = geo.at(n, gi, 0, 0);
-                    for (i, &t) in taps.iter().enumerate() {
-                        dst[geo.pos[base + i]] += t * geo.w[base + i];
+                    for (i, &k) in rows.iter().enumerate() {
+                        let base = geo.at(n, gi, k, 0);
+                        for p in 0..pp {
+                            dst[geo.pos[base + p] as usize] += taps[i * pp + p] * geo.w[base + p];
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Linear convolution of `x` `[B, C_in, n_in]` -> `[B, G * C_out, K]` (no bias).
+pub fn convolution_forward(geo: &ConvGeometry, ker: &Kernel, x: &[f64], batch: usize) -> Vec<f64> {
+    let mut out = vec![0f64; batch * ker.g * ker.c_out * geo.k];
+    forward_into(geo, ker, x, batch, None, 0, geo.k, &mut out);
     out
 }
 
-/// Linear convolution of `x` `[B, C_in, K]` -> `[B, G * C_out, K]` (no bias).
-pub fn convolution_forward(geo: &ConvGeometry, ker: &Kernel, x: &[f64], batch: usize) -> Vec<f64> {
-    let (kk, pp, gg) = (geo.k, geo.p, geo.g);
+/// Geometry rows `sel` (all by default) of the forward into rows `r0 + i`
+/// of `out` `[B, G * C_out, k_total]`.
+#[allow(clippy::too_many_arguments)]
+fn forward_into(
+    geo: &ConvGeometry,
+    ker: &Kernel,
+    x: &[f64],
+    batch: usize,
+    sel: Option<&[usize]>,
+    r0: usize,
+    k_total: usize,
+    out: &mut [f64],
+) {
+    let (pp, gg, ni) = (geo.p, geo.g, geo.n_in);
     assert_eq!(ker.g, gg);
     assert_eq!(ker.p, pp);
-    assert_eq!(x.len(), batch * ker.c_in * kk);
+    assert_eq!(x.len(), batch * ker.c_in * ni);
     let co = ker.c_out;
-    let mut out = vec![0f64; batch * gg * co * kk];
+    let rows = selected(geo, sel);
     let mut gathered = vec![0f64; pp];
     for b in 0..batch {
         for g in 0..gg {
             for c in 0..ker.c_in {
-                let xs = &x[(b * ker.c_in + c) * kk..][..kk];
-                for k in 0..kk {
+                let xs = &x[(b * ker.c_in + c) * ni..][..ni];
+                for (i, &k) in rows.iter().enumerate() {
                     for (p, slot) in gathered.iter_mut().enumerate() {
                         let mut acc = 0.0;
                         for n in 0..4 {
                             let at = geo.at(n, g, k, p);
-                            acc += xs[geo.pos[at]] * geo.w[at];
+                            acc += xs[geo.pos[at] as usize] * geo.w[at];
                         }
                         *slot = acc;
                     }
@@ -247,11 +253,92 @@ pub fn convolution_forward(geo: &ConvGeometry, ker: &Kernel, x: &[f64], batch: u
                         for (p, &v) in gathered.iter().enumerate() {
                             s += v * ker.at(g, c, o, p);
                         }
-                        out[(b * gg * co + g * co + o) * kk + k] += s;
+                        out[(b * gg * co + g * co + o) * k_total + r0 + i] += s;
                     }
                 }
             }
         }
     }
-    out
+}
+
+/// A convolution from a grid to output rows, with its geometry either held
+/// for all rows or rebuilt by sub-blocks of `chunk` rows at every
+/// application (geometry memory bounded by the sub-block, at the price of
+/// recomputing it).  Both give the same forward values; the adjoint adds
+/// the sub-blocks in turn, which may change the last bits.
+pub enum ConvPlan {
+    Whole(ConvGeometry),
+    Chunked { grid: Vec<i64>, rows: Vec<i64>, chunk: usize, nside: i64, kernel_sz: usize, g: usize, gauge: Gauge },
+}
+
+impl ConvPlan {
+    pub fn new(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g: usize, gauge: Gauge, chunk: Option<usize>) -> Self {
+        match chunk {
+            Some(c) if c < rows.len() => ConvPlan::Chunked {
+                grid: grid.to_vec(),
+                rows: rows.to_vec(),
+                chunk: c.max(1),
+                nside,
+                kernel_sz,
+                g,
+                gauge,
+            },
+            _ => ConvPlan::Whole(ConvGeometry::rows(grid, rows, nside, kernel_sz, g, gauge)),
+        }
+    }
+
+    pub fn n_rows(&self) -> usize {
+        match self {
+            ConvPlan::Whole(geo) => geo.k,
+            ConvPlan::Chunked { rows, .. } => rows.len(),
+        }
+    }
+
+    pub fn n_in(&self) -> usize {
+        match self {
+            ConvPlan::Whole(geo) => geo.n_in,
+            ConvPlan::Chunked { grid, .. } => grid.len(),
+        }
+    }
+
+    /// Calls `f(geometry, selection, r0)` for the rows `sel` (all by
+    /// default), whose results are rows `r0..` of the output.
+    fn each_chunk(&self, sel: Option<&[usize]>, mut f: impl FnMut(&ConvGeometry, Option<&[usize]>, usize)) {
+        match self {
+            ConvPlan::Whole(geo) => f(geo, sel, 0),
+            ConvPlan::Chunked { grid, rows, chunk, nside, kernel_sz, g, gauge } => {
+                let ids: Vec<i64> = sel.map_or_else(|| rows.clone(), |s| s.iter().map(|&i| rows[i]).collect());
+                for (i, part) in ids.chunks(*chunk).enumerate() {
+                    let geo = ConvGeometry::rows(grid, part, *nside, *kernel_sz, *g, *gauge);
+                    f(&geo, None, i * chunk);
+                }
+            }
+        }
+    }
+
+    /// `[B, C_in, n_in] -> [B, G * C_out, n_rows]`.
+    pub fn forward(&self, ker: &Kernel, x: &[f64], batch: usize) -> Vec<f64> {
+        self.forward_rows(ker, x, batch, None)
+    }
+
+    /// Output rows `sel` only: `[B, C_in, n_in] -> [B, G * C_out, |sel|]`.
+    pub fn forward_rows(&self, ker: &Kernel, x: &[f64], batch: usize, sel: Option<&[usize]>) -> Vec<f64> {
+        let k = sel.map_or(self.n_rows(), <[usize]>::len);
+        let mut out = vec![0f64; batch * ker.g * ker.c_out * k];
+        self.each_chunk(sel, |geo, s, r0| forward_into(geo, ker, x, batch, s, r0, k, &mut out));
+        out
+    }
+
+    /// `[B, G * C_out, n_rows] -> [B, C_in, n_in]`.
+    pub fn adjoint(&self, ker: &Kernel, g: &[f64], batch: usize) -> Vec<f64> {
+        self.adjoint_rows(ker, g, batch, None)
+    }
+
+    /// Adjoint of [`forward_rows`](Self::forward_rows): `[B, G * C_out, |sel|] -> [B, C_in, n_in]`.
+    pub fn adjoint_rows(&self, ker: &Kernel, g: &[f64], batch: usize, sel: Option<&[usize]>) -> Vec<f64> {
+        let k = sel.map_or(self.n_rows(), <[usize]>::len);
+        let mut out = vec![0f64; batch * ker.c_in * self.n_in()];
+        self.each_chunk(sel, |geo, s, r0| adjoint_add(geo, ker, g, batch, s, r0, k, &mut out));
+        out
+    }
 }

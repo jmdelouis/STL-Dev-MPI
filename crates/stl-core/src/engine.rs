@@ -22,7 +22,7 @@
 //! Summation order: each partial sum adds the pixels of a block in id
 //! order, blocks in id order, levels ascending.
 
-use crate::conv::{convolution_adjoint, convolution_forward, ConvGeometry};
+use crate::conv::ConvPlan;
 use crate::local::{modulus_vjp, positions, LocalGeometry};
 use crate::neighbours::{dilate_fine, parents};
 use crate::plan::{Coefficient, Family};
@@ -449,9 +449,9 @@ struct Block {
     block: Vec<i64>,
     a1: Vec<i64>,
     domain: Vec<i64>,
-    conv: ConvGeometry,
+    /// Convolution from the domain to the rows `a1`.
+    conv: ConvPlan,
     rows_a1: Vec<usize>,
-    rows_f: Vec<usize>,
     f_in_a1: Vec<usize>,
     /// `[B, C, L, |a1|]`.
     z: Vec<Complex64>,
@@ -467,14 +467,13 @@ impl Block {
     fn new(engine: &LocalEngine, n: usize, block: &[i64]) -> Self {
         let geo = engine.geo;
         let (a1, domain) = block_domains(geo, n, block);
-        let conv = geo.conv(n, &domain);
+        let conv = geo.conv_plan(n, &domain, &a1);
         let rows_a1 = positions(&domain, &a1);
-        let rows_f = positions(&domain, block);
         let f_in_a1 = positions(&a1, block);
         let x = engine.gather(n, &engine.maps[n], &domain);
         let rows = engine.batch * engine.channels;
-        let y = convolution_forward(&conv, &geo.kernel, &x, rows);
-        let z = join(&y, rows, geo.l, domain.len(), &rows_a1);
+        let y = conv.forward(&geo.kernel, &x, rows);
+        let z = join(&y, rows, geo.l, a1.len(), None);
         Block {
             n,
             block: block.to_vec(),
@@ -482,7 +481,6 @@ impl Block {
             domain,
             conv,
             rows_a1,
-            rows_f,
             f_in_a1,
             z,
             modulus: BTreeMap::new(),
@@ -534,8 +532,9 @@ impl Block {
                     padded[r * kd + p] = m[r * na1 + i];
                 }
             }
-            let y = convolution_forward(&self.conv, &geo.kernel, &padded, rows);
-            let v = join(&y, rows, geo.l, kd, &self.rows_f);
+            // Second wavelet on F only.
+            let y = self.conv.forward_rows(&geo.kernel, &padded, rows, Some(&self.f_in_a1));
+            let v = join(&y, rows, geo.l, self.nf(), None);
             self.branch.insert(d, v);
         }
         &self.branch[&d]
@@ -782,11 +781,11 @@ impl Block {
         let geo = engine.geo;
         let (n, l, kd, na1, nf) = (self.n, geo.l, self.domain.len(), self.na1(), self.nf());
         let bc = engine.batch * engine.channels;
-        // Second-wavelet cotangents -> modulus cotangents on a1.
+        // Second-wavelet cotangents (on F) -> modulus cotangents on a1.
         for (d, g) in std::mem::take(&mut self.gbranch) {
             let rows = bc * l;
-            let padded = split(&g, rows, l, nf, kd, &self.rows_f);
-            let gx = convolution_adjoint(&self.conv, &geo.kernel, &padded, rows);
+            let packed = split(&g, rows, l, nf, None);
+            let gx = self.conv.adjoint_rows(&geo.kernel, &packed, rows, Some(&self.f_in_a1));
             let gm: Vec<f64> = gx.chunks(kd).flat_map(|row| self.rows_a1.iter().map(move |&p| row[p])).collect();
             let slot = self.gmod_slot(d, gm.len());
             slot.iter_mut().zip(&gm).for_each(|(s, v)| *s += v);
@@ -830,36 +829,48 @@ impl Block {
             }
         }
         let Some(gz) = self.gz.take() else { return };
-        // Wavelet adjoint on a1 rows -> map cotangent on the domain.
-        let padded = split(&gz, bc, l, na1, kd, &self.rows_a1);
-        let gx = convolution_adjoint(&self.conv, &geo.kernel, &padded, bc);
+        // Wavelet adjoint on the a1 rows -> map cotangent on the domain.
+        let packed = split(&gz, bc, l, na1, None);
+        let gx = self.conv.adjoint(&geo.kernel, &packed, bc);
+        debug_assert_eq!(gx.len(), bc * kd);
         engine.scatter_add(n, &mut maps_gradient[n], &self.domain, &gx);
     }
 }
 
-/// Convolution output `[R, 2L, kd]` -> complex `[R, L, |pick|]` at the
-/// domain positions `pick` (`S3Multiscale._join`).
-fn join(y: &[f64], rows: usize, l: usize, kd: usize, pick: &[usize]) -> Vec<Complex64> {
+/// Convolution output `[R, 2L, k]` -> complex `[R, L, |pick|]` at the
+/// output rows `pick` (all by default) (`S3Multiscale._join`).
+fn join(y: &[f64], rows: usize, l: usize, k: usize, pick: Option<&[usize]>) -> Vec<Complex64> {
+    let all: Vec<usize>;
+    let pick = match pick {
+        Some(p) => p,
+        None => {
+            all = (0..k).collect();
+            &all
+        }
+    };
     let mut z = Vec::with_capacity(rows * l * pick.len());
     for r in 0..rows {
         for o in 0..l {
-            let re = &y[(r * 2 * l + 2 * o) * kd..][..kd];
-            let im = &y[(r * 2 * l + 2 * o + 1) * kd..][..kd];
+            let re = &y[(r * 2 * l + 2 * o) * k..][..k];
+            let im = &y[(r * 2 * l + 2 * o + 1) * k..][..k];
             z.extend(pick.iter().map(|&p| Complex64::new(re[p], im[p])));
         }
     }
     z
 }
 
-/// Inverse of [`join`]: complex `[R, L, m]` -> `[R, 2L, kd]`, zero outside `at`.
-fn split(g: &[Complex64], rows: usize, l: usize, m: usize, kd: usize, at: &[usize]) -> Vec<f64> {
-    let mut out = vec![0.0; rows * 2 * l * kd];
+/// Inverse of [`join`]: complex `[R, L, m]` -> `[R, 2L, k]` with the values
+/// at rows `at` (`0..m` by default, then `k = m`), zero elsewhere.
+fn split(g: &[Complex64], rows: usize, l: usize, m: usize, at: Option<(&[usize], usize)>) -> Vec<f64> {
+    let k = at.map_or(m, |(_, k)| k);
+    let mut out = vec![0.0; rows * 2 * l * k];
     for r in 0..rows {
         for o in 0..l {
             let src = &g[(r * l + o) * m..][..m];
-            for (i, &p) in at.iter().enumerate() {
-                out[(r * 2 * l + 2 * o) * kd + p] = src[i].re;
-                out[(r * 2 * l + 2 * o + 1) * kd + p] = src[i].im;
+            for (i, v) in src.iter().enumerate() {
+                let p = at.map_or(i, |(pos, _)| pos[i]);
+                out[(r * 2 * l + 2 * o) * k + p] = v.re;
+                out[(r * 2 * l + 2 * o + 1) * k + p] = v.im;
             }
         }
     }

@@ -12,7 +12,7 @@
 //! is `[R, |ids|]` for `R` leading rows (batch x channels x ...), a
 //! wavelet field is complex `[R, L, |ids|]`.
 
-use crate::conv::{convolution_adjoint, convolution_forward, ConvGeometry, Kernel};
+use crate::conv::{ConvPlan, Kernel};
 use crate::decimation::{smooth_decimation, Csr, DecimationParams};
 use crate::healpix::npix;
 use crate::neighbours::{dilate_fine, parents};
@@ -63,7 +63,7 @@ pub struct Wave {
     /// `[R, L, |block|]`.
     pub z: Vec<Complex64>,
     pub domain: Vec<i64>,
-    pub conv: ConvGeometry,
+    pub conv: ConvPlan,
 }
 
 /// Geometry parameters of the engine; operators are built per domain.
@@ -79,6 +79,9 @@ pub struct LocalGeometry {
     pub block_pixels: usize,
     pub conv_rings: u32,
     pub down_params: DecimationParams,
+    /// Rebuild the convolution geometry by sub-blocks of this many output
+    /// rows at every application instead of holding it for the whole block.
+    pub conv_chunk: Option<usize>,
 }
 
 impl LocalGeometry {
@@ -94,6 +97,7 @@ impl LocalGeometry {
             block_pixels,
             conv_rings: ((kernel_sz - 1) / 2 + 2) as u32,
             down_params: DecimationParams::default(),
+            conv_chunk: None,
         }
     }
 
@@ -120,9 +124,6 @@ impl LocalGeometry {
         (0..n).step_by(self.block_pixels).map(|s| (s..(s + size).min(n)).collect()).collect()
     }
 
-    pub fn conv(&self, dg: usize, domain: &[i64]) -> ConvGeometry {
-        ConvGeometry::new(domain, self.nside(dg), self.kernel_sz, self.l, self.gauge)
-    }
 
     pub fn down(&self, dg: usize, domain: &[i64]) -> Down {
         let (out_ids, forward) = smooth_decimation(domain, self.nside(dg), &self.down_params);
@@ -130,22 +131,27 @@ impl LocalGeometry {
         Down { out_ids, forward, transposed }
     }
 
+    /// Convolution of level `dg` from the grid `grid` to the output `rows`
+    /// (geometry by sub-blocks of `conv_chunk` rows when set).
+    pub fn conv_plan(&self, dg: usize, grid: &[i64], rows: &[i64]) -> ConvPlan {
+        ConvPlan::new(grid, rows, self.nside(dg), self.kernel_sz, self.l, self.gauge, self.conv_chunk)
+    }
+
     /// Wavelet of `x_level` `[R, N_dg]` on `block`: `z` `[R, L, |block|]`.
     pub fn wave(&self, x_level: &[f64], block: &[i64], dg: usize) -> Wave {
         let n = self.pixels(dg);
         let rows = x_level.len() / n;
         let domain = dilate_fine(block, self.nside(dg), self.conv_rings);
-        let conv = self.conv(dg, &domain);
+        let conv = self.conv_plan(dg, &domain, block);
         let x: Vec<f64> = x_level.chunks(n).flat_map(|row| domain.iter().map(move |&i| row[i as usize])).collect();
-        let y = convolution_forward(&conv, &self.kernel, &x, rows);
-        let pos = positions(&domain, block);
-        let (l, kd, m) = (self.l, domain.len(), block.len());
+        let y = conv.forward(&self.kernel, &x, rows);
+        let (l, m) = (self.l, block.len());
         let mut z = Vec::with_capacity(rows * l * m);
         for r in 0..rows {
             for o in 0..l {
-                let re = &y[(r * 2 * l + 2 * o) * kd..][..kd];
-                let im = &y[(r * 2 * l + 2 * o + 1) * kd..][..kd];
-                z.extend(pos.iter().map(|&p| Complex64::new(re[p], im[p])));
+                let re = &y[(r * 2 * l + 2 * o) * m..][..m];
+                let im = &y[(r * 2 * l + 2 * o + 1) * m..][..m];
+                z.extend(re.iter().zip(im).map(|(&a, &b)| Complex64::new(a, b)));
             }
         }
         Wave { z, domain, conv }
@@ -153,20 +159,19 @@ impl LocalGeometry {
 
     /// Adjoint of [`wave`](Self::wave): `gz` `[R, L, |block|]` -> `[R, |domain|]`.
     pub fn wave_adjoint(&self, gz: &[Complex64], block: &[i64], wave: &Wave) -> Vec<f64> {
-        let (l, kd, m) = (self.l, wave.domain.len(), block.len());
+        let (l, m) = (self.l, block.len());
         let rows = gz.len() / (l * m);
-        let pos = positions(&wave.domain, block);
-        let mut g = vec![0f64; rows * 2 * l * kd];
+        let mut g = vec![0f64; rows * 2 * l * m];
         for r in 0..rows {
             for o in 0..l {
                 let src = &gz[(r * l + o) * m..][..m];
-                for (i, &p) in pos.iter().enumerate() {
-                    g[(r * 2 * l + 2 * o) * kd + p] = src[i].re;
-                    g[(r * 2 * l + 2 * o + 1) * kd + p] = src[i].im;
+                for (i, v) in src.iter().enumerate() {
+                    g[(r * 2 * l + 2 * o) * m + i] = v.re;
+                    g[(r * 2 * l + 2 * o + 1) * m + i] = v.im;
                 }
             }
         }
-        convolution_adjoint(&wave.conv, &self.kernel, &g, rows)
+        wave.conv.adjoint(&self.kernel, &g, rows)
     }
 
     /// `maps[dg] -> maps[dg + 1]` with the full-sky weights, block by block:

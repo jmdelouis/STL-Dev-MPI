@@ -107,6 +107,31 @@ fn gradient_matches_finite_difference() {
     }
 }
 
+/// The geometry rebuilt by sub-blocks of rows gives the same statistics
+/// (forward rows are computed identically) and gradients up to the order
+/// in which the sub-blocks' adjoints are added.
+#[test]
+fn geometry_by_sub_blocks() {
+    for case in cases("stats", "stats").into_iter().filter(|c| c.int("nside") == 16 && c.int("block_pixels") == 256) {
+        let s = setup(&case);
+        let run = |chunk: Option<usize>| {
+            let mut geo = s.geo.clone();
+            geo.conv_chunk = chunk;
+            let mut e = LocalEngine::new(&geo, &s.cfg, case.f64("map0"), s.batch, s.channels);
+            let values = e.forward(&s.plan);
+            let mg = e.reverse(&s.plan, &complex(&case, "gradient"));
+            (values, e.analysis_vjp(mg).0)
+        };
+        let (v_whole, g_whole) = run(None);
+        let (v_chunk, g_chunk) = run(Some(37));
+        assert_eq!(v_whole, v_chunk, "{}: statistics", case.name());
+        let scale = g_whole.iter().fold(0f64, |m, v| m.max(v.abs()));
+        let err = max_abs_diff(&g_whole, &g_chunk);
+        eprintln!("{}: sub-block gradient difference {err:.1e} (scale {scale:.1e})", case.name());
+        assert!(err <= 1e-14 * scale, "{}: gradient {err:e}", case.name());
+    }
+}
+
 #[test]
 fn statistics_and_gradients() {
     for case in cases("stats", "stats") {

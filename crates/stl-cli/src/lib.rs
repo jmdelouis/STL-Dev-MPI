@@ -28,6 +28,8 @@ stl-synth --target MAP [options]
   --kernel-size N       stencil (default 5)
   --fewer               has_fewer_convolutions definitions of S3/S4
   --block-pixels N      block size per level (default 16384)
+  --conv-chunk N        rebuild the convolution geometry by sub-blocks of N rows at every
+                        application (less memory, more time; default: whole block)
   --niter N             L-BFGS iterations (default 50)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
@@ -48,6 +50,7 @@ pub struct Args {
     pub kernel_size: usize,
     pub fewer: bool,
     pub block_pixels: usize,
+    pub conv_chunk: Option<usize>,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -68,6 +71,7 @@ impl Args {
             kernel_size: 5,
             fewer: false,
             block_pixels: 16384,
+            conv_chunk: None,
             niter: 50,
             history_size: 10,
             out: None,
@@ -99,6 +103,7 @@ impl Args {
                 "--kernel-size" => a.kernel_size = num(it.next(), k)?,
                 "--fewer" => a.fewer = true,
                 "--block-pixels" => a.block_pixels = num(it.next(), k)?,
+                "--conv-chunk" => a.conv_chunk = Some(num(it.next(), k)?),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -208,7 +213,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let target_map: Vec<f64> = raw.iter().map(|v| (v - mean) / std).collect();
     let npix = target_map.len();
     let j = args.j.unwrap_or_else(|| (64 - (nside as u64).leading_zeros() as usize).saturating_sub(2).max(1));
-    let geo = LocalGeometry::new(nside, args.kernel_size, args.l, Gauge::Cosmo, args.block_pixels);
+    let mut geo = LocalGeometry::new(nside, args.kernel_size, args.l, Gauge::Cosmo, args.block_pixels);
+    geo.conv_chunk = args.conv_chunk;
     let cfg = EngineConfig::new(j, args.fewer);
     let plan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &Family::ALL);
 
@@ -295,6 +301,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "niter": args.niter,
         "evaluations": history.len(),
         "block_pixels": args.block_pixels,
+        "conv_chunk": args.conv_chunk,
         "variables": "map",
         "ranks": comm.size(),
         "setup_seconds": (setup_seconds * 100.0).round() / 100.0,
