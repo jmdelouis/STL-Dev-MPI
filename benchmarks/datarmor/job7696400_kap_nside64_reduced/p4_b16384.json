@@ -1,0 +1,96 @@
+{
+  "J": 5,
+  "L": 2,
+  "block_pixels": 16384,
+  "coefficients": 362,
+  "conv_chunk": null,
+  "evaluations": 25,
+  "fewer": false,
+  "fits": [
+    "/home1/scratch/jmdeloui/stl-mpi/runs/7696400/p4_b16384_target.fits",
+    "/home1/scratch/jmdeloui/stl-mpi/runs/7696400/p4_b16384_synthesis.fits"
+  ],
+  "init": {
+    "file": "/home1/scratch/jmdeloui/stl-mpi/src/fixtures/synthesis/synthesis_kap_nside64_nested_niter20//initial_map.npy",
+    "noise_std": 0.0,
+    "nside": 64
+  },
+  "kernel_size": 5,
+  "loss_final_map": 1.3858298472711072e-6,
+  "loss_first": 0.0029370404658394106,
+  "loss_history": [
+    0.0029370404658394106,
+    0.0029369643952745503,
+    0.0029362801643168677,
+    0.0029294778690416813,
+    0.0028654621358249113,
+    0.002444603854981674,
+    0.002215664827336227,
+    0.0013811251084830814,
+    0.0007528813076825539,
+    0.00008836360474078914,
+    0.000019307594415687655,
+    0.000010426707907336027,
+    8.29260445269396e-6,
+    6.838182023450902e-6,
+    4.799188355721234e-6,
+    3.191999372698084e-6,
+    2.5790709338607294e-6,
+    2.2366832454850786e-6,
+    2.3516055143489098e-6,
+    2.1849849026119478e-6,
+    2.1205634905392885e-6,
+    2.0499956342870496e-6,
+    1.9076071270708724e-6,
+    1.7221084132421817e-6,
+    1.3858298472711072e-6
+  ],
+  "loss_last": 1.3858298472711072e-6,
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      18432,
+      6144,
+      2304,
+      768,
+      192
+    ],
+    "lbfgs_history": 2359296,
+    "maps_and_gradients": 445440,
+    "stored_moduli_and_cotangents": 442368
+  },
+  "memory_floor_bytes_per_rank": [
+    3247104,
+    3308288,
+    3426816,
+    3247104
+  ],
+  "memory_peak_bytes_per_rank": [
+    81125376,
+    83079168,
+    86331392,
+    80973824
+  ],
+  "mode": "rust-local",
+  "niter": 20,
+  "nside": 64,
+  "ranks": 4,
+  "rss_baseline_bytes_per_rank": [
+    27058176,
+    26869760,
+    26849280,
+    26849280
+  ],
+  "seconds": 64.86,
+  "seconds_per_evaluation": 2.595,
+  "setup_seconds": 1.11,
+  "target": {
+    "file": "/home1/scratch/jmdeloui/stl-mpi/data/kap_nside64_nested.npy",
+    "mean": -6.53013265268972e-6,
+    "std": 0.019482180917064607
+  },
+  "timers_seconds": {
+    "forward": 25.6,
+    "reverse": 39.1
+  },
+  "variables": "map"
+}

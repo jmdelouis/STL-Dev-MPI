@@ -1,0 +1,234 @@
+job 7696400.datarmor0 on r1i5n2, 28 slots, fixture /home1/scratch/jmdeloui/stl-mpi/src/fixtures/synthesis/synthesis_kap_nside64_nested_niter20/
+=== 1 ranks, blocks of 16384 pixels
+[rust-local P=1] evaluation    1  loss = 2.937040e-3  t =     8.0 s
+[rust-local P=1] evaluation    2  loss = 2.936964e-3  t =    16.1 s
+[rust-local P=1] evaluation    3  loss = 2.936280e-3  t =    24.2 s
+[rust-local P=1] evaluation    4  loss = 2.929478e-3  t =    32.2 s
+[rust-local P=1] evaluation    5  loss = 2.865462e-3  t =    40.3 s
+[rust-local P=1] evaluation    6  loss = 2.444604e-3  t =    48.3 s
+[rust-local P=1] evaluation    7  loss = 2.215665e-3  t =    56.4 s
+[rust-local P=1] evaluation    8  loss = 1.381125e-3  t =    64.4 s
+[rust-local P=1] evaluation    9  loss = 7.528813e-4  t =    72.5 s
+[rust-local P=1] evaluation   10  loss = 8.836360e-5  t =    80.6 s
+[rust-local P=1] evaluation   11  loss = 1.930759e-5  t =    88.6 s
+[rust-local P=1] evaluation   12  loss = 1.042671e-5  t =    96.7 s
+[rust-local P=1] evaluation   13  loss = 8.292604e-6  t =   104.7 s
+[rust-local P=1] evaluation   14  loss = 6.838182e-6  t =   112.8 s
+[rust-local P=1] evaluation   15  loss = 4.799188e-6  t =   120.9 s
+[rust-local P=1] evaluation   16  loss = 3.191999e-6  t =   128.9 s
+[rust-local P=1] evaluation   17  loss = 2.579071e-6  t =   137.0 s
+[rust-local P=1] evaluation   18  loss = 2.236683e-6  t =   145.1 s
+[rust-local P=1] evaluation   19  loss = 2.351606e-6  t =   153.1 s
+[rust-local P=1] evaluation   20  loss = 2.184985e-6  t =   161.2 s
+[rust-local P=1] evaluation   21  loss = 2.120563e-6  t =   169.3 s
+[rust-local P=1] evaluation   22  loss = 2.049996e-6  t =   177.3 s
+[rust-local P=1] evaluation   23  loss = 1.907607e-6  t =   185.4 s
+[rust-local P=1] evaluation   24  loss = 1.722108e-6  t =   193.5 s
+[rust-local P=1] evaluation   25  loss = 1.385830e-6  t =   201.5 s
+{"evaluations":25,"loss_first":0.0029370404658394496,"loss_last":1.3858298474497623e-6,"ranks":1,"seconds":201.53,"seconds_per_evaluation":8.061}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:28.89
+	Maximum resident set size (kbytes): 100244
+=== 4 ranks, blocks of 16384 pixels
+[rust-local P=4] evaluation    1  loss = 2.937040e-3  t =     2.6 s
+[rust-local P=4] evaluation    2  loss = 2.936964e-3  t =     5.2 s
+[rust-local P=4] evaluation    3  loss = 2.936280e-3  t =     7.8 s
+[rust-local P=4] evaluation    4  loss = 2.929478e-3  t =    10.4 s
+[rust-local P=4] evaluation    5  loss = 2.865462e-3  t =    13.0 s
+[rust-local P=4] evaluation    6  loss = 2.444604e-3  t =    15.5 s
+[rust-local P=4] evaluation    7  loss = 2.215665e-3  t =    18.1 s
+[rust-local P=4] evaluation    8  loss = 1.381125e-3  t =    20.7 s
+[rust-local P=4] evaluation    9  loss = 7.528813e-4  t =    23.3 s
+[rust-local P=4] evaluation   10  loss = 8.836360e-5  t =    25.9 s
+[rust-local P=4] evaluation   11  loss = 1.930759e-5  t =    28.5 s
+[rust-local P=4] evaluation   12  loss = 1.042671e-5  t =    31.1 s
+[rust-local P=4] evaluation   13  loss = 8.292604e-6  t =    33.7 s
+[rust-local P=4] evaluation   14  loss = 6.838182e-6  t =    36.3 s
+[rust-local P=4] evaluation   15  loss = 4.799188e-6  t =    38.9 s
+[rust-local P=4] evaluation   16  loss = 3.191999e-6  t =    41.5 s
+[rust-local P=4] evaluation   17  loss = 2.579071e-6  t =    44.1 s
+[rust-local P=4] evaluation   18  loss = 2.236683e-6  t =    46.7 s
+[rust-local P=4] evaluation   19  loss = 2.351606e-6  t =    49.3 s
+[rust-local P=4] evaluation   20  loss = 2.184985e-6  t =    51.9 s
+[rust-local P=4] evaluation   21  loss = 2.120563e-6  t =    54.5 s
+[rust-local P=4] evaluation   22  loss = 2.049996e-6  t =    57.1 s
+[rust-local P=4] evaluation   23  loss = 1.907607e-6  t =    59.7 s
+[rust-local P=4] evaluation   24  loss = 1.722108e-6  t =    62.3 s
+[rust-local P=4] evaluation   25  loss = 1.385830e-6  t =    64.9 s
+{"evaluations":25,"loss_first":0.0029370404658394106,"loss_last":1.3858298472711072e-6,"ranks":4,"seconds":64.86,"seconds_per_evaluation":2.595}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:07.40
+	Maximum resident set size (kbytes): 84308
+=== 16 ranks, blocks of 16384 pixels
+[rust-local P=16] evaluation    1  loss = 2.937040e-3  t =     1.0 s
+[rust-local P=16] evaluation    2  loss = 2.936964e-3  t =     2.1 s
+[rust-local P=16] evaluation    3  loss = 2.936280e-3  t =     3.1 s
+[rust-local P=16] evaluation    4  loss = 2.929478e-3  t =     4.1 s
+[rust-local P=16] evaluation    5  loss = 2.865462e-3  t =     5.2 s
+[rust-local P=16] evaluation    6  loss = 2.444604e-3  t =     6.2 s
+[rust-local P=16] evaluation    7  loss = 2.215665e-3  t =     7.2 s
+[rust-local P=16] evaluation    8  loss = 1.381125e-3  t =     8.3 s
+[rust-local P=16] evaluation    9  loss = 7.528813e-4  t =     9.3 s
+[rust-local P=16] evaluation   10  loss = 8.836360e-5  t =    10.3 s
+[rust-local P=16] evaluation   11  loss = 1.930759e-5  t =    11.4 s
+[rust-local P=16] evaluation   12  loss = 1.042671e-5  t =    12.4 s
+[rust-local P=16] evaluation   13  loss = 8.292604e-6  t =    13.4 s
+[rust-local P=16] evaluation   14  loss = 6.838182e-6  t =    14.5 s
+[rust-local P=16] evaluation   15  loss = 4.799188e-6  t =    15.5 s
+[rust-local P=16] evaluation   16  loss = 3.191999e-6  t =    16.5 s
+[rust-local P=16] evaluation   17  loss = 2.579071e-6  t =    17.6 s
+[rust-local P=16] evaluation   18  loss = 2.236683e-6  t =    18.6 s
+[rust-local P=16] evaluation   19  loss = 2.351606e-6  t =    19.6 s
+[rust-local P=16] evaluation   20  loss = 2.184985e-6  t =    20.7 s
+[rust-local P=16] evaluation   21  loss = 2.120563e-6  t =    21.7 s
+[rust-local P=16] evaluation   22  loss = 2.049996e-6  t =    22.7 s
+[rust-local P=16] evaluation   23  loss = 1.907607e-6  t =    23.8 s
+[rust-local P=16] evaluation   24  loss = 1.722108e-6  t =    24.8 s
+[rust-local P=16] evaluation   25  loss = 1.385830e-6  t =    25.8 s
+{"evaluations":25,"loss_first":0.0029370404658394275,"loss_last":1.3858298471807599e-6,"ranks":16,"seconds":25.84,"seconds_per_evaluation":1.034}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:27.38
+	Maximum resident set size (kbytes): 51588
+=== 28 ranks, blocks of 16384 pixels
+[rust-local P=28] evaluation    1  loss = 2.937040e-3  t =     0.8 s
+[rust-local P=28] evaluation    2  loss = 2.936964e-3  t =     1.6 s
+[rust-local P=28] evaluation    3  loss = 2.936280e-3  t =     2.4 s
+[rust-local P=28] evaluation    4  loss = 2.929478e-3  t =     3.3 s
+[rust-local P=28] evaluation    5  loss = 2.865462e-3  t =     4.1 s
+[rust-local P=28] evaluation    6  loss = 2.444604e-3  t =     4.9 s
+[rust-local P=28] evaluation    7  loss = 2.215665e-3  t =     5.7 s
+[rust-local P=28] evaluation    8  loss = 1.381125e-3  t =     6.5 s
+[rust-local P=28] evaluation    9  loss = 7.528813e-4  t =     7.3 s
+[rust-local P=28] evaluation   10  loss = 8.836360e-5  t =     8.1 s
+[rust-local P=28] evaluation   11  loss = 1.930759e-5  t =     8.9 s
+[rust-local P=28] evaluation   12  loss = 1.042671e-5  t =     9.7 s
+[rust-local P=28] evaluation   13  loss = 8.292604e-6  t =    10.6 s
+[rust-local P=28] evaluation   14  loss = 6.838182e-6  t =    11.4 s
+[rust-local P=28] evaluation   15  loss = 4.799188e-6  t =    12.2 s
+[rust-local P=28] evaluation   16  loss = 3.191999e-6  t =    13.0 s
+[rust-local P=28] evaluation   17  loss = 2.579071e-6  t =    13.8 s
+[rust-local P=28] evaluation   18  loss = 2.236683e-6  t =    14.6 s
+[rust-local P=28] evaluation   19  loss = 2.351606e-6  t =    15.4 s
+[rust-local P=28] evaluation   20  loss = 2.184985e-6  t =    16.2 s
+[rust-local P=28] evaluation   21  loss = 2.120563e-6  t =    17.0 s
+[rust-local P=28] evaluation   22  loss = 2.049996e-6  t =    17.9 s
+[rust-local P=28] evaluation   23  loss = 1.907607e-6  t =    18.7 s
+[rust-local P=28] evaluation   24  loss = 1.722108e-6  t =    19.5 s
+[rust-local P=28] evaluation   25  loss = 1.385830e-6  t =    20.3 s
+{"evaluations":25,"loss_first":0.0029370404658394275,"loss_last":1.385829847108929e-6,"ranks":28,"seconds":20.3,"seconds_per_evaluation":0.812}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:21.93
+	Maximum resident set size (kbytes): 50132
+=== 1 ranks, blocks of 4096 pixels
+[rust-local P=1] evaluation    1  loss = 2.937040e-3  t =     9.7 s
+[rust-local P=1] evaluation    2  loss = 2.936964e-3  t =    19.5 s
+[rust-local P=1] evaluation    3  loss = 2.936280e-3  t =    29.2 s
+[rust-local P=1] evaluation    4  loss = 2.929478e-3  t =    38.9 s
+[rust-local P=1] evaluation    5  loss = 2.865462e-3  t =    48.7 s
+[rust-local P=1] evaluation    6  loss = 2.444604e-3  t =    58.4 s
+[rust-local P=1] evaluation    7  loss = 2.215665e-3  t =    68.1 s
+[rust-local P=1] evaluation    8  loss = 1.381125e-3  t =    77.8 s
+[rust-local P=1] evaluation    9  loss = 7.528813e-4  t =    87.5 s
+[rust-local P=1] evaluation   10  loss = 8.836360e-5  t =    97.3 s
+[rust-local P=1] evaluation   11  loss = 1.930759e-5  t =   107.0 s
+[rust-local P=1] evaluation   12  loss = 1.042671e-5  t =   116.7 s
+[rust-local P=1] evaluation   13  loss = 8.292604e-6  t =   126.4 s
+[rust-local P=1] evaluation   14  loss = 6.838182e-6  t =   136.1 s
+[rust-local P=1] evaluation   15  loss = 4.799188e-6  t =   145.8 s
+[rust-local P=1] evaluation   16  loss = 3.191999e-6  t =   155.5 s
+[rust-local P=1] evaluation   17  loss = 2.579071e-6  t =   165.2 s
+[rust-local P=1] evaluation   18  loss = 2.236683e-6  t =   174.9 s
+[rust-local P=1] evaluation   19  loss = 2.351606e-6  t =   184.7 s
+[rust-local P=1] evaluation   20  loss = 2.184985e-6  t =   194.4 s
+[rust-local P=1] evaluation   21  loss = 2.120563e-6  t =   204.1 s
+[rust-local P=1] evaluation   22  loss = 2.049996e-6  t =   213.8 s
+[rust-local P=1] evaluation   23  loss = 1.907607e-6  t =   223.5 s
+[rust-local P=1] evaluation   24  loss = 1.722108e-6  t =   233.2 s
+[rust-local P=1] evaluation   25  loss = 1.385830e-6  t =   242.9 s
+{"evaluations":25,"loss_first":0.0029370404658394214,"loss_last":1.3858298471503218e-6,"ranks":1,"seconds":242.9,"seconds_per_evaluation":9.716}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:11.09
+	Maximum resident set size (kbytes): 54184
+=== 1 ranks, blocks of 1024 pixels
+[rust-local P=1] evaluation    1  loss = 2.937040e-3  t =    14.7 s
+[rust-local P=1] evaluation    2  loss = 2.936964e-3  t =    29.4 s
+[rust-local P=1] evaluation    3  loss = 2.936280e-3  t =    44.0 s
+[rust-local P=1] evaluation    4  loss = 2.929478e-3  t =    58.7 s
+[rust-local P=1] evaluation    5  loss = 2.865462e-3  t =    73.4 s
+[rust-local P=1] evaluation    6  loss = 2.444604e-3  t =    88.1 s
+[rust-local P=1] evaluation    7  loss = 2.215665e-3  t =   102.7 s
+[rust-local P=1] evaluation    8  loss = 1.381125e-3  t =   117.4 s
+[rust-local P=1] evaluation    9  loss = 7.528813e-4  t =   132.1 s
+[rust-local P=1] evaluation   10  loss = 8.836360e-5  t =   146.8 s
+[rust-local P=1] evaluation   11  loss = 1.930759e-5  t =   161.5 s
+[rust-local P=1] evaluation   12  loss = 1.042671e-5  t =   176.2 s
+[rust-local P=1] evaluation   13  loss = 8.292604e-6  t =   190.9 s
+[rust-local P=1] evaluation   14  loss = 6.838182e-6  t =   205.6 s
+[rust-local P=1] evaluation   15  loss = 4.799188e-6  t =   220.3 s
+[rust-local P=1] evaluation   16  loss = 3.191999e-6  t =   235.0 s
+[rust-local P=1] evaluation   17  loss = 2.579071e-6  t =   249.7 s
+[rust-local P=1] evaluation   18  loss = 2.236683e-6  t =   264.3 s
+[rust-local P=1] evaluation   19  loss = 2.351606e-6  t =   279.0 s
+[rust-local P=1] evaluation   20  loss = 2.184985e-6  t =   293.7 s
+[rust-local P=1] evaluation   21  loss = 2.120563e-6  t =   308.4 s
+[rust-local P=1] evaluation   22  loss = 2.049996e-6  t =   323.1 s
+[rust-local P=1] evaluation   23  loss = 1.907607e-6  t =   337.8 s
+[rust-local P=1] evaluation   24  loss = 1.722108e-6  t =   352.5 s
+[rust-local P=1] evaluation   25  loss = 1.385830e-6  t =   367.1 s
+{"evaluations":25,"loss_first":0.002937040465839428,"loss_last":1.3858298471550535e-6,"ranks":1,"seconds":367.15,"seconds_per_evaluation":14.686}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:19.00
+	Maximum resident set size (kbytes): 39960
+=== 1 ranks, blocks of 16384 pixels, geometry by sub-blocks of 2048 rows
+[rust-local P=1] evaluation    1  loss = 2.937040e-3  t =    15.4 s
+[rust-local P=1] evaluation    2  loss = 2.936964e-3  t =    30.8 s
+[rust-local P=1] evaluation    3  loss = 2.936280e-3  t =    46.3 s
+[rust-local P=1] evaluation    4  loss = 2.929478e-3  t =    61.7 s
+[rust-local P=1] evaluation    5  loss = 2.865462e-3  t =    77.1 s
+[rust-local P=1] evaluation    6  loss = 2.444604e-3  t =    92.6 s
+[rust-local P=1] evaluation    7  loss = 2.215665e-3  t =   108.0 s
+[rust-local P=1] evaluation    8  loss = 1.381125e-3  t =   123.4 s
+[rust-local P=1] evaluation    9  loss = 7.528813e-4  t =   138.8 s
+[rust-local P=1] evaluation   10  loss = 8.836360e-5  t =   154.2 s
+[rust-local P=1] evaluation   11  loss = 1.930759e-5  t =   169.6 s
+[rust-local P=1] evaluation   12  loss = 1.042671e-5  t =   185.0 s
+[rust-local P=1] evaluation   13  loss = 8.292604e-6  t =   200.4 s
+[rust-local P=1] evaluation   14  loss = 6.838182e-6  t =   215.9 s
+[rust-local P=1] evaluation   15  loss = 4.799188e-6  t =   231.3 s
+[rust-local P=1] evaluation   16  loss = 3.191999e-6  t =   246.7 s
+[rust-local P=1] evaluation   17  loss = 2.579071e-6  t =   262.1 s
+[rust-local P=1] evaluation   18  loss = 2.236683e-6  t =   277.6 s
+[rust-local P=1] evaluation   19  loss = 2.351606e-6  t =   293.0 s
+[rust-local P=1] evaluation   20  loss = 2.184985e-6  t =   308.5 s
+[rust-local P=1] evaluation   21  loss = 2.120563e-6  t =   323.9 s
+[rust-local P=1] evaluation   22  loss = 2.049996e-6  t =   339.4 s
+[rust-local P=1] evaluation   23  loss = 1.907607e-6  t =   354.8 s
+[rust-local P=1] evaluation   24  loss = 1.722108e-6  t =   370.3 s
+[rust-local P=1] evaluation   25  loss = 1.385830e-6  t =   385.7 s
+{"evaluations":25,"loss_first":0.0029370404658394496,"loss_last":1.3858298474370373e-6,"ranks":1,"seconds":385.7,"seconds_per_evaluation":15.428}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:36.42
+	Maximum resident set size (kbytes): 48468
+=== 28 ranks, blocks of 16384 pixels, geometry by sub-blocks of 2048 rows
+[rust-local P=28] evaluation    1  loss = 2.937040e-3  t =     1.0 s
+[rust-local P=28] evaluation    2  loss = 2.936964e-3  t =     2.1 s
+[rust-local P=28] evaluation    3  loss = 2.936280e-3  t =     3.1 s
+[rust-local P=28] evaluation    4  loss = 2.929478e-3  t =     4.1 s
+[rust-local P=28] evaluation    5  loss = 2.865462e-3  t =     5.2 s
+[rust-local P=28] evaluation    6  loss = 2.444604e-3  t =     6.2 s
+[rust-local P=28] evaluation    7  loss = 2.215665e-3  t =     7.2 s
+[rust-local P=28] evaluation    8  loss = 1.381125e-3  t =     8.2 s
+[rust-local P=28] evaluation    9  loss = 7.528813e-4  t =     9.3 s
+[rust-local P=28] evaluation   10  loss = 8.836360e-5  t =    10.3 s
+[rust-local P=28] evaluation   11  loss = 1.930759e-5  t =    11.3 s
+[rust-local P=28] evaluation   12  loss = 1.042671e-5  t =    12.4 s
+[rust-local P=28] evaluation   13  loss = 8.292604e-6  t =    13.4 s
+[rust-local P=28] evaluation   14  loss = 6.838182e-6  t =    14.4 s
+[rust-local P=28] evaluation   15  loss = 4.799188e-6  t =    15.5 s
+[rust-local P=28] evaluation   16  loss = 3.191999e-6  t =    16.5 s
+[rust-local P=28] evaluation   17  loss = 2.579071e-6  t =    17.5 s
+[rust-local P=28] evaluation   18  loss = 2.236683e-6  t =    18.6 s
+[rust-local P=28] evaluation   19  loss = 2.351606e-6  t =    19.6 s
+[rust-local P=28] evaluation   20  loss = 2.184985e-6  t =    20.6 s
+[rust-local P=28] evaluation   21  loss = 2.120563e-6  t =    21.7 s
+[rust-local P=28] evaluation   22  loss = 2.049996e-6  t =    22.7 s
+[rust-local P=28] evaluation   23  loss = 1.907607e-6  t =    23.7 s
+[rust-local P=28] evaluation   24  loss = 1.722108e-6  t =    24.8 s
+[rust-local P=28] evaluation   25  loss = 1.385830e-6  t =    25.8 s
+{"evaluations":25,"loss_first":0.0029370404658394275,"loss_last":1.385829847113514e-6,"ranks":28,"seconds":25.81,"seconds_per_evaluation":1.032}
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:27.49
+	Maximum resident set size (kbytes): 44760
+done Fri Oct 16 11:11:35 GMT 2026

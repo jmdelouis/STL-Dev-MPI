@@ -1,0 +1,87 @@
+{
+  "J": 5,
+  "L": 2,
+  "block_pixels": 1024,
+  "coefficients": 362,
+  "conv_chunk": null,
+  "evaluations": 25,
+  "fewer": false,
+  "fits": [
+    "/home1/scratch/jmdeloui/stl-mpi/runs/7696400/p1_b1024_target.fits",
+    "/home1/scratch/jmdeloui/stl-mpi/runs/7696400/p1_b1024_synthesis.fits"
+  ],
+  "init": {
+    "file": "/home1/scratch/jmdeloui/stl-mpi/src/fixtures/synthesis/synthesis_kap_nside64_nested_niter20//initial_map.npy",
+    "noise_std": 0.0,
+    "nside": 64
+  },
+  "kernel_size": 5,
+  "loss_final_map": 1.3858298471550535e-6,
+  "loss_first": 0.002937040465839428,
+  "loss_history": [
+    0.002937040465839428,
+    0.0029369643952745434,
+    0.0029362801643169163,
+    0.0029294778690417394,
+    0.0028654621358249178,
+    0.0024446038549817578,
+    0.0022156648273362104,
+    0.001381125108484863,
+    0.0007528813076840502,
+    0.00008836360474116996,
+    0.000019307594415810413,
+    0.000010426707907303679,
+    8.292604452710559e-6,
+    6.838182023487086e-6,
+    4.79918835573605e-6,
+    3.1919993727025265e-6,
+    2.579070933841193e-6,
+    2.2366832454609513e-6,
+    2.351605514353628e-6,
+    2.184984902597156e-6,
+    2.1205634905269633e-6,
+    2.049995634269549e-6,
+    1.9076071270154904e-6,
+    1.722108413162034e-6,
+    1.3858298471550535e-6
+  ],
+  "loss_last": 1.3858298471550535e-6,
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 9437184,
+    "maps_and_gradients": 1047552,
+    "stored_moduli_and_cotangents": 688128
+  },
+  "memory_floor_bytes_per_rank": [
+    11172864
+  ],
+  "memory_peak_bytes_per_rank": [
+    40919040
+  ],
+  "mode": "rust-local",
+  "niter": 20,
+  "nside": 64,
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    17620992
+  ],
+  "seconds": 367.15,
+  "seconds_per_evaluation": 14.686,
+  "setup_seconds": 5.92,
+  "target": {
+    "file": "/home1/scratch/jmdeloui/stl-mpi/data/kap_nside64_nested.npy",
+    "mean": -6.53013265268972e-6,
+    "std": 0.019482180917064607
+  },
+  "timers_seconds": {
+    "forward": 140.0,
+    "reverse": 227.0
+  },
+  "variables": "map"
+}

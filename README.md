@@ -65,6 +65,15 @@ source $W/env.sh && cargo build --release -p stl-cli --features mpi
 qsub -v W=$W $W/src/tools/datarmor/synth_nside64.pbs
 ```
 
+On the hpc cluster (Slurm, RHEL 9, OpenMPI 5; no Rust or clang module:
+rustup toolchain and the PyPI `libclang` wheel under `$W`, `$HOME/stl-mpi`
+since `$WORK` was full; compilation on a compute node):
+
+```bash
+sbatch --export=ALL,W=$W $W/src/tools/hpc/build.slurm
+sbatch --export=ALL,W=$W $W/src/tools/hpc/synth_nside64.slurm
+```
+
 ## Status
 
 Milestone 1 (geometry) against `STL_main/TorchGeometry.py`:
@@ -152,17 +161,49 @@ evaluations, same initial map). One Datarmor node (2 x Xeon E5-2680 v4,
 STL-Dev on the same case (WSL, 4 torch threads): 12.6 to 18 s per
 evaluation, 1.90 GB peak RSS (1.55 GB above its baseline).
 
-Memory. The block-independent state (maps, stored moduli, their
-cotangents, L-BFGS history) is 11 MB on one rank at nside 64 and shrinks
-with the share of the sky (0.84 MB per rank at 28 ranks); the inputs read
-by every rank add 18 to 29 MB. The peak is set by the transients of one
-block, about 18 kB per block pixel at L = 2, kernel 5 (316 MB for blocks
-of 16384, 65 MB for 1024): the convolution geometry of the block domain is
-built with 8-byte positions and keeps the raw interpolation buffers until
-the binding is done. This cost is independent of nside; it is the first
-target of milestone 6 (narrower indices, streaming binding, geometry by
-sub-blocks), together with the halo of small levels that every rank holds
-(the per-rank peak stops shrinking beyond 16 ranks at nside 64).
+Memory, first version. The block-independent state (maps, stored moduli,
+their cotangents, L-BFGS history) is 11 MB on one rank at nside 64 and
+shrinks with the share of the sky (0.84 MB per rank at 28 ranks). The peak
+was set by the transients of one block, about 18 kB per block pixel: the
+convolution geometry of the whole block domain, with 8-byte positions and
+the raw interpolation buffers kept until the binding was done.
+
+Block transients reduced (commit "Bound the block transients"): binding
+pixel by pixel, `u32` positions, geometry for the output rows only (`a1`),
+second wavelets evaluated on the block only, optional geometry by
+sub-blocks of rows (`--conv-chunk`), and a fixed glibc mmap threshold so
+that freed block buffers are returned to the system. The geometry costs
+`4 G P (4 + 8)` bytes per output row (2.4 kB at L = 2, kernel 5). Same
+results to the bit in whole-block mode.
+
+| Datarmor, 1 node (Intel MPI 2019), job 7696400 | s / evaluation | Peak RSS per rank | of which above the MPI/input baseline |
+|---|---|---|---|
+| 1 rank, blocks of 16384 | 8.06 (was 9.15) | 103 MB (was 316) | 85 MB |
+| 1 rank, blocks of 4096 | 9.72 | 56 MB | 38 MB |
+| 1 rank, blocks of 1024 | 14.69 | 41 MB | 23 MB |
+| 1 rank, geometry by sub-blocks of 2048 rows | 15.43 | 50 MB | 32 MB |
+| 28 ranks, blocks of 16384 | 0.81 (was 1.19) | 48 - 51 MB (was 81 - 99) | 21 - 24 MB |
+| 28 ranks, sub-blocks of 2048 rows | 1.03 | 45 - 46 MB | 18 - 19 MB |
+
+hpc cluster (Slurm, one node of 2 x AMD EPYC 9655, OpenMPI 5.0.11), job
+1523174, same case: 25 / 25 loss values identical to STL-Dev at the
+printed precision for every run (max relative difference 2.2e-10).
+
+| Ranks | s / evaluation | Speed-up | Peak RSS per rank | of which above the MPI baseline |
+|---|---|---|---|---|
+| 1 | 3.26 | 1.0 | 278 MB | 87 MB |
+| 4 | 1.05 | 3.1 | 399 - 407 MB | 57 - 62 MB |
+| 16 | 0.49 | 6.7 | 385 - 391 MB | 38 - 42 MB |
+| 64 | 0.29 | 11.3 | 290 - 300 MB | 72 - 81 MB |
+| 128 | 0.28 | 11.5 | 291 - 355 MB | 59 - 122 MB |
+
+OpenMPI 5 starts every rank at 190 to 350 MB resident (Intel MPI on
+Datarmor: 18 to 29 MB); the code's own memory is the last column. At
+nside 64 the work saturates beyond 64 ranks (a rank owns 384 pixels of
+level 0 at 128 ranks) and the remaining per-rank memory is the halo of the
+small levels and the all-to-all buffers. Every rank also holds the
+full-sky target and initial maps in this version (0.8 MB at nside 64, but
+800 MB at nside 2048): to be read by slices before milestone 6.
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
