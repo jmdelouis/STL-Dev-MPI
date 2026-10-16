@@ -1,0 +1,51 @@
+# STL-Dev-MPI
+
+Pyramidal scattering-covariance statistics and gradients on HEALPix maps,
+in Rust with MPI, block-wise so that the memory of every rank is bounded by
+its share of the sky. Port of the patch-local engine of
+[STL-Dev](https://github.com/STL-Proj/STL-Dev) (branch `HealpixUpdate`);
+see `CLAUDE.md` for the model, the architecture and the milestones.
+
+## Layout
+
+| Path | Content |
+|---|---|
+| `crates/stl-core` | HEALPix geometry (centres, `ring2nest`, bilinear interpolation, stencil rotation, binding), partial convolution, smooth decimation; no MPI, `f64` |
+| `tools/dump_reference.py` | dumps STL-Dev outputs as fixtures |
+| `fixtures/<suite>/` | `.npy` arrays + `meta.json` per case, `index.json` per suite |
+
+## Tests
+
+From WSL (keep the build directory on WSL-native storage):
+
+```bash
+CARGO_TARGET_DIR=~/.cache/stl-dev-mpi-target cargo test --release
+```
+
+Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
+`~/stl-deps/venv-cpu`; override with `STL_DEV` / `STL_PYTHON`):
+
+```bash
+tools/dump_reference.sh geometry
+```
+
+## Status
+
+Milestone 1 (geometry) against `STL_main/TorchGeometry.py`:
+
+| Quantity | Agreement |
+|---|---|
+| `nest2xyf`, `ring2nest`, `kth_neighbourhood`, decimation sparsity, `complete` flags | exact |
+| pixel centres, rotations, stencil grid | <= 1e-14 |
+| ring interpolation, decimation weights | <= 1e-12 |
+| NESTED interpolation weights | <= max(1e-12, 1e-14 nside) |
+| convolution outputs on complete rows | <= max(1e-12, 128 eps nside / sin theta), observed 1.2e-12 (nside 32) to 1.7e-11 (nside 1024) |
+
+The last two are bounded by the rounding of the reference path itself:
+torch evaluates `acos` with SLEEF (1 ulp from glibc on ~10 % of inputs) and
+the directions' colatitudes go through `acos(z)`, amplified by
+`1 / sin(theta)` and by the pixel size in the bilinear weights.
+
+Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
+healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
+neither the input nor the sorted order; STL-Dev always passes sorted ids.

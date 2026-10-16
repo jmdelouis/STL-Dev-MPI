@@ -1,0 +1,14 @@
+[package]
+name = "stl-core"
+description = "HEALPix geometry and block-wise scattering-covariance kernels (no MPI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cdshealpix.workspace = true
+
+[dev-dependencies]
+npyz.workspace = true
+serde_json.workspace = true

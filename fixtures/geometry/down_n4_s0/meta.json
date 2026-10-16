@@ -1,0 +1,8 @@
+{
+ "kind": "down",
+ "name": "down_n4_s0",
+ "nside": 4,
+ "block_start": 0,
+ "block_pixels": 192,
+ "halo_rings": 8
+}

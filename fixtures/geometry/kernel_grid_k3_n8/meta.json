@@ -1,0 +1,6 @@
+{
+ "kind": "kernel_grid",
+ "name": "kernel_grid_k3_n8",
+ "kernel_sz": 3,
+ "nside": 8
+}

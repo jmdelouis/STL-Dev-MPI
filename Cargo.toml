@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/stl-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jmdelouis/STL-Dev-MPI"
+
+[workspace.dependencies]
+cdshealpix = "0.10"
+npyz = "0.8"
+serde_json = "1"
+
+[profile.release]
+debug = 1
+
+# No fast-math anywhere: the default float semantics are kept (CLAUDE.md, numerics).

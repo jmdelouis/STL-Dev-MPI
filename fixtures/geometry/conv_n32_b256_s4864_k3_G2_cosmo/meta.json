@@ -1,0 +1,12 @@
+{
+ "kind": "conv",
+ "name": "conv_n32_b256_s4864_k3_G2_cosmo",
+ "nside": 32,
+ "kernel_sz": 3,
+ "G": 2,
+ "gauge": "cosmo",
+ "block_start": 4864,
+ "block_pixels": 256,
+ "halo_rings": 3,
+ "raw_binding": false
+}

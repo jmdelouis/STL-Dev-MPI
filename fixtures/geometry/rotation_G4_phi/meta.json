@@ -1,0 +1,6 @@
+{
+ "kind": "rotation",
+ "name": "rotation_G4_phi",
+ "G": 4,
+ "gauge": "phi"
+}

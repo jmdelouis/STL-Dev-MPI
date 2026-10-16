@@ -1,0 +1,6 @@
+{
+ "kind": "rotation",
+ "name": "rotation_G2_cosmo",
+ "G": 2,
+ "gauge": "cosmo"
+}

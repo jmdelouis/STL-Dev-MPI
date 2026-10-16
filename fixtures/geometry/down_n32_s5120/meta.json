@@ -1,0 +1,8 @@
+{
+ "kind": "down",
+ "name": "down_n32_s5120",
+ "nside": 32,
+ "block_start": 5120,
+ "block_pixels": 256,
+ "halo_rings": 8
+}

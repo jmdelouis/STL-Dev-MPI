@@ -1,0 +1,12 @@
+{
+ "kind": "conv",
+ "name": "conv_n128_b256_s196352_k5_G2_phi",
+ "nside": 128,
+ "kernel_sz": 5,
+ "G": 2,
+ "gauge": "phi",
+ "block_start": 196352,
+ "block_pixels": 256,
+ "halo_rings": 4,
+ "raw_binding": false
+}

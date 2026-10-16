@@ -1,0 +1,6 @@
+{
+ "kind": "neighbours",
+ "name": "neighbours_n32_k3",
+ "nside": 32,
+ "k": 3
+}
