@@ -184,6 +184,42 @@ impl Kernel {
     }
 }
 
+/// Transpose of [`convolution_forward`] (`AdjointOps.convolution_adjoint`):
+/// `g` `[B, G * C_out, K]` -> `[B, C_in, K]`, scattering in the reference
+/// order (gauge, bilinear neighbour, pixel, tap).
+pub fn convolution_adjoint(geo: &ConvGeometry, ker: &Kernel, g: &[f64], batch: usize) -> Vec<f64> {
+    let (kk, pp, gg) = (geo.k, geo.p, geo.g);
+    assert_eq!(ker.g, gg);
+    assert_eq!(ker.p, pp);
+    let co = ker.c_out;
+    assert_eq!(g.len(), batch * gg * co * kk);
+    let mut out = vec![0f64; batch * ker.c_in * kk];
+    let mut taps = vec![0f64; kk * pp];
+    for b in 0..batch {
+        for gi in 0..gg {
+            for c in 0..ker.c_in {
+                for k in 0..kk {
+                    for p in 0..pp {
+                        let mut s = 0.0;
+                        for o in 0..co {
+                            s += g[(b * gg * co + gi * co + o) * kk + k] * ker.at(gi, c, o, p);
+                        }
+                        taps[k * pp + p] = s;
+                    }
+                }
+                let dst = &mut out[(b * ker.c_in + c) * kk..][..kk];
+                for n in 0..4 {
+                    let base = geo.at(n, gi, 0, 0);
+                    for (i, &t) in taps.iter().enumerate() {
+                        dst[geo.pos[base + i]] += t * geo.w[base + i];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Linear convolution of `x` `[B, C_in, K]` -> `[B, G * C_out, K]` (no bias).
 pub fn convolution_forward(geo: &ConvGeometry, ker: &Kernel, x: &[f64], batch: usize) -> Vec<f64> {
     let (kk, pp, gg) = (geo.k, geo.p, geo.g);

@@ -10,7 +10,7 @@ see `CLAUDE.md` for the model, the architecture and the milestones.
 
 | Path | Content |
 |---|---|
-| `crates/stl-core` | HEALPix geometry (centres, `ring2nest`, bilinear interpolation, stencil rotation, binding), partial convolution, smooth decimation; no MPI, `f64` |
+| `crates/stl-core` | HEALPix geometry (centres, `ring2nest`, bilinear interpolation, stencil rotation, binding), wavelet kernel, partial convolution and its adjoint, smooth decimation, block-wise `wave` / `decimate` / pieces and their transposes (`local.rs`); no MPI, `f64` |
 | `tools/dump_reference.py` | dumps STL-Dev outputs as fixtures |
 | `fixtures/<suite>/` | `.npy` arrays + `meta.json` per case, `index.json` per suite |
 
@@ -26,7 +26,7 @@ Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
 `~/stl-deps/venv-cpu`; override with `STL_DEV` / `STL_PYTHON`):
 
 ```bash
-tools/dump_reference.sh geometry
+tools/dump_reference.sh geometry block
 ```
 
 ## Status
@@ -45,6 +45,18 @@ The last two are bounded by the rounding of the reference path itself:
 torch evaluates `acos` with SLEEF (1 ulp from glibc on ~10 % of inputs) and
 the directions' colatitudes go through `acos(z)`, amplified by
 `1 / sin(theta)` and by the pixel size in the bilinear weights.
+
+Milestone 2 (one block) against `STL_main/LocalGeometry.py` and
+`AdjointOps.py`, fixtures `fixtures/block` (nside 16, 32, 128; `L` 2 and 4;
+kernels 3 and 5; all levels):
+
+| Quantity | Agreement |
+|---|---|
+| wavelet kernel | <= 1e-15 |
+| `wave` (wavelet on a block) and `wave_adjoint` | <= 8e-14 (0.02 of the noise bound above) |
+| `decimate`, `decimate_adjoint`, `piece_forward`, `piece_adjoint`, supports and domains | exact ids, <= 4e-14 values |
+| `modulus_vjp` | <= 1e-12 |
+| `<W x, g> = <x, W^T g>` | 1e-12 relative |
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in

@@ -1,0 +1,11 @@
+{
+ "kind": "wavelet",
+ "name": "wavelet_n128_J3_L4_k5",
+ "nside": 128,
+ "J": 3,
+ "L": 4,
+ "kernel_sz": 5,
+ "block_pixels": 1024,
+ "gauge": "cosmo",
+ "conv_rings": 4
+}

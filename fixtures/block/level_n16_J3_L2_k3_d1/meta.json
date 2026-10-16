@@ -1,0 +1,13 @@
+{
+ "kind": "level",
+ "name": "level_n16_J3_L2_k3_d1",
+ "nside": 16,
+ "J": 3,
+ "L": 2,
+ "kernel_sz": 3,
+ "block_pixels": 256,
+ "gauge": "cosmo",
+ "conv_rings": 3,
+ "dg": 1,
+ "down_rings": 4
+}

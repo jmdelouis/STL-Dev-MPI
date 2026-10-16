@@ -201,6 +201,75 @@ def dump_geometry():
     s.close()
 
 
+def local_geometry(nside, J, L, kernel_sz, block_pixels):
+    """``LocalGeometry`` of a float64 sphere operator (torch geometry, no caches)."""
+    from STL_main.LocalGeometry import LocalGeometry
+    from STL_main.STL_Healpix_Kernel_Torch import STL_Healpix_Kernel_Torch
+
+    data = STL_Healpix_Kernel_Torch(torch.zeros(12 * nside**2, dtype=torch.float64), nside=nside)
+    op = data.get_ST_op(J=J, L=L, norm="vanilla", compute_PS=False,
+                        wavelet_op_kwargs=dict(kernel_size=kernel_sz, ellipsoid="sphere", conv_cache_dir=None))
+    return LocalGeometry(op.wavelet_op, block_pixels=block_pixels, cache_downs=False)
+
+
+def dump_block():
+    """Milestone 2: wavelet on a block and its adjoint, block-wise decimation
+    of a level and its transpose, chains of decimation pieces and their
+    transposes (``LocalGeometry.wave``, ``wave_adjoint``, ``decimate``,
+    ``decimate_adjoint``, ``piece_forward``, ``piece_adjoint``)."""
+    from STL_main.AdjointOps import modulus_vjp
+
+    s = Suite("block")
+    gen = torch.Generator().manual_seed(20261017)
+    B, C = 1, 2
+    for nside, J, L, kernel_sz, block_pixels in [(16, 3, 2, 3, 256), (32, 4, 4, 5, 256), (128, 3, 4, 5, 1024)]:
+        geo = local_geometry(nside, J, L, kernel_sz, block_pixels)
+        w = geo.w
+        tag = f"n{nside}_J{J}_L{L}_k{kernel_sz}"
+        common = dict(nside=nside, J=J, L=L, kernel_sz=kernel_sz, block_pixels=block_pixels,
+                      gauge=w.gauge_type, conv_rings=geo.conv_rings)
+        s.case("wavelet", f"wavelet_{tag}", common, weights=w._wav_weights)
+        maps = [torch.randn(B, C, geo.pixels(0), generator=gen, dtype=torch.float64)]
+        for dg in range(J - 1):
+            maps.append(geo.decimate(maps[-1], dg))
+        for dg in range(J):
+            meta = dict(common, dg=dg, down_rings=geo.down_rings(dg))
+            s.case("level", f"level_{tag}_d{dg}", meta, x=maps[dg])
+            blocks = geo.blocks(dg)
+            for b in sorted({0, len(blocks) // 2, len(blocks) - 1}):
+                block = blocks[b]
+                z, domain, conv = geo.wave(maps[dg], block, dg)
+                gz = torch.randn(z.shape, generator=gen, dtype=torch.complex128)
+                gx = geo.wave_adjoint(gz, block, domain, conv)
+                s.case("wave", f"wave_{tag}_d{dg}_b{b}", dict(meta, block=b, block_start=int(block[0])),
+                       block=block, domain=domain, z_re=z.real, z_im=z.imag,
+                       gz_re=gz.real, gz_im=gz.imag, gx=gx)
+                # Chain of pieces of |z| from level dg to the coarsest level.
+                a, support = z.abs(), block
+                arrays = dict(block=block, a0=a)
+                for level in range(dg, J - 1):
+                    a, support = geo.piece_forward(a, support, level)
+                    arrays[f"a{level - dg + 1}"] = a
+                    arrays[f"support{level - dg + 1}"] = support
+                steps = J - 1 - dg
+                if steps > 0:
+                    supports = [block] + [arrays[f"support{i}"] for i in range(1, steps + 1)]
+                    g = torch.randn(a.shape, generator=gen, dtype=torch.float64)
+                    arrays[f"g{steps}"] = g
+                    for level in range(J - 2, dg - 1, -1):
+                        i = level - dg
+                        g = geo.piece_adjoint(g, supports[i], supports[i + 1], level)
+                        arrays[f"g{i}"] = g
+                    arrays["gz_re"], arrays["gz_im"] = (lambda v: (v.real, v.imag))(modulus_vjp(z, g))
+                    s.case("pieces", f"pieces_{tag}_d{dg}_b{b}", dict(meta, block=b, steps=steps), **arrays)
+            if dg < J - 1:
+                g = torch.randn(B, C, geo.pixels(dg + 1), generator=gen, dtype=torch.float64)
+                # Input: the "level" case of dg.
+                s.case("decimate", f"decimate_{tag}_d{dg}", meta, y=maps[dg + 1],
+                       g=g, gx=geo.decimate_adjoint(g, dg))
+    s.close()
+
+
 def check_against_local_geometry():
     """The replicated candidate logic must give LocalGeometry.torch_down's matrix."""
     from STL_main.LocalGeometry import LocalGeometry
@@ -220,9 +289,11 @@ def check_against_local_geometry():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("suites", nargs="+", choices=["geometry"])
+    parser.add_argument("suites", nargs="+", choices=["geometry", "block"])
     args = parser.parse_args()
     torch.set_num_threads(4)
     if "geometry" in args.suites:
         check_against_local_geometry()
         dump_geometry()
+    if "block" in args.suites:
+        dump_block()

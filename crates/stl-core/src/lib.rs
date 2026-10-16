@@ -9,5 +9,7 @@
 pub mod conv;
 pub mod decimation;
 pub mod healpix;
+pub mod local;
 pub mod neighbours;
 pub mod stencil;
+pub mod wavelet;

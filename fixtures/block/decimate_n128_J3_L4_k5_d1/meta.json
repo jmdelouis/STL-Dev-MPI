@@ -1,0 +1,13 @@
+{
+ "kind": "decimate",
+ "name": "decimate_n128_J3_L4_k5_d1",
+ "nside": 128,
+ "J": 3,
+ "L": 4,
+ "kernel_sz": 5,
+ "block_pixels": 1024,
+ "gauge": "cosmo",
+ "conv_rings": 4,
+ "dg": 1,
+ "down_rings": 4
+}

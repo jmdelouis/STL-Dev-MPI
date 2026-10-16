@@ -1,0 +1,15 @@
+{
+ "kind": "wave",
+ "name": "wave_n32_J4_L4_k5_d2_b0",
+ "nside": 32,
+ "J": 4,
+ "L": 4,
+ "kernel_sz": 5,
+ "block_pixels": 256,
+ "gauge": "cosmo",
+ "conv_rings": 4,
+ "dg": 2,
+ "down_rings": 4,
+ "block": 0,
+ "block_start": 0
+}

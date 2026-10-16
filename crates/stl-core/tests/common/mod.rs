@@ -75,6 +75,19 @@ pub fn cases(suite: &str, kind: &str) -> Vec<Case> {
     out
 }
 
+/// Rounding noise of a convolution output at pixel `id`: the direction's
+/// colatitude goes through `acos(z)`, whose ulp error (glibc here, SLEEF in
+/// torch) is amplified by `1 / sin(theta)`, and the bilinear weights are
+/// linear in it over one pixel (`~nside`); the output sums `P` taps of O(1)
+/// data and kernel.  The worst geometry fixture (nside 1024, equatorial
+/// corner of face 4, 1.7e-11) is 0.45 of it; a porting error shows up as
+/// orders of magnitude.
+pub fn conv_noise(id: i64, nside: i64) -> f64 {
+    let (theta, _) = stl_core::healpix::pix2ang_nest(id, nside);
+    let s = theta.sin().max(1.0 / nside as f64);
+    1e-12f64.max(f64::EPSILON * 128.0 * nside as f64 / s)
+}
+
 /// Largest absolute difference.
 pub fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len());

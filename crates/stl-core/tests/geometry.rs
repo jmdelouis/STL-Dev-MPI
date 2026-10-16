@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{cases, max_abs_diff};
+use common::{cases, conv_noise, max_abs_diff};
 use std::collections::BTreeMap;
 use stl_core::conv::{convolution_forward, ConvGeometry, Kernel};
 use stl_core::decimation::{smooth_decimation, DecimationParams};
@@ -71,18 +71,6 @@ fn same_operator(a: &BTreeMap<i64, f64>, b: &BTreeMap<i64, f64>, tol: f64) -> bo
 /// them by about `4e-16 * nside`: 1e-12, relaxed above nside 100.
 fn weight_tol(nside: i64) -> f64 {
     TOL.max(1e-14 * nside as f64)
-}
-
-/// Rounding noise of a convolution output: the direction's colatitude goes
-/// through `acos(z)`, whose ulp error is amplified by `1 / sin(theta)`, and
-/// the weights are linear in it over one pixel (`~nside`); the output sums
-/// `P` taps of O(1) data and kernel.  The worst fixture case (nside 1024,
-/// equatorial corner of face 4, 1.7e-11) is 0.45 of it; a porting error
-/// shows up as orders of magnitude.
-fn conv_noise(id: i64, nside: i64) -> f64 {
-    let (theta, _) = stl_core::healpix::pix2ang_nest(id, nside);
-    let s = theta.sin().max(1.0 / nside as f64);
-    TOL.max(f64::EPSILON * 128.0 * nside as f64 / s)
 }
 
 #[test]
