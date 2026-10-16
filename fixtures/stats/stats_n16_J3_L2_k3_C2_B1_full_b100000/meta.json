@@ -1,0 +1,20 @@
+{
+ "kind": "stats",
+ "name": "stats_n16_J3_L2_k3_C2_B1_full_b100000",
+ "nside": 16,
+ "J": 3,
+ "L": 2,
+ "kernel_sz": 3,
+ "channels": 2,
+ "batch": 1,
+ "fewer": false,
+ "block_pixels": 100000,
+ "gauge": "cosmo",
+ "j_to_dg": [
+  0,
+  1,
+  2
+ ],
+ "levels": 3,
+ "n_coefficients": 456
+}

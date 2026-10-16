@@ -26,7 +26,7 @@ Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
 `~/stl-deps/venv-cpu`; override with `STL_DEV` / `STL_PYTHON`):
 
 ```bash
-tools/dump_reference.sh geometry block
+tools/dump_reference.sh geometry block stats
 ```
 
 ## Status
@@ -57,6 +57,25 @@ kernels 3 and 5; all levels):
 | `decimate`, `decimate_adjoint`, `piece_forward`, `piece_adjoint`, supports and domains | exact ids, <= 4e-14 values |
 | `modulus_vjp` | <= 1e-12 |
 | `<W x, g> = <x, W^T g>` | 1e-12 relative |
+
+Milestone 3 (single process) against `STL_main/LocalScattering.py`
+(`LocalEngine.forward` / `reverse` as `apply_local` / `vjp_local` run them),
+fixtures `fixtures/stats`: nside 16 and 32, `J` 3 and 4, `L` 2 and 4,
+kernels 3 and 5, 1 and 2 channels, batch 1 and 2, both S3/S4 definitions,
+blocks of 64 pixels to whole levels, shared resolutions `dg = (0, 1, 1, 2)`;
+218 to 5860 coefficients:
+
+| Quantity | Agreement |
+|---|---|
+| plan (`build_plan`) | identical |
+| maps of every level, stored moduli `m[d][n]` | <= 1e-12 |
+| statistics (O(1)) | <= 7e-16 (tolerance 1e-11 + 1e-10 relative) |
+| map cotangents of every level, band gradients (O(1e-2)) | <= 9e-16 (tolerance 1e-10 + 1e-9 relative) |
+| gradient vs central finite difference of the Rust statistics | 2.5e-9 relative |
+
+`stl_core::engine::LocalEngine` keeps the STL-Dev memory model: per block
+fields on `block + halo`, globally the maps, their cotangents and the
+stored moduli with their cotangents.
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in

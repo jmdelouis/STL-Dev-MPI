@@ -8,8 +8,10 @@
 
 pub mod conv;
 pub mod decimation;
+pub mod engine;
 pub mod healpix;
 pub mod local;
 pub mod neighbours;
+pub mod plan;
 pub mod stencil;
 pub mod wavelet;

@@ -1,0 +1,166 @@
+[
+ {
+  "kind": "stats",
+  "name": "stats_n16_J3_L2_k3_C2_B2_full_b64",
+  "nside": 16,
+  "J": 3,
+  "L": 2,
+  "kernel_sz": 3,
+  "channels": 2,
+  "batch": 2,
+  "fewer": false,
+  "block_pixels": 64,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2
+  ],
+  "levels": 3,
+  "n_coefficients": 456
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n16_J3_L2_k3_C2_B2_fewer_b64",
+  "nside": 16,
+  "J": 3,
+  "L": 2,
+  "kernel_sz": 3,
+  "channels": 2,
+  "batch": 2,
+  "fewer": true,
+  "block_pixels": 64,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2
+  ],
+  "levels": 3,
+  "n_coefficients": 456
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n16_J3_L2_k3_C2_B1_full_b100000",
+  "nside": 16,
+  "J": 3,
+  "L": 2,
+  "kernel_sz": 3,
+  "channels": 2,
+  "batch": 1,
+  "fewer": false,
+  "block_pixels": 100000,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2
+  ],
+  "levels": 3,
+  "n_coefficients": 456
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n16_J3_L4_k5_C1_B1_full_b256",
+  "nside": 16,
+  "J": 3,
+  "L": 4,
+  "kernel_sz": 5,
+  "channels": 1,
+  "batch": 1,
+  "fewer": false,
+  "block_pixels": 256,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2
+  ],
+  "levels": 3,
+  "n_coefficients": 762
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n32_J4_L4_k5_C1_B1_full_b256",
+  "nside": 32,
+  "J": 4,
+  "L": 4,
+  "kernel_sz": 5,
+  "channels": 1,
+  "batch": 1,
+  "fewer": false,
+  "block_pixels": 256,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "levels": 4,
+  "n_coefficients": 1474
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n32_J4_L2_k3_C2_B1_fewer_b1024",
+  "nside": 32,
+  "J": 4,
+  "L": 2,
+  "kernel_sz": 3,
+  "channels": 2,
+  "batch": 1,
+  "fewer": true,
+  "block_pixels": 1024,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "levels": 4,
+  "n_coefficients": 852
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n32_J4_L4_k5_C2_B1_full_b512",
+  "nside": 32,
+  "J": 4,
+  "L": 4,
+  "kernel_sz": 5,
+  "channels": 2,
+  "batch": 1,
+  "fewer": false,
+  "block_pixels": 512,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "levels": 4,
+  "n_coefficients": 5860
+ },
+ {
+  "kind": "stats",
+  "name": "stats_n32_J4_L2_k5_C1_B1_full_b256_dg0112",
+  "nside": 32,
+  "J": 4,
+  "L": 2,
+  "kernel_sz": 5,
+  "channels": 1,
+  "batch": 1,
+  "fewer": false,
+  "block_pixels": 256,
+  "gauge": "cosmo",
+  "j_to_dg": [
+   0,
+   1,
+   1,
+   2
+  ],
+  "levels": 3,
+  "n_coefficients": 218
+ }
+]

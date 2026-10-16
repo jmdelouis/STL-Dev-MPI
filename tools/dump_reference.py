@@ -270,6 +270,73 @@ def dump_block():
     s.close()
 
 
+STATS_CASES = [
+    # nside, J, L, kernel, channels, batch, fewer, block_pixels, j_to_dg
+    (16, 3, 2, 3, 2, 2, False, 64, None),
+    (16, 3, 2, 3, 2, 2, True, 64, None),
+    (16, 3, 2, 3, 2, 1, False, 100000, None),
+    (16, 3, 4, 5, 1, 1, False, 256, None),
+    (32, 4, 4, 5, 1, 1, False, 256, None),
+    (32, 4, 2, 3, 2, 1, True, 1024, None),
+    (32, 4, 4, 5, 2, 1, False, 512, None),
+    (32, 4, 2, 5, 1, 1, False, 256, (0, 1, 1, 2)),
+]
+
+
+def dump_stats():
+    """Milestone 3: ``apply_local`` / ``vjp_local`` (``LocalEngine`` forward
+    then reverse, as ``vjp_local`` runs them) on random maps."""
+    from STL_main.LocalScattering import LocalEngine, _prepare, _values
+    from STL_main.Pyramid import HealpixPyramid
+    from STL_main.STL_Healpix_Kernel_Torch import STL_Healpix_Kernel_Torch
+
+    s = Suite("stats")
+    for nside, J, L, kernel_sz, channels, batch, fewer, block_pixels, j_to_dg in STATS_CASES:
+        torch.manual_seed(1000 * nside + 100 * J + 10 * L + channels)
+        data = STL_Healpix_Kernel_Torch(torch.randn(batch, channels, 12 * nside**2, dtype=torch.float64), nside=nside)
+        op = data.get_ST_op(J=J, L=L, norm="vanilla", compute_PS=False, has_fewer_convolutions=fewer,
+                            wavelet_op_kwargs=dict(kernel_size=kernel_sz, ellipsoid="sphere", conv_cache_dir=None))
+        if j_to_dg is not None:
+            op.wavelet_op.j_to_dg = list(j_to_dg)
+        p = HealpixPyramid.from_map(data, op.wavelet_op)
+        geo = LocalGeometry_for(op, block_pixels)
+        plan, geo = _prepare(op, p, None, geo)
+        engine = LocalEngine(op, p, geo)
+        values = engine.forward(plan, _values(engine.maps, plan))
+        gradient = torch.randn(values.shape, dtype=torch.complex128)
+        active = (gradient != 0).any(dim=0).cpu().tolist()
+        maps_gradient = engine.reverse(plan, gradient, active, [torch.zeros_like(x) for x in engine.maps])
+        bands = geo.analysis_vjp(p, [g.clone() for g in maps_gradient])
+        name = f"stats_n{nside}_J{J}_L{L}_k{kernel_sz}_C{channels}_B{batch}_{'fewer' if fewer else 'full'}_b{block_pixels}"
+        if j_to_dg is not None:
+            name += "_dg" + "".join(map(str, j_to_dg))
+        arrays = dict(values_re=values.real, values_im=values.imag,
+                      gradient_re=gradient.real, gradient_im=gradient.imag)
+        for d, x in enumerate(engine.maps):
+            arrays[f"map{d}"] = x
+        for d, g in enumerate(maps_gradient):
+            arrays[f"maps_gradient{d}"] = g
+        for d, g in enumerate(bands):
+            arrays[f"band_gradient{d}"] = g
+        for d, row in engine.m.items():
+            for n, m in row.items():
+                arrays[f"m{d}_{n}"] = m
+        meta = dict(nside=nside, J=J, L=L, kernel_sz=kernel_sz, channels=channels, batch=batch,
+                    fewer=fewer, block_pixels=block_pixels, gauge=op.wavelet_op.gauge_type,
+                    j_to_dg=list(op.wavelet_op.j_to_dg), levels=len(engine.maps), n_coefficients=len(plan))
+        s.case("stats", name, meta, **arrays)
+        fields = ("family", "native_dg", "c1", "c2", "j1", "j2", "j3", "l1", "l2", "l3")
+        (s.dir / name / "plan.json").write_text(json.dumps([[getattr(c, f) for f in fields] for c in plan]))
+        print(name, len(plan), "coefficients")
+    s.close()
+
+
+def LocalGeometry_for(op, block_pixels):
+    from STL_main.LocalGeometry import LocalGeometry
+
+    return LocalGeometry(op.wavelet_op, block_pixels=block_pixels, cache_downs=False)
+
+
 def check_against_local_geometry():
     """The replicated candidate logic must give LocalGeometry.torch_down's matrix."""
     from STL_main.LocalGeometry import LocalGeometry
@@ -289,7 +356,7 @@ def check_against_local_geometry():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("suites", nargs="+", choices=["geometry", "block"])
+    parser.add_argument("suites", nargs="+", choices=["geometry", "block", "stats"])
     args = parser.parse_args()
     torch.set_num_threads(4)
     if "geometry" in args.suites:
@@ -297,3 +364,5 @@ if __name__ == "__main__":
         dump_geometry()
     if "block" in args.suites:
         dump_block()
+    if "stats" in args.suites:
+        dump_stats()

@@ -1,0 +1,21 @@
+{
+ "kind": "stats",
+ "name": "stats_n32_J4_L2_k3_C2_B1_fewer_b1024",
+ "nside": 32,
+ "J": 4,
+ "L": 2,
+ "kernel_sz": 3,
+ "channels": 2,
+ "batch": 1,
+ "fewer": true,
+ "block_pixels": 1024,
+ "gauge": "cosmo",
+ "j_to_dg": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "levels": 4,
+ "n_coefficients": 852
+}
