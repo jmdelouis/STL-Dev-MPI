@@ -72,52 +72,230 @@ impl EngineConfig {
     }
 }
 
+/// Pixels of one level held by a process: the whole level, or a sorted
+/// set (owned range plus halo).  Fields over a layout are `[R, len]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Full(usize),
+    Sparse(Vec<i64>),
+}
+
+impl Layout {
+    pub fn len(&self) -> usize {
+        match self {
+            Layout::Full(n) => *n,
+            Layout::Sparse(ids) => ids.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Position of the cell `id` (must be held).
+    #[inline]
+    pub fn pos(&self, id: i64) -> usize {
+        match self {
+            Layout::Full(n) => {
+                debug_assert!((id as usize) < *n);
+                id as usize
+            }
+            Layout::Sparse(ids) => {
+                let q = ids.partition_point(|&s| s < id);
+                assert!(q < ids.len() && ids[q] == id, "cell id {id} is not held by this process");
+                q
+            }
+        }
+    }
+
+    /// Cell id at position `p`.
+    #[inline]
+    pub fn id(&self, p: usize) -> i64 {
+        match self {
+            Layout::Full(_) => p as i64,
+            Layout::Sparse(ids) => ids[p],
+        }
+    }
+}
+
+/// What one process holds and works on: per level, the owned NESTED range
+/// `[start, end)`, the layout of its fields and its blocks (in id order).
+/// The pyramid is aligned: the owned range of level `d + 1` is the parents
+/// of the owned range of level `d`.
+#[derive(Clone, Debug)]
+pub struct Partition {
+    pub owned: Vec<(i64, i64)>,
+    pub layouts: Vec<Layout>,
+    pub blocks: Vec<Vec<Vec<i64>>>,
+}
+
+impl Partition {
+    /// One process holding every level whole (`LocalGeometry.blocks`).
+    pub fn serial(geo: &LocalGeometry, levels: usize) -> Self {
+        Partition {
+            owned: (0..levels).map(|d| (0, geo.pixels(d) as i64)).collect(),
+            layouts: (0..levels).map(|d| Layout::Full(geo.pixels(d))).collect(),
+            blocks: (0..levels).map(|d| geo.blocks(d)).collect(),
+        }
+    }
+
+    #[inline]
+    pub fn owns(&self, level: usize, id: i64) -> bool {
+        let (s, e) = self.owned[level];
+        s <= id && id < e
+    }
+}
+
+/// Communication between the processes sharing the sky.  Every process
+/// calls the same sequence of operations; `field` is `[rows, len]` over the
+/// layout of `level`.
+pub trait Exchange {
+    /// Owners send their values to the processes holding them as halo.
+    fn halo(&self, level: usize, field: &mut [f64], rows: usize);
+    /// Contributions accumulated in halo cells are added to the owners'
+    /// cells (owner first, then the other processes in rank order) and the
+    /// halo cells are reset to zero.
+    fn reduce_ghosts(&self, level: usize, field: &mut [f64], rows: usize);
+    /// Element-wise sum over the processes, identical on every process.
+    fn allreduce(&self, values: &mut [f64]);
+}
+
+/// The single-process exchange: nothing to do.
+pub struct Serial;
+
+impl Exchange for Serial {
+    fn halo(&self, _: usize, _: &mut [f64], _: usize) {}
+    fn reduce_ghosts(&self, _: usize, _: &mut [f64], _: usize) {}
+    fn allreduce(&self, _: &mut [f64]) {}
+}
+
+static SERIAL: Serial = Serial;
+
 /// One forward (and optionally reverse) pass of a plan.
 pub struct LocalEngine<'a> {
     pub geo: &'a LocalGeometry,
     pub cfg: &'a EngineConfig,
+    pub part: Partition,
+    ex: &'a dyn Exchange,
     pub batch: usize,
     pub channels: usize,
-    /// `maps[d]`, `[B, C, N_d]`.
+    /// `maps[d]`, `[B, C, |layout d|]`.
     pub maps: Vec<Vec<f64>>,
-    /// Stored decimated moduli `m[d][n] = D^(n-d) |z_d|`, `[B, C, L, N_n]`, `d < n`.
+    /// Stored decimated moduli `m[d][n] = D^(n-d) |z_d|`, `[B, C, L, |layout n|]`, `d < n`.
     pub m: BTreeMap<(usize, usize), Vec<f64>>,
     gm: BTreeMap<(usize, usize), Vec<f64>>,
 }
 
 impl<'a> LocalEngine<'a> {
-    /// Engine on the map `x` `[B, C, N_0]`; the coarser maps are its
-    /// block-wise decimations (`LocalGeometry.analysis_levels`).
+    /// Single-process engine on the map `x` `[B, C, N_0]`; the coarser maps
+    /// are its block-wise decimations (`LocalGeometry.analysis_levels`).
     pub fn new(geo: &'a LocalGeometry, cfg: &'a EngineConfig, x: Vec<f64>, batch: usize, channels: usize) -> Self {
-        assert_eq!(x.len(), batch * channels * geo.pixels(0));
+        let part = Partition::serial(geo, cfg.levels());
+        Self::distributed(geo, cfg, part, &SERIAL, x, batch, channels)
+    }
+
+    /// Engine of one process: `x` `[B, C, |layout 0|]` (only the owned
+    /// cells are read; the halo is exchanged here).
+    pub fn distributed(
+        geo: &'a LocalGeometry,
+        cfg: &'a EngineConfig,
+        part: Partition,
+        ex: &'a dyn Exchange,
+        mut x: Vec<f64>,
+        batch: usize,
+        channels: usize,
+    ) -> Self {
         let levels = cfg.levels();
-        let mut maps = vec![x];
-        for d in 0..levels - 1 {
-            let next = geo.decimate(&maps[d], d);
-            maps.push(next);
-        }
-        let rows = batch * channels * geo.l;
+        assert_eq!(part.layouts.len(), levels);
+        assert_eq!(x.len(), batch * channels * part.layouts[0].len());
+        let bc = batch * channels;
+        ex.halo(0, &mut x, bc);
+        let rows = bc * geo.l;
         let mut m = BTreeMap::new();
         for d in 0..levels {
             for n in d + 1..levels {
-                m.insert((d, n), vec![0.0; rows * geo.pixels(n)]);
+                m.insert((d, n), vec![0.0; rows * part.layouts[n].len()]);
             }
         }
-        LocalEngine { geo, cfg, batch, channels, maps, m, gm: BTreeMap::new() }
+        let mut engine = LocalEngine { geo, cfg, part, ex, batch, channels, maps: vec![x], m, gm: BTreeMap::new() };
+        for d in 0..levels - 1 {
+            let mut next = engine.decimate(d);
+            ex.halo(d + 1, &mut next, bc);
+            engine.maps.push(next);
+        }
+        engine
     }
 
     pub fn levels(&self) -> usize {
         self.maps.len()
     }
 
+    /// `field[r, ids]` for every row: `[R, |layout|] -> [R, |ids|]`.
+    pub fn gather(&self, level: usize, field: &[f64], ids: &[i64]) -> Vec<f64> {
+        let layout = &self.part.layouts[level];
+        let pos: Vec<usize> = ids.iter().map(|&i| layout.pos(i)).collect();
+        field.chunks(layout.len()).flat_map(|row| pos.iter().map(move |&p| row[p])).collect()
+    }
+
+    /// `field[r, ids] += values[r, :]`.
+    fn scatter_add(&self, level: usize, field: &mut [f64], ids: &[i64], values: &[f64]) {
+        let layout = &self.part.layouts[level];
+        let (n, m) = (layout.len(), ids.len());
+        let pos: Vec<usize> = ids.iter().map(|&i| layout.pos(i)).collect();
+        for (r, row) in field.chunks_mut(n).enumerate() {
+            for (i, &p) in pos.iter().enumerate() {
+                row[p] += values[r * m + i];
+            }
+        }
+    }
+
+    /// Owned cells of a field, `[R, end - start]`.
+    pub fn owned_values(&self, level: usize, field: &[f64]) -> Vec<f64> {
+        let (s, e) = self.part.owned[level];
+        let ids: Vec<i64> = (s..e).collect();
+        self.gather(level, field, &ids)
+    }
+
+    /// `maps[dg] -> maps[dg + 1]` on the owned cells, block by block
+    /// (`LocalGeometry.decimate`).
+    fn decimate(&self, dg: usize) -> Vec<f64> {
+        let x = &self.maps[dg];
+        let rows = self.batch * self.channels;
+        let mut out = vec![0.0; rows * self.part.layouts[dg + 1].len()];
+        let rings = 2 * self.geo.down_rings(dg);
+        for block in &self.part.blocks[dg] {
+            let domain = dilate_fine(block, self.geo.nside(dg), rings);
+            let down = self.geo.down(dg, &domain);
+            let y = down.apply(&self.gather(dg, x, &domain));
+            let coarse = parents(block);
+            let picked = gather_cols(&y, down.out_ids.len(), &positions(&down.out_ids, &coarse));
+            let layout = &self.part.layouts[dg + 1];
+            let nl = layout.len();
+            for r in 0..rows {
+                for (i, &c) in coarse.iter().enumerate() {
+                    out[r * nl + layout.pos(c)] = picked[r * coarse.len() + i];
+                }
+            }
+        }
+        out
+    }
+
+    /// Transpose of [`decimate`](Self::decimate) added into `out` (level
+    /// `dg`, owned cells); `g` (level `dg + 1`) must hold its halo.
+    fn decimate_adjoint_add(&self, g: &[f64], dg: usize, out: &mut [f64]) {
+        let rings = 2 * self.geo.down_rings(dg);
+        for block in &self.part.blocks[dg] {
+            let domain = dilate_fine(block, self.geo.nside(dg), rings);
+            let down = self.geo.down(dg, &domain);
+            let x = down.adjoint(&self.gather(dg + 1, g, &down.out_ids));
+            let picked = gather_cols(&x, domain.len(), &positions(&domain, block));
+            self.scatter_add(dg, out, block, &picked);
+        }
+    }
+
     /// Supports of the block's decimation chain, one per level from `n`.
     fn supports(&self, n: usize, block: &[i64]) -> Vec<Vec<i64>> {
-        let mut chain = vec![block.to_vec()];
-        for level in n..self.levels() - 1 {
-            let s = parents(&dilate_fine(chain.last().unwrap(), self.geo.nside(level), self.geo.down_rings(level)));
-            chain.push(s);
-        }
-        chain
+        supports(self.geo, self.levels(), n, block)
     }
 
     fn groups(plan: &[Coefficient]) -> BTreeMap<usize, Vec<usize>> {
@@ -128,13 +306,14 @@ impl<'a> LocalEngine<'a> {
         g
     }
 
-    /// Coefficient values `[B, len(plan)]`; fills the stored moduli.
+    /// Coefficient values `[B, len(plan)]` (summed over the processes);
+    /// fills the stored moduli.
     pub fn forward(&mut self, plan: &[Coefficient]) -> Vec<Complex64> {
         let groups = Self::groups(plan);
         let mut values = vec![ZERO; self.batch * plan.len()];
         let rows = self.batch * self.channels * self.geo.l;
         for n in 0..self.levels() {
-            for block in self.geo.blocks(n) {
+            for block in self.part.blocks[n].clone() {
                 let mut fields = Block::new(self, n, &block);
                 for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
                     let (a, b) = fields.operands(self, &plan[i]);
@@ -149,34 +328,39 @@ impl<'a> LocalEngine<'a> {
                 for n2 in n + 1..self.levels() {
                     let (next, _) = self.geo.piece_forward(&a, &chain[n2 - n - 1], n2 - 1);
                     a = next;
-                    let support = &chain[n2 - n];
-                    let target = self.m.get_mut(&(n, n2)).unwrap();
-                    let np = self.geo.pixels(n2);
-                    let ms = support.len();
-                    for r in 0..rows {
-                        for (i, &id) in support.iter().enumerate() {
-                            target[r * np + id as usize] += a[r * ms + i];
-                        }
-                    }
+                    let mut target = std::mem::take(self.m.get_mut(&(n, n2)).unwrap());
+                    self.scatter_add(n2, &mut target, &chain[n2 - n], &a);
+                    self.m.insert((n, n2), target);
                 }
             }
+            // The moduli pushed from level n are complete: owners collect
+            // them, then hand them out as halo to the coarser levels' readers.
+            for n2 in n + 1..self.levels() {
+                let field = self.m.get_mut(&(n, n2)).unwrap();
+                self.ex.reduce_ghosts(n2, field, rows);
+                self.ex.halo(n2, field, rows);
+            }
         }
-        values
+        let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
+        self.ex.allreduce(&mut flat);
+        flat.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect()
     }
 
-    /// Map cotangents of every level for the coefficient cotangent `gradient`
-    /// `[B, len(plan)]` (of `Re sum(conj(gradient) * values)`); requires a
-    /// previous [`forward`](Self::forward).  Coefficients whose cotangent is
-    /// zero for every batch are skipped.
+    /// Map cotangents of every level (owned cells valid, halo zero) for the
+    /// coefficient cotangent `gradient` `[B, len(plan)]` (of
+    /// `Re sum(conj(gradient) * values)`); requires a previous
+    /// [`forward`](Self::forward).  Coefficients whose cotangent is zero for
+    /// every batch are skipped.
     pub fn reverse(&mut self, plan: &[Coefficient], gradient: &[Complex64]) -> Vec<Vec<f64>> {
         assert_eq!(gradient.len(), self.batch * plan.len());
         let active: Vec<bool> =
             (0..plan.len()).map(|i| (0..self.batch).any(|b| gradient[b * plan.len() + i] != ZERO)).collect();
         let groups = Self::groups(plan);
+        let (bc, rows) = (self.batch * self.channels, self.batch * self.channels * self.geo.l);
         self.gm = self.m.iter().map(|(&k, v)| (k, vec![0.0; v.len()])).collect();
         let mut maps_gradient: Vec<Vec<f64>> = self.maps.iter().map(|x| vec![0.0; x.len()]).collect();
         for n in (0..self.levels()).rev() {
-            for block in self.geo.blocks(n) {
+            for block in self.part.blocks[n].clone() {
                 let mut fields = Block::new(self, n, &block);
                 for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
                     if !active[i] {
@@ -188,6 +372,14 @@ impl<'a> LocalEngine<'a> {
                 }
                 fields.finish_reverse(self, &mut maps_gradient);
             }
+            // gm[d][n] is complete once level n is done: collect, then hand
+            // out as halo to the finer levels' chains.
+            for d in 0..n {
+                let field = self.gm.get_mut(&(d, n)).unwrap();
+                self.ex.reduce_ghosts(n, field, rows);
+                self.ex.halo(n, field, rows);
+            }
+            self.ex.reduce_ghosts(n, &mut maps_gradient[n], bc);
         }
         self.gm.clear();
         maps_gradient
@@ -195,28 +387,57 @@ impl<'a> LocalEngine<'a> {
 
     /// Chain the map cotangents of all levels back to level 0 through the
     /// transposed decimations, then the band cotangents of the Laplacian
-    /// pyramid (`LocalGeometry.analysis_vjp`).  Returns `(map0, bands)`.
+    /// pyramid (`LocalGeometry.analysis_vjp`).  Returns `(map0, bands)` over
+    /// the layouts, owned cells valid.
     pub fn analysis_vjp(&self, mut maps_gradient: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let bc = self.batch * self.channels;
         for d in (1..self.levels()).rev() {
-            let g = self.geo.decimate_adjoint(&maps_gradient[d], d - 1);
-            maps_gradient[d - 1].iter_mut().zip(&g).for_each(|(a, b)| *a += b);
+            self.ex.halo(d, &mut maps_gradient[d], bc);
+            let (fine, coarse) = maps_gradient.split_at_mut(d);
+            self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1]);
         }
         let g0 = maps_gradient.swap_remove(0);
         let mut bands = vec![g0.clone()];
+        // Up-sampling adjoint: sum of the four children (owned with their parent).
         for d in 0..self.levels() - 1 {
             let fine = bands.last().unwrap();
-            let (nf, nc) = (self.geo.pixels(d), self.geo.pixels(d + 1));
-            let rows = fine.len() / nf;
-            let mut coarse = vec![0.0; rows * nc];
-            for r in 0..rows {
-                for p in 0..nf {
-                    coarse[r * nc + p / 4] += fine[r * nf + p];
+            let (lf, lc) = (&self.part.layouts[d], &self.part.layouts[d + 1]);
+            let (s, e) = self.part.owned[d];
+            let mut coarse = vec![0.0; bc * lc.len()];
+            for r in 0..bc {
+                for p in s..e {
+                    coarse[r * lc.len() + lc.pos(p / 4)] += fine[r * lf.len() + lf.pos(p)];
                 }
             }
             bands.push(coarse);
         }
         (g0, bands)
     }
+}
+
+/// Supports of the decimation chain of a block of level `n`, one per level
+/// from `n` to `levels - 1`.
+pub fn supports(geo: &LocalGeometry, levels: usize, n: usize, block: &[i64]) -> Vec<Vec<i64>> {
+    let mut chain = vec![block.to_vec()];
+    for level in n..levels - 1 {
+        let s = parents(&dilate_fine(chain.last().unwrap(), geo.nside(level), geo.down_rings(level)));
+        chain.push(s);
+    }
+    chain
+}
+
+/// Domains of a block of level `n`: `(a1, domain)` = block + one and two
+/// convolution halos.
+pub fn block_domains(geo: &LocalGeometry, n: usize, block: &[i64]) -> (Vec<i64>, Vec<i64>) {
+    let nside = geo.nside(n);
+    let a1 = dilate_fine(block, nside, geo.conv_rings);
+    let domain = dilate_fine(&a1, nside, geo.conv_rings);
+    (a1, domain)
+}
+
+/// `x[r, pos]` for every row of `[R, n]`.
+fn gather_cols(x: &[f64], n: usize, pos: &[usize]) -> Vec<f64> {
+    x.chunks(n).flat_map(|row| pos.iter().map(move |&p| row[p])).collect()
 }
 
 /// Real or complex operand `[B, |F|]`.
@@ -245,16 +466,12 @@ struct Block {
 impl Block {
     fn new(engine: &LocalEngine, n: usize, block: &[i64]) -> Self {
         let geo = engine.geo;
-        let nside = geo.nside(n);
-        let a1 = dilate_fine(block, nside, geo.conv_rings);
-        let domain = dilate_fine(&a1, nside, geo.conv_rings);
+        let (a1, domain) = block_domains(geo, n, block);
         let conv = geo.conv(n, &domain);
         let rows_a1 = positions(&domain, &a1);
         let rows_f = positions(&domain, block);
         let f_in_a1 = positions(&a1, block);
-        let np = geo.pixels(n);
-        let x: Vec<f64> =
-            engine.maps[n].chunks(np).flat_map(|row| domain.iter().map(move |&i| row[i as usize])).collect();
+        let x = engine.gather(n, &engine.maps[n], &domain);
         let rows = engine.batch * engine.channels;
         let y = convolution_forward(&conv, &geo.kernel, &x, rows);
         let z = join(&y, rows, geo.l, domain.len(), &rows_a1);
@@ -296,9 +513,7 @@ impl Block {
             let v = if d == self.n {
                 self.z.iter().map(|v| v.norm()).collect()
             } else {
-                let np = engine.geo.pixels(self.n);
-                let a1 = &self.a1;
-                engine.m[&(d, self.n)].chunks(np).flat_map(|row| a1.iter().map(move |&i| row[i as usize])).collect()
+                engine.gather(self.n, &engine.m[&(d, self.n)], &self.a1)
             };
             self.modulus.insert(d, v);
         }
@@ -339,11 +554,12 @@ impl Block {
 
     /// `maps[level][:, channel]` on `F`.
     fn map_core(&self, engine: &LocalEngine, level: usize, channel: usize) -> Operand {
-        let np = engine.geo.pixels(level);
+        let layout = &engine.part.layouts[level];
+        let np = layout.len();
         (0..engine.batch)
             .flat_map(|b| {
                 let row = &engine.maps[level][(b * engine.channels + channel) * np..][..np];
-                self.block.iter().map(move |&i| Complex64::new(row[i as usize], 0.0))
+                self.block.iter().map(move |&i| Complex64::new(row[layout.pos(i)], 0.0))
             })
             .collect()
     }
@@ -479,11 +695,12 @@ impl Block {
     }
 
     fn add_map(&self, engine: &LocalEngine, out: &mut [f64], level: usize, channel: usize, g: &[f64]) {
-        let (np, nf) = (engine.geo.pixels(level), self.nf());
+        let layout = &engine.part.layouts[level];
+        let (np, nf) = (layout.len(), self.nf());
         for b in 0..engine.batch {
             let row = &mut out[(b * engine.channels + channel) * np..][..np];
             for (i, &id) in self.block.iter().enumerate() {
-                row[id as usize] += g[b * nf + i];
+                row[layout.pos(id)] += g[b * nf + i];
             }
         }
     }
@@ -581,25 +798,16 @@ impl Block {
                 let gz = self.gz.get_or_insert_with(|| vec![ZERO; self.z.len()]);
                 gz.iter_mut().zip(&v).for_each(|(a, b)| *a += b);
             } else {
-                let np = geo.pixels(n);
-                let target = engine.gm.get_mut(&(d, n)).unwrap();
-                for r in 0..bc * l {
-                    for (i, &id) in self.a1.iter().enumerate() {
-                        target[r * np + id as usize] += gm[r * na1 + i];
-                    }
-                }
+                let mut target = std::mem::take(engine.gm.get_mut(&(d, n)).unwrap());
+                engine.scatter_add(n, &mut target, &self.a1, &gm);
+                engine.gm.insert((d, n), target);
             }
         }
         // The block's own chain to coarser levels.
         let chain = engine.supports(n, &self.block);
         let mut g_fine: Option<Vec<f64>> = None;
         for n2 in n + 1..engine.levels() {
-            let np = geo.pixels(n2);
-            let support = &chain[n2 - n];
-            let mut g: Vec<f64> = engine.gm[&(n, n2)]
-                .chunks(np)
-                .flat_map(|row| support.iter().map(move |&i| row[i as usize]))
-                .collect();
+            let mut g = engine.gather(n2, &engine.gm[&(n, n2)], &chain[n2 - n]);
             for level in (n..n2).rev() {
                 g = geo.piece_adjoint(&g, &chain[level - n], &chain[level - n + 1], level);
             }
@@ -625,12 +833,7 @@ impl Block {
         // Wavelet adjoint on a1 rows -> map cotangent on the domain.
         let padded = split(&gz, bc, l, na1, kd, &self.rows_a1);
         let gx = convolution_adjoint(&self.conv, &geo.kernel, &padded, bc);
-        let np = geo.pixels(n);
-        for r in 0..bc {
-            for (i, &id) in self.domain.iter().enumerate() {
-                maps_gradient[n][r * np + id as usize] += gx[r * kd + i];
-            }
-        }
+        engine.scatter_add(n, &mut maps_gradient[n], &self.domain, &gx);
     }
 }
 

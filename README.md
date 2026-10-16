@@ -22,6 +22,12 @@ From WSL (keep the build directory on WSL-native storage):
 CARGO_TARGET_DIR=~/.cache/stl-dev-mpi-target cargo test --release
 ```
 
+Under MPI (OpenMPI and `libclang-dev` installed):
+
+```bash
+tools/mpi_check.sh 2 4
+```
+
 Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
 `~/stl-deps/venv-cpu`; override with `STL_DEV` / `STL_PYTHON`):
 
@@ -76,6 +82,19 @@ blocks of 64 pixels to whole levels, shared resolutions `dg = (0, 1, 1, 2)`;
 `stl_core::engine::LocalEngine` keeps the STL-Dev memory model: per block
 fields on `block + halo`, globally the maps, their cotangents and the
 stored moduli with their cotangents.
+
+Milestone 4 (`crates/stl-mpi`): contiguous NESTED ranges aligned to
+`4^(levels-1)` (every rank owns the parents of its pixels), per-level
+layouts of owned + halo cells computed from the rank's blocks, halo
+exchange and additive ghost reduction (owner first, then ranks in order),
+statistics summed in rank order on every rank. Backends: threads
+(`cargo test`) and MPI (feature `mpi`, `tools/mpi_check.sh`).
+
+| Check (8 stats fixtures, 1, 2, 4 ranks as threads) | Result |
+|---|---|
+| 1 rank through the distributed path vs serial engine | bit-identical |
+| 2 and 4 ranks vs 1 rank | <= 7e-16 |
+| every rank count vs STL-Dev | <= 1.3e-5 of the tolerances |
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
