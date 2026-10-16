@@ -230,6 +230,20 @@ moduli, cotangents, L-BFGS history) shrinks as `1/P`; what remains is the
 block transients (~80 to 110 MB at blocks of 16384) and the OpenMPI 5
 runtime (230 to 255 MB).
 
+Coarse-to-fine synthesis of the WebSky kappa map at nside 1024 (hpc, one
+node, 192 ranks; L = 2, kernel 5): nside 512 from white noise, 50 L-BFGS
+iterations (job 1524066: 61 evaluations, 2.9 s each, loss 2.1e-2 to
+5.7e-7), then nside 1024 from the 512 synthesis replicated on the
+children plus white noise of the RMS of the target's missing small scales
+(job 1524067: 62 evaluations, 10.3 s each, loss 3.4e-4 to 2.4e-7, 11 min).
+The synthesis matches the target's variance (std 0.0648 for both) and
+pixel histogram up to about 3 sigma; the positive tail (skewness 0.11
+against 0.22, maximum 0.36 against 0.68) is not reproduced yet, and the
+small-scale texture shows a preferred east-west elongation that the
+target does not have (only two orientations, L = 2; to be checked with
+STL-Dev at the same resolution and with more orientations). Reports in
+`benchmarks/hpc/job1524066_*` and `job1524067_*`.
+
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
 neither the input nor the sorted order; STL-Dev always passes sorted ids.
