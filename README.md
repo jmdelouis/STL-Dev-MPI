@@ -90,11 +90,17 @@ exchange and additive ghost reduction (owner first, then ranks in order),
 statistics summed in rank order on every rank. Backends: threads
 (`cargo test`) and MPI (feature `mpi`, `tools/mpi_check.sh`).
 
-| Check (8 stats fixtures, 1, 2, 4 ranks as threads) | Result |
+| Check (8 stats fixtures, 1, 2, 4 ranks) | Result |
 |---|---|
 | 1 rank through the distributed path vs serial engine | bit-identical |
-| 2 and 4 ranks vs 1 rank | <= 7e-16 |
+| 2 and 4 ranks vs 1 rank, threads and `mpirun` (OpenMPI 4.1.6) | <= 7e-16 |
 | every rank count vs STL-Dev | <= 1.3e-5 of the tolerances |
+
+Under `mpirun` on one 20-core WSL machine, the wall-clock time of one
+evaluation (forward + gradient) drops by 1.8x at 2 ranks and 2.4x to 3.0x
+at 4 ranks on the nside 16/32 fixtures, where the halo is still a large
+fraction of each slice (at nside 32 and 4 ranks a rank holds 46 % to 65 %
+of level 0).
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
