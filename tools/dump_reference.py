@@ -16,6 +16,7 @@ rotation, binding, convolution, decimation weights).
 import argparse
 import json
 import math
+import os
 import shutil
 from pathlib import Path
 
@@ -331,6 +332,55 @@ def dump_stats():
     s.close()
 
 
+def dump_synthesis(target_path, niter=20):
+    """Milestone 5: ``benchmark_synthesis.py --mode local --variables map
+    --target <map> --niter <niter>`` (defaults: J = log2(nside) - 1, L 2,
+    kernel 5, history 10, blocks 16384, seed 11), replicated call for call
+    so that the initial map and the trajectory can be dumped exactly."""
+    import time
+
+    from STL_main.LocalGeometry import LocalGeometry
+    from STL_main.LossOptim import PyramidLBFGS, PyramidSynthesis
+    from STL_main.STL_Healpix_Kernel_Torch import STL_Healpix_Kernel_Torch
+
+    s = Suite("synthesis")
+    seed, L, kernel_sz, history_size, block_pixels = 11, 2, 5, 10, 16384
+    generator = torch.Generator().manual_seed(seed)
+    raw = np.load(os.path.expanduser(target_path)).astype(np.float64).reshape(-1)
+    nside = int(round((raw.size / 12) ** 0.5))
+    mean, std = float(raw.mean()), float(raw.std())
+    target_map = torch.as_tensor((raw - mean) / std)
+    J = max(1, nside.bit_length() - 2)
+    npix = 12 * nside**2
+    initial_map = torch.randn(npix, dtype=torch.float64, generator=generator)
+    target = STL_Healpix_Kernel_Torch(target_map)
+    op = target.get_ST_op(J=J, L=L, norm="vanilla", compute_PS=False, has_fewer_convolutions=False,
+                          wavelet_op_kwargs=dict(kernel_size=kernel_sz, ellipsoid="sphere"))
+    geometry = LocalGeometry(op.wavelet_op, block_pixels=block_pixels)
+    target_stats = op.apply_local(geometry.pyramid_from_map(target), geometry=geometry)
+    solver = PyramidSynthesis(op, target_stats, optimizer=PyramidLBFGS(lr=1.0, history_size=history_size),
+                              geometry=geometry, variables="map")
+    pyramid = geometry.pyramid_from_map(target.new_like(initial_map))
+    solver.prepare_variables(pyramid)
+    start_map = pyramid.levels[0].detach().clone()
+    started = time.perf_counter()
+    history = solver.run(pyramid, niter=niter,
+                         callback=lambda i, loss: print(f"  evaluation {i + 1:3d}  loss = {loss:.6e}", flush=True))
+    seconds = time.perf_counter() - started
+    result = solver.reconstruct()
+    name = f"synthesis_{os.path.splitext(os.path.basename(target_path))[0]}_niter{niter}"
+    meta = dict(nside=nside, J=J, L=L, kernel_sz=kernel_sz, channels=1, batch=1, fewer=False,
+                block_pixels=block_pixels, gauge=op.wavelet_op.gauge_type, j_to_dg=list(op.wavelet_op.j_to_dg),
+                history_size=history_size, niter=niter, seed=seed, lr=1.0, tolerance_grad=1e-12,
+                tolerance_change=1e-15, target_file=target_path, target_mean=mean, target_std=std,
+                loss_history=history, seconds=seconds, n_coefficients=len(target_stats.plan))
+    s.case("synthesis", name, meta, target_map=target_map, initial_map=start_map.reshape(-1),
+           target_values_re=target_stats.values.real, target_values_im=target_stats.values.imag,
+           loss_history=torch.tensor(history, dtype=torch.float64), result_map=result.reshape(-1))
+    print(name, len(history), "evaluations", f"{seconds:.1f} s")
+    s.close()
+
+
 def LocalGeometry_for(op, block_pixels):
     from STL_main.LocalGeometry import LocalGeometry
 
@@ -356,7 +406,9 @@ def check_against_local_geometry():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("suites", nargs="+", choices=["geometry", "block", "stats"])
+    parser.add_argument("suites", nargs="+", choices=["geometry", "block", "stats", "synthesis"])
+    parser.add_argument("--synthesis-target", default="~/stl-data/websky/kap_nside64_nested.npy")
+    parser.add_argument("--synthesis-niter", type=int, default=20)
     args = parser.parse_args()
     torch.set_num_threads(4)
     if "geometry" in args.suites:
@@ -366,3 +418,5 @@ if __name__ == "__main__":
         dump_block()
     if "stats" in args.suites:
         dump_stats()
+    if "synthesis" in args.suites:
+        dump_synthesis(args.synthesis_target, args.synthesis_niter)

@@ -13,8 +13,10 @@ pub mod check;
 pub mod comm;
 pub mod decomposition;
 pub mod halo;
+pub mod io;
 #[cfg(feature = "mpi")]
 pub mod mpi_comm;
+pub mod synthesis;
 pub mod threads;
 
 pub use comm::Comm;

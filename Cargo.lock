@@ -869,6 +869,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stl-cli"
+version = "0.1.0"
+dependencies = [
+ "mpi",
+ "num-complex",
+ "serde_json",
+ "stl-core",
+ "stl-mpi",
+]
+
+[[package]]
 name = "stl-core"
 version = "0.1.0"
 dependencies = [

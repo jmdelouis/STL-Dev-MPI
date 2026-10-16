@@ -1,0 +1,22 @@
+[package]
+name = "stl-cli"
+description = "Command-line tools: stl-synth (synthesis of HEALPix maps from ScatCov statistics)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Run under mpirun (MPI_COMM_WORLD); without it, --ranks N runs N thread ranks.
+mpi = ["dep:mpi", "stl-mpi/mpi"]
+
+[dependencies]
+stl-core = { path = "../stl-core" }
+stl-mpi = { path = "../stl-mpi" }
+num-complex.workspace = true
+serde_json.workspace = true
+mpi = { workspace = true, optional = true }
+
+[[bin]]
+name = "stl-synth"
+path = "src/bin/stl-synth.rs"
