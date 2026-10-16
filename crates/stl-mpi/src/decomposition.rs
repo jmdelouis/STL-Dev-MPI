@@ -35,7 +35,7 @@ impl Decomposition {
     /// Split aligned on `unit` (a power of 4 dividing the sky).
     pub fn with_unit(geo: &LocalGeometry, levels: usize, size: usize, unit: i64) -> Self {
         let npix0 = geo.pixels(0) as i64;
-        assert!(unit > 0 && unit & (unit - 1) == 0 && unit.trailing_zeros() % 2 == 0, "unit must be a power of 4");
+        assert!(unit > 0 && unit & (unit - 1) == 0 && unit.trailing_zeros().is_multiple_of(2), "unit must be a power of 4");
         let n_units = npix0 / unit;
         assert!(size as i64 <= n_units, "{size} ranks for {n_units} units of {unit} pixels");
         let starts = (0..=size as i64).map(|r| r * n_units / size as i64 * unit).collect();

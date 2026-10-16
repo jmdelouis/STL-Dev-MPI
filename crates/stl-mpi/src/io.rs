@@ -343,7 +343,7 @@ fn fits_layout(path: &Path) -> Result<(u64, usize, usize, usize, usize, bool)> {
         at += hlen + (size + int("PCOUNT")).div_ceil(BLOCK) * BLOCK;
         // Skip the data of non-table HDUs by seeking.
         use std::io::{Seek, SeekFrom};
-        data.truncate(0);
+        data.clear();
         f.seek(SeekFrom::Start(at as u64)).map_err(err(path))?;
         data.resize(at, 0);
     }

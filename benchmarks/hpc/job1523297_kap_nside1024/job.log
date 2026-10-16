@@ -1,0 +1,15 @@
+job 1523297: 2 node(s) compute-116-[37,39], 192 tasks, target /home/jmdeloui/stl-mpi/data/kap_nside1024_nested.npy, niter 3
+=== 192 ranks
+[rust-local P=192] evaluation    1  loss = 2.852903e-2  t =    10.9 s
+[rust-local P=192] evaluation    2  loss = 2.852902e-2  t =    21.7 s
+[rust-local P=192] evaluation    3  loss = 2.852902e-2  t =    32.7 s
+[rust-local P=192] evaluation    4  loss = 2.852896e-2  t =    43.3 s
+{"evaluations":4,"loss_first":0.028529025125347187,"loss_last":0.028528958813200944,"ranks":192,"seconds":43.34,"seconds_per_evaluation":10.835}
+
+real	3m17.065s
+user	284m47.715s
+sys	6m4.859s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+done Fri Oct 16 01:41:28 PM CEST 2026

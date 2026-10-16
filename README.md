@@ -205,6 +205,31 @@ small levels and the all-to-all buffers. Every rank also holds the
 full-sky target and initial maps in this version (0.8 MB at nside 64, but
 800 MB at nside 2048): to be read by slices before milestone 6.
 
+Milestone 6, first scaling runs at nside 1024 (WebSky kappa, J = 9, L = 2,
+kernel 5, 1538 coefficients, blocks of 16384, white-noise start, 3 L-BFGS
+iterations = 4 evaluations per run), hpc cluster (2 x AMD EPYC 9655 per
+node, OpenMPI 5.0.11). No rank reads or writes a full-sky map: maps are
+read and written by owned slices. The decomposition goes beyond the 192
+cells of the coarsest level (ranks may own no coarse cell). The QOS of
+the account limits a user to 192 CPUs, so the multi-node runs spread 192
+ranks over 2 and 4 nodes.
+
+| Nodes x ranks | s / evaluation | Speed-up vs 24 | Setup s | State per rank | Peak RSS per rank | of which above the MPI baseline | Level-0 cells held by rank 0 |
+|---|---|---|---|---|---|---|---|
+| 1 x 24 | 60.9 | 1.0 | 21.4 | 123 MB | 391 - 396 MB | 155 - 160 MB | 561 584 (owns 524 288) |
+| 1 x 48 | 33.0 | 1.84 | 11.8 | 63 MB | 357 - 363 MB | 129 - 133 MB | 287 296 |
+| 1 x 96 | 19.7 | 3.09 | 7.3 | 32 MB | 366 - 379 MB | 133 - 142 MB | 150 080 |
+| 1 x 192 | 10.2 | 6.00 | 3.9 | 17 MB | 349 - 362 MB | 99 - 111 MB | 78 400 (owns 65 536) |
+| 2 x 96 | 10.8 | 5.62 | 5.7 | 17 MB | 330 - 343 MB | 79 - 91 MB | 78 400 |
+| 4 x 48 | 10.6 | 5.74 | 4.8 | 17 MB | 318 - 329 MB | 78 - 87 MB | 78 400 |
+
+Every run gives the same loss values (identical to 16 digits across rank
+and node counts). 75 % parallel efficiency from 24 to 192 ranks; spreading
+the 192 ranks over 4 nodes costs 5 %. Per rank, the state (maps, stored
+moduli, cotangents, L-BFGS history) shrinks as `1/P`; what remains is the
+block transients (~80 to 110 MB at blocks of 16384) and the OpenMPI 5
+runtime (230 to 255 MB).
+
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
 neither the input nor the sorted order; STL-Dev always passes sorted ids.

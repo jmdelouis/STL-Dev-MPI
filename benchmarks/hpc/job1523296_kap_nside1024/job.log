@@ -1,0 +1,54 @@
+job 1523296: 1 node(s) compute-116-31, 192 tasks, target /home/jmdeloui/stl-mpi/data/kap_nside1024_nested.npy, niter 3
+=== 24 ranks
+[rust-local P=24] evaluation    1  loss = 2.852903e-2  t =    60.7 s
+[rust-local P=24] evaluation    2  loss = 2.852902e-2  t =   121.6 s
+[rust-local P=24] evaluation    3  loss = 2.852902e-2  t =   182.5 s
+[rust-local P=24] evaluation    4  loss = 2.852896e-2  t =   243.4 s
+{"evaluations":4,"loss_first":0.028529025125347152,"loss_last":0.028528958813200903,"ranks":24,"seconds":243.47,"seconds_per_evaluation":60.867}
+
+real	4m45.766s
+user	109m49.622s
+sys	3m40.660s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+=== 48 ranks
+[rust-local P=48] evaluation    1  loss = 2.852903e-2  t =    33.0 s
+[rust-local P=48] evaluation    2  loss = 2.852902e-2  t =    66.0 s
+[rust-local P=48] evaluation    3  loss = 2.852902e-2  t =    99.0 s
+[rust-local P=48] evaluation    4  loss = 2.852896e-2  t =   132.1 s
+{"evaluations":4,"loss_first":0.028529025125347163,"loss_last":0.0285289588132009,"ranks":48,"seconds":132.12,"seconds_per_evaluation":33.031}
+
+real	2m37.137s
+user	118m25.807s
+sys	5m9.496s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+=== 96 ranks
+[rust-local P=96] evaluation    1  loss = 2.852903e-2  t =    19.6 s
+[rust-local P=96] evaluation    2  loss = 2.852902e-2  t =    39.2 s
+[rust-local P=96] evaluation    3  loss = 2.852902e-2  t =    59.0 s
+[rust-local P=96] evaluation    4  loss = 2.852896e-2  t =    78.7 s
+{"evaluations":4,"loss_first":0.028529025125347156,"loss_last":0.028528958813200896,"ranks":96,"seconds":78.72,"seconds_per_evaluation":19.68}
+
+real	1m37.131s
+user	139m50.621s
+sys	8m17.918s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+=== 192 ranks
+[rust-local P=192] evaluation    1  loss = 2.852903e-2  t =    10.1 s
+[rust-local P=192] evaluation    2  loss = 2.852902e-2  t =    20.2 s
+[rust-local P=192] evaluation    3  loss = 2.852902e-2  t =    30.4 s
+[rust-local P=192] evaluation    4  loss = 2.852896e-2  t =    40.6 s
+{"evaluations":4,"loss_first":0.028529025125347187,"loss_last":0.028528958813200944,"ranks":192,"seconds":40.61,"seconds_per_evaluation":10.153}
+
+real	0m57.539s
+user	145m5.925s
+sys	11m38.924s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+done Fri Oct 16 01:38:09 PM CEST 2026
