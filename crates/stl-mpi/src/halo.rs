@@ -60,7 +60,8 @@ impl<C: Comm> Exchange for HaloExchange<'_, C> {
         let len = self.lens[level];
         assert_eq!(field.len(), rows * len);
         let send = self.serve[level].iter().map(|pos| Self::pack(field, len, rows, pos)).collect();
-        let recv = self.comm.alltoallv_f64(send);
+        let counts: Vec<usize> = self.ghosts[level].iter().map(|pos| rows * pos.len()).collect();
+        let recv = self.comm.exchange_f64(send, &counts);
         for (peer, data) in recv.iter().enumerate() {
             let pos = &self.ghosts[level][peer];
             assert_eq!(data.len(), rows * pos.len());
@@ -81,7 +82,8 @@ impl<C: Comm> Exchange for HaloExchange<'_, C> {
                 pos.iter().for_each(|&p| field[r * len + p] = 0.0);
             }
         }
-        let recv = self.comm.alltoallv_f64(send);
+        let counts: Vec<usize> = self.serve[level].iter().map(|pos| rows * pos.len()).collect();
+        let recv = self.comm.exchange_f64(send, &counts);
         // Owner's own value first, then the peers' contributions in rank order.
         for (peer, data) in recv.iter().enumerate() {
             let pos = &self.serve[level][peer];
