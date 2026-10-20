@@ -3,12 +3,13 @@
 # each started from the synthesis at 2N of the previous one (afterok).
 #   bash tools/irene/submit_c2f.sh NAME "N:ranks:niter:seconds" [...]
 # e.g. bash tools/irene/submit_c2f.sh takahashi_zs1 512:512:400:7200 1024:1024:150:7200 2048:2048:80:7200
-# Targets in $S/prep/NAME_N, runs in $S/runs/NAME_c2f_N.
+# Targets in $S/prep/NAME_N, runs in $S/runs/NAME_c2f_N.  INIT0: initial
+# map of the first step (to resume a series), default white noise.
 set -eu
 W=${W:-/ccc/work/cont005/gen17889/delouisj/stl-mpi}
 source "$W/src/tools/irene/env.sh"
 NAME=$1; shift
-dep=""; init=""
+dep=""; init="${INIT0:-}"
 mkdir -p "$S/runs" && cd "$S/runs"
 for step in "$@"; do
     IFS=: read -r N P NITER SECS <<< "$step"
