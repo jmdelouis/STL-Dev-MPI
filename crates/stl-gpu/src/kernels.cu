@@ -261,7 +261,8 @@ __device__ __forceinline__ i64 grid_find(const i64* grid, i64 n_grid, i64 own_st
 }
 
 // Bound stencils of the output rows `rows[K]` reading `grid`, one thread
-// per (row, gauge).  Entry ((g * 4 + n) * K + k) * P + p.  `complete[k * G + g]`.
+// per (row, gauge).  Entry ((g * 4 + n) * P + p) * K + k (rows fastest, so
+// that consecutive threads read consecutive entries).  `complete[k * G + g]`.
 extern "C" __global__ void geom_build(
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
     const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
@@ -338,7 +339,7 @@ extern "C" __global__ void geom_build(
             colsum = w[0] + w[1] + w[2] + w[3];
         }
         for (int n = 0; n < 4; n++) {
-            i64 a = (((i64)g * 4 + n) * K + k) * P + p;
+            i64 a = (((i64)g * 4 + n) * P + p) * K + k;
             wout[a] = w[n] / fmax(colsum, 1e-12);
             pos[a] = found[n] >= 0 ? (u32)found[n] : 0u;
             comp = comp && found[n] >= 0;
@@ -361,10 +362,25 @@ extern "C" __global__ void geom_fill(const u32* pos, u64 n_entries, u32* cursor,
     }
 }
 
-// One block per segment: bitonic sort in shared memory (segments up to
-// SEG_CAP entries), serial insertion sort above.
+// Order of an entry in the scatter of AdjointOps.convolution_adjoint:
+// gauge, neighbour, row, tap, i.e. ((g * 4 + n) * K + k) * P + p, and back.
+__device__ __forceinline__ u32 entry_key(u32 e, u64 K, u64 P) {
+    u64 gn = e / (P * K), rem = e - gn * P * K;
+    u64 p = rem / K, k = rem - p * K;
+    return (u32)((gn * K + k) * P + p);
+}
+
+__device__ __forceinline__ u32 key_entry(u32 key, u64 K, u64 P) {
+    u64 gn = key / (K * P), rem = key - gn * K * P;
+    u64 k = rem / P, p = rem - k * P;
+    return (u32)((gn * P + p) * K + k);
+}
+
+// One block per segment: entries sorted by their scatter order, bitonic
+// sort in shared memory (segments up to SEG_CAP entries), serial insertion
+// sort above.
 #define SEG_CAP 2048
-extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx) {
+extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx, i64 K, int P) {
     __shared__ u32 buf[SEG_CAP];
     for (i64 s = blockIdx.x; s < n_seg; s += gridDim.x) {
         u32 a = offsets[s], b = offsets[s + 1];
@@ -372,19 +388,21 @@ extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx) {
         if (len <= 1) continue;
         if (len > SEG_CAP) {
             if (threadIdx.x == 0) {
+                for (u32 i = a; i < b; i++) idx[i] = entry_key(idx[i], K, P);
                 for (u32 i = a + 1; i < b; i++) {
                     u32 v = idx[i];
                     u32 j = i;
                     while (j > a && idx[j - 1] > v) { idx[j] = idx[j - 1]; j--; }
                     idx[j] = v;
                 }
+                for (u32 i = a; i < b; i++) idx[i] = key_entry(idx[i], K, P);
             }
             __syncthreads();
             continue;
         }
         u32 m = 1;
         while (m < len) m <<= 1;
-        for (u32 i = threadIdx.x; i < m; i += blockDim.x) buf[i] = i < len ? idx[a + i] : 0xFFFFFFFFu;
+        for (u32 i = threadIdx.x; i < m; i += blockDim.x) buf[i] = i < len ? entry_key(idx[a + i], K, P) : 0xFFFFFFFFu;
         __syncthreads();
         for (u32 size = 2; size <= m; size <<= 1) {
             for (u32 stride = size >> 1; stride > 0; stride >>= 1) {
@@ -399,8 +417,31 @@ extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx) {
                 __syncthreads();
             }
         }
-        for (u32 i = threadIdx.x; i < len; i += blockDim.x) idx[a + i] = buf[i];
+        for (u32 i = threadIdx.x; i < len; i += blockDim.x) idx[a + i] = key_entry(buf[i], K, P);
         __syncthreads();
+    }
+}
+
+// After the sort: each transposed entry as (row k << 11 | (g * 4 + n) << 6
+// | tap) and its weight, contiguous in the scatter order.
+extern "C" __global__ void geom_pack(const u32* idx, u64 n_entries, const double* w, i64 K, int P, u32* kgp, double* wt) {
+    for (u64 q = (u64)blockIdx.x * blockDim.x + threadIdx.x; q < n_entries; q += (u64)gridDim.x * blockDim.x) {
+        u32 e = idx[q];
+        u32 kp = e / (u32)K;
+        u32 k = e - kp * (u32)K;
+        u32 p = kp % (u32)P;
+        u32 gn = kp / (u32)P;
+        kgp[q] = (k << 11) | (gn << 6) | p;
+        wt[q] = w[e];
+    }
+}
+
+// The weights by cell from the weights by row and the packed entries.
+extern "C" __global__ void geom_wt(const u32* kgp, u64 n_entries, const double* w, i64 K, int P, double* wt) {
+    for (u64 q = (u64)blockIdx.x * blockDim.x + threadIdx.x; q < n_entries; q += (u64)gridDim.x * blockDim.x) {
+        u32 c = kgp[q];
+        u64 k = c >> 11, gn = (c >> 6) & 31u, p = c & 63u;
+        wt[q] = w[(gn * (u64)P + p) * (u64)K + k];
     }
 }
 
@@ -408,37 +449,58 @@ extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx) {
 // Convolution forward / adjoint (AdjointOps, C_in = 1, C_out = 2)
 // ---------------------------------------------------------------------------
 
+// Input rows handled by one thread (the geometry is read once for them).
+#define RC 4
+
 // out[((r * G + g) * 2 + o) * out_stride + opos(i)] = sum_p (sum_n x[r, pos] w) ker[g, o, p]
-// for the geometry rows k = row0 + i (i < n_sel; opos null: i).
+// for the geometry rows k = row0 + i (i < n_sel; opos null: i).  One
+// thread per (i, g, group of RC input rows r).
 extern "C" __global__ void conv_fwd(
     const u32* pos, const double* w, int G, i64 K, int P, const double* ker,
     const double* x, i64 x_stride, int R,
     i64 row0, i64 n_sel, const u32* opos, i64 out_stride, double* out)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
-    i64 total = n_sel * G * (i64)R;
-    if (t >= total) return;
+    int n_rc = (R + RC - 1) / RC;
+    if (t >= n_sel * G * (i64)n_rc) return;
     i64 i = t % n_sel;
     i64 rest = t / n_sel;
     int g = (int)(rest % G);
-    int r = (int)(rest / G);
+    int r0 = (int)(rest / G) * RC;
+    int nr = R - r0 < RC ? R - r0 : RC;
     i64 k = row0 + i;
-    const double* xs = x + (i64)r * x_stride;
     const double* k0 = ker + ((i64)g * 2 + 0) * P;
     const double* k1 = ker + ((i64)g * 2 + 1) * P;
-    double s0 = 0.0, s1 = 0.0;
+    double s0[RC], s1[RC];
+#pragma unroll
+    for (int j = 0; j < RC; j++) { s0[j] = 0.0; s1[j] = 0.0; }
     for (int p = 0; p < P; p++) {
-        double acc = 0.0;
+        double acc[RC];
+#pragma unroll
+        for (int j = 0; j < RC; j++) acc[j] = 0.0;
         for (int n = 0; n < 4; n++) {
-            i64 a = (((i64)g * 4 + n) * K + k) * P + p;
-            acc += xs[pos[a]] * w[a];
+            i64 a = (((i64)g * 4 + n) * P + p) * K + k;
+            u32 ps = pos[a];
+            double wv = w[a];
+#pragma unroll
+            for (int j = 0; j < RC; j++)
+                if (j < nr) acc[j] += x[(i64)(r0 + j) * x_stride + ps] * wv;
         }
-        s0 += acc * k0[p];
-        s1 += acc * k1[p];
+        double kp0 = k0[p], kp1 = k1[p];
+#pragma unroll
+        for (int j = 0; j < RC; j++) {
+            s0[j] += acc[j] * kp0;
+            s1[j] += acc[j] * kp1;
+        }
     }
     i64 o = opos ? (i64)opos[i] : i;
-    out[(((i64)r * G + g) * 2 + 0) * out_stride + o] = s0;
-    out[(((i64)r * G + g) * 2 + 1) * out_stride + o] = s1;
+#pragma unroll
+    for (int j = 0; j < RC; j++) {
+        if (j < nr) {
+            out[(((i64)(r0 + j) * G + g) * 2 + 0) * out_stride + o] = s0[j];
+            out[(((i64)(r0 + j) * G + g) * 2 + 1) * out_stride + o] = s1[j];
+        }
+    }
 }
 
 // Adjoint, gathered per destination: segment s holds the entries reading
@@ -448,39 +510,64 @@ extern "C" __global__ void conv_fwd(
 // n_rows) take part; gin `[R, G, 2, gin_stride]` at index k - row0.  The
 // result goes to out[r * out_stride + dmap(dest[s])] (dmap null:
 // dest[s]; -1: dropped), added when `accumulate`.
+//
+// One warp per (segment, group of RC input rows): lane l adds the terms l,
+// l + 32, l + 64, ... of the segment (coalesced reads), then the 32 lane
+// sums are combined by a fixed shuffle tree (deterministic; the CPU adds
+// the terms one after the other).
 extern "C" __global__ void conv_adj(
-    const u32* dest, const u32* offsets, i64 n_dest, const u32* idx, const double* w,
+    const u32* dest, const u32* offsets, i64 n_dest, const u32* kgp, const double* wt,
     int G, i64 K, int P, const double* ker,
     const double* gin, i64 gin_stride, int R, i64 row0, i64 n_rows,
     const int* dmap, double* out, i64 out_stride, int accumulate)
 {
-    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= n_dest * (i64)R) return;
-    i64 s = t % n_dest;
-    int r = (int)(t / n_dest);
+    i64 warp = ((i64)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    int n_rc = (R + RC - 1) / RC;
+    if (warp >= n_dest * (i64)n_rc) return;
+    i64 s = warp % n_dest;
+    int r0 = (int)(warp / n_dest) * RC;
+    int nr = R - r0 < RC ? R - r0 : RC;
     u32 a = offsets[s], b = offsets[s + 1];
     i64 dst = dmap ? (i64)dmap[dest[s]] : (i64)dest[s];
     if (dst < 0) return;
-    double acc = 0.0;
+    double acc[RC];
+#pragma unroll
+    for (int j = 0; j < RC; j++) acc[j] = 0.0;
     bool any = false;
-    for (u32 q = a; q < b; q++) {
-        u32 e = idx[q];
-        int p = (int)(e % (u32)P);
-        u64 kk = (u64)(e / (u32)P);
-        i64 k = (i64)(kk % (u64)K);
-        int gn = (int)(kk / (u64)K);
-        int g = gn >> 2;
+    for (u32 q = a + lane; q < b; q += 32) {
+        u32 c = kgp[q];
+        i64 k = (i64)(c >> 11);
+        int g = (int)((c >> 8) & 7u);
+        int p = (int)(c & 63u);
         i64 ri = k - row0;
         if (ri < 0 || ri >= n_rows) continue;
-        double taps = 0.0;
-        taps += gin[(((i64)r * G + g) * 2 + 0) * gin_stride + ri] * ker[((i64)g * 2 + 0) * P + p];
-        taps += gin[(((i64)r * G + g) * 2 + 1) * gin_stride + ri] * ker[((i64)g * 2 + 1) * P + p];
-        acc += taps * w[e];
+        double wv = wt[q];
+        double kg0 = ker[((i64)g * 2 + 0) * P + p], kg1 = ker[((i64)g * 2 + 1) * P + p];
+#pragma unroll
+        for (int j = 0; j < RC; j++) {
+            if (j < nr) {
+                const double* gr = gin + (((i64)(r0 + j) * G + g) * 2) * gin_stride + ri;
+                double taps = 0.0;
+                taps += gr[0] * kg0;
+                taps += gr[gin_stride] * kg1;
+                acc[j] += taps * wv;
+            }
+        }
         any = true;
     }
-    if (!any) return;
-    double* o = out + (i64)r * out_stride + dst;
-    if (accumulate) *o += acc; else *o = acc;
+    any = __any_sync(0xffffffffu, any);
+#pragma unroll
+    for (int j = 0; j < RC; j++)
+        for (int off = 16; off > 0; off >>= 1) acc[j] += __shfl_down_sync(0xffffffffu, acc[j], off);
+    if (!any || lane != 0) return;
+#pragma unroll
+    for (int j = 0; j < RC; j++) {
+        if (j < nr) {
+            double* o = out + (i64)(r0 + j) * out_stride + dst;
+            if (accumulate) *o += acc[j]; else *o = acc[j];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

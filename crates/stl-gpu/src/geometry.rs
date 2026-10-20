@@ -1,19 +1,30 @@
 //! Convolution geometry on the device (port of `stl_core::conv::ConvGeometry`):
 //! rotated stencils, bilinear interpolation and binding computed per output
 //! row in a kernel, then transposed (entries grouped by the grid cell they
-//! read, in increasing entry order) so that the adjoint is a gather with a
-//! fixed summation order.
+//! read, in a fixed order) so that the adjoint is a deterministic gather.
 //!
-//! Entry `((g * 4 + n) * K + k) * P + p` for gauge `g`, bilinear neighbour
-//! `n`, output row `k` and tap `p`: the transposed groups list the entries
-//! of a cell by gauge, neighbour, row, tap, the scatter order of
-//! `conv::convolution_adjoint`.  Memory: `4 G P (4 + 8 + 4)` bytes per row
-//! (positions, weights, transposed indices).
+//! Entry `((g * 4 + n) * P + p) * K + k` for gauge `g`, bilinear neighbour
+//! `n`, tap `p` and output row `k` (rows fastest: coalesced reads).  The
+//! transposed groups list the entries of a cell by gauge, neighbour, row,
+//! tap (the scatter order of `conv::convolution_adjoint`), each as `k << 11
+//! | (g * 4 + n) << 6 | p` with its weight.
+//!
+//! Memory per output row: `4 G P` entries of 24 bytes (position and weight
+//! by row, packed entry and weight by cell).  The transposition alone (4
+//! bytes per entry) can be kept while the weights are dropped and
+//! recomputed ([`DeviceGeometry::strip`], [`DeviceGeometry::refresh`]):
+//! the stencils kernel is a fraction of the cost of the transposition.
 
 use crate::device::{Arg, Gpu, NULL};
 use cudarc::driver::CudaSlice;
 use stl_core::healpix::order_of;
 use stl_core::stencil::{local_kernel_grid, Gauge};
+
+/// Input rows per thread of the convolution kernels (`RC` in kernels.cu).
+const RC: usize = 4;
+
+/// Largest number of output rows of one geometry (packed entry format).
+pub const MAX_ROWS: usize = 1 << 21;
 
 /// A sorted set of cells read by the convolution, on the device.  Cells of
 /// the contiguous range `[own.0, own.1)` sit at positions `own.2 + (id -
@@ -40,77 +51,104 @@ impl Grid {
     }
 }
 
+/// What a geometry is computed from.
+#[derive(Clone, Copy, Debug)]
+pub struct Spec {
+    pub nside: i64,
+    pub kernel_sz: usize,
+    pub g: usize,
+    pub gauge: Gauge,
+}
+
 pub struct DeviceGeometry {
     /// Rows, gauges, taps.
     pub k: usize,
     pub g: usize,
     pub p: usize,
-    pub pos: CudaSlice<u32>,
-    pub w: CudaSlice<f64>,
+    /// Positions and weights by row (`None` once stripped).
+    pub pos: Option<CudaSlice<u32>>,
+    pub w: Option<CudaSlice<f64>>,
     /// `complete[k * G + g]` when requested.
     pub complete: Option<CudaSlice<u8>>,
     /// Transposed: grid positions read (`dest`), their entry ranges
-    /// (`offsets`, `|dest| + 1`) and the entries (`idx`).
+    /// (`offsets`, `|dest| + 1`), the packed entries (`kgp`) and their
+    /// weights (`wt`, `None` once stripped).
     pub dest: CudaSlice<u32>,
     pub offsets: CudaSlice<u32>,
-    pub idx: CudaSlice<u32>,
+    pub kgp: CudaSlice<u32>,
+    pub wt: Option<CudaSlice<f64>>,
     pub n_dest: usize,
 }
 
+fn lapper(gpu: &Gpu) -> impl Fn(&str) + '_ {
+    let profile = std::env::var_os("STL_GPU_PROFILE").is_some();
+    let started = std::time::Instant::now();
+    move |what: &str| {
+        if profile {
+            gpu.sync();
+            eprintln!("  geometry {what}: {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+}
+
+fn stride_grid(n: usize) -> (u32, u32) {
+    (n.div_ceil(256).clamp(1, 1 << 16) as u32, 1u32)
+}
+
+/// Positions and weights by row of the output rows `rows` (`k` cells) on `grid`.
+fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool) -> (CudaSlice<u32>, CudaSlice<f64>, Option<CudaSlice<u8>>) {
+    let order = order_of(s.nside);
+    let p = s.kernel_sz * s.kernel_sz;
+    let n_entries = 4 * s.g * k * p;
+    let stencil: Vec<f64> = local_kernel_grid(s.kernel_sz, s.nside).into_iter().flatten().collect();
+    let stencil = gpu.upload(&stencil);
+    let pos = gpu.zeros::<u32>(n_entries);
+    let w = gpu.zeros::<f64>(n_entries);
+    let comp = complete.then(|| gpu.zeros::<u8>(k * s.g));
+    let p_ref = (s.kernel_sz / 2) * (s.kernel_sz + 1);
+    gpu.launch1(
+        "geom_build",
+        k * s.g,
+        &[
+            gpu.a(&grid.ids),
+            Arg::I64(grid.n as i64),
+            Arg::I64(grid.own.0),
+            Arg::I64(grid.own.1),
+            Arg::I64(grid.own.2),
+            gpu.a(rows),
+            k.into(),
+            s.nside.into(),
+            (order as i32).into(),
+            (s.g as i32).into(),
+            (p as i32).into(),
+            (match s.gauge {
+                Gauge::Cosmo => 0,
+                Gauge::Phi => 1,
+            })
+            .into(),
+            gpu.a(&stencil),
+            (p_ref as i32).into(),
+            gpu.a(&pos),
+            gpu.a(&w),
+            comp.as_ref().map_or(NULL, |c| gpu.a(c)),
+        ],
+    );
+    (pos, w, comp)
+}
+
 impl DeviceGeometry {
-    /// Bound stencils of the output rows `rows` (`k` cells at `nside`) on `grid`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
-        gpu: &Gpu,
-        grid: &Grid,
-        rows: &CudaSlice<i64>,
-        k: usize,
-        nside: i64,
-        kernel_sz: usize,
-        g: usize,
-        gauge: Gauge,
-        complete: bool,
-    ) -> Self {
-        let order = order_of(nside);
-        let p = kernel_sz * kernel_sz;
-        let n_entries = 4 * g * k * p;
+    /// Bound stencils of the output rows `rows` (`k` cells at `nside`) on
+    /// `grid`, and their transposition.
+    pub fn build(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool) -> Self {
+        let p = s.kernel_sz * s.kernel_sz;
+        let n_entries = 4 * s.g * k * p;
         assert!(n_entries < u32::MAX as usize, "block too large for u32 entry indices");
-        let stencil: Vec<f64> = local_kernel_grid(kernel_sz, nside).into_iter().flatten().collect();
-        let stencil = gpu.upload(&stencil);
-        let pos = gpu.zeros::<u32>(n_entries);
-        let w = gpu.zeros::<f64>(n_entries);
-        let comp = complete.then(|| gpu.zeros::<u8>(k * g));
-        let p_ref = (kernel_sz / 2) * (kernel_sz + 1);
-        gpu.launch1(
-            "geom_build",
-            k * g,
-            &[
-                gpu.a(&grid.ids),
-                Arg::I64(grid.n as i64),
-                Arg::I64(grid.own.0),
-                Arg::I64(grid.own.1),
-                Arg::I64(grid.own.2),
-                gpu.a(rows),
-                k.into(),
-                nside.into(),
-                (order as i32).into(),
-                (g as i32).into(),
-                (p as i32).into(),
-                (match gauge {
-                    Gauge::Cosmo => 0,
-                    Gauge::Phi => 1,
-                })
-                .into(),
-                gpu.a(&stencil),
-                (p_ref as i32).into(),
-                gpu.a(&pos),
-                gpu.a(&w),
-                comp.as_ref().map_or(NULL, |c| gpu.a(c)),
-            ],
-        );
+        assert!(k <= MAX_ROWS && s.g <= 8 && p <= 64, "block, gauges or taps beyond the packed entry format");
+        let lap = lapper(gpu);
+        let (pos, w, comp) = stencils(gpu, grid, rows, k, s, complete);
+        lap("stencils");
         // Transpose: count per grid cell, offsets on the host, fill, sort.
         let count = gpu.zeros::<u32>(grid.n);
-        let stride_grid = |n: usize| (n.div_ceil(256).min(1 << 16) as u32, 1u32);
         gpu.launch("geom_count", stride_grid(n_entries), 256, &[gpu.a(&pos), Arg::I64(n_entries as i64), gpu.a(&count)]);
         let counts = gpu.download(&count);
         let mut dest = Vec::new();
@@ -130,20 +168,78 @@ impl DeviceGeometry {
         gpu.copy_in(&cursor, &mut cursor_d);
         let idx = gpu.zeros::<u32>(n_entries);
         gpu.launch("geom_fill", stride_grid(n_entries), 256, &[gpu.a(&pos), Arg::I64(n_entries as i64), gpu.a(&cursor_d), gpu.a(&idx)]);
+        drop(cursor_d);
         let n_dest = dest.len();
         let offsets = gpu.upload(&offsets);
-        gpu.launch("seg_sort", (n_dest.clamp(1, 1 << 20) as u32, 1), 256, &[gpu.a(&offsets), Arg::I64(n_dest as i64), gpu.a(&idx)]);
+        lap("count + fill");
+        gpu.launch(
+            "seg_sort",
+            (n_dest.clamp(1, 1 << 20) as u32, 1),
+            256,
+            &[gpu.a(&offsets), Arg::I64(n_dest as i64), gpu.a(&idx), k.into(), (p as i32).into()],
+        );
+        lap("sort");
+        let kgp = gpu.zeros::<u32>(n_entries);
+        let wt = gpu.zeros::<f64>(n_entries);
+        gpu.launch(
+            "geom_pack",
+            stride_grid(n_entries),
+            256,
+            &[gpu.a(&idx), Arg::I64(n_entries as i64), gpu.a(&w), k.into(), (p as i32).into(), gpu.a(&kgp), gpu.a(&wt)],
+        );
+        drop(idx);
+        lap("pack");
         let dest = gpu.upload(&dest);
-        DeviceGeometry { k, g, p, pos, w, complete: comp, dest, offsets, idx, n_dest }
+        DeviceGeometry { k, g: s.g, p, pos: Some(pos), w: Some(w), complete: comp, dest, offsets, kgp, wt: Some(wt), n_dest }
+    }
+
+    /// Drops the weights and positions, keeps the transposition.
+    pub fn strip(&mut self) {
+        self.pos = None;
+        self.w = None;
+        self.wt = None;
+    }
+
+    pub fn is_stripped(&self) -> bool {
+        self.w.is_none()
+    }
+
+    /// Recomputes what [`strip`](Self::strip) dropped (the same values).
+    pub fn refresh(&mut self, gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, s: &Spec) {
+        if !self.is_stripped() {
+            return;
+        }
+        let lap = lapper(gpu);
+        let (pos, w, _) = stencils(gpu, grid, rows, self.k, s, false);
+        lap("stencils (refresh)");
+        let n_entries = self.kgp.len();
+        let wt = gpu.zeros::<f64>(n_entries);
+        gpu.launch(
+            "geom_wt",
+            stride_grid(n_entries),
+            256,
+            &[gpu.a(&self.kgp), Arg::I64(n_entries as i64), gpu.a(&w), self.k.into(), (self.p as i32).into(), gpu.a(&wt)],
+        );
+        lap("weights by cell (refresh)");
+        self.pos = Some(pos);
+        self.w = Some(w);
+        self.wt = Some(wt);
     }
 
     pub fn bytes(&self) -> usize {
-        self.pos.len() * 4 + self.w.len() * 8 + self.idx.len() * 4 + self.dest.len() * 4 + self.offsets.len() * 4
+        let n = self.kgp.len();
+        let weights = if self.is_stripped() { 0 } else { n * 20 };
+        weights + n * 4 + self.dest.len() * 4 + self.offsets.len() * 4
     }
 
-    /// Bytes per output row (`G` gauges, `P` taps).
+    /// Bytes per output row (`G` gauges, `P` taps): everything, or the
+    /// transposition only.
     pub fn bytes_per_row(g: usize, p: usize) -> usize {
-        4 * g * p * 16 + 8
+        4 * g * p * 24 + 8
+    }
+
+    pub fn transposition_bytes_per_row(g: usize, p: usize) -> usize {
+        4 * g * p * 4 + 8
     }
 
     /// `out[((r G + g) 2 + o) out_stride + opos(i)]` for the rows `row0 + i`,
@@ -165,10 +261,10 @@ impl DeviceGeometry {
         assert!(row0 + n <= self.k);
         gpu.launch1(
             "conv_fwd",
-            n * self.g * rows,
+            n * self.g * rows.div_ceil(RC),
             &[
-                gpu.a(&self.pos),
-                gpu.a(&self.w),
+                gpu.a(self.pos.as_ref().expect("stripped geometry")),
+                gpu.a(self.w.as_ref().expect("stripped geometry")),
                 (self.g as i32).into(),
                 self.k.into(),
                 (self.p as i32).into(),
@@ -205,13 +301,13 @@ impl DeviceGeometry {
     ) {
         gpu.launch1(
             "conv_adj",
-            self.n_dest * rows,
+            32 * self.n_dest * rows.div_ceil(RC),
             &[
                 gpu.a(&self.dest),
                 gpu.a(&self.offsets),
                 self.n_dest.into(),
-                gpu.a(&self.idx),
-                gpu.a(&self.w),
+                gpu.a(&self.kgp),
+                gpu.a(self.wt.as_ref().expect("stripped geometry")),
                 (self.g as i32).into(),
                 self.k.into(),
                 (self.p as i32).into(),

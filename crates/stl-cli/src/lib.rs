@@ -41,7 +41,9 @@ stl-synth --target MAP [options]
   --gpu                 one CUDA device per rank (feature gpu): device = local rank modulo the
                         visible devices, or STL_GPU_DEVICE
   --gpu-block-rows N    owned cells per device block (default: from the device memory)
-  --gpu-cache C         keep the convolution geometry on the device: 'auto' (default), 'yes', 'no'
+  --gpu-cache C         convolution geometry kept on the device between sweeps: 'full', 'transposition'
+                        (the weights are recomputed), 'none', or 'auto' (default: full if it fits,
+                        else transposition); budget from the device memory or STL_GPU_CACHE_MB
   --quiet               no line per evaluation
 ";
 
@@ -66,7 +68,7 @@ pub struct Args {
     pub quiet: bool,
     pub gpu: bool,
     pub gpu_block_rows: usize,
-    pub gpu_cache: Option<bool>,
+    pub gpu_cache: String,
 }
 
 impl Args {
@@ -91,7 +93,7 @@ impl Args {
             quiet: false,
             gpu: false,
             gpu_block_rows: 0,
-            gpu_cache: None,
+            gpu_cache: "auto".into(),
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -135,10 +137,8 @@ impl Args {
                 "--gpu-block-rows" => a.gpu_block_rows = num(it.next(), k)?,
                 "--gpu-cache" => {
                     a.gpu_cache = match it.next().map(String::as_str) {
-                        Some("auto") => None,
-                        Some("yes") => Some(true),
-                        Some("no") => Some(false),
-                        _ => return Err("--gpu-cache is 'auto', 'yes' or 'no'".into()),
+                        Some(v @ ("auto" | "full" | "transposition" | "none")) => v.to_string(),
+                        _ => return Err("--gpu-cache is 'auto', 'full', 'transposition' or 'none'".into()),
                     }
                 }
                 "-h" | "--help" => return Err(USAGE.into()),
@@ -424,7 +424,7 @@ mod gpu {
     use stl_core::engine::{EngineConfig, Evaluator, Partition};
     use stl_core::local::LocalGeometry;
     use stl_core::plan::Coefficient;
-    use stl_gpu::{Gpu, GpuEngine, GpuEvaluator, GpuOptions};
+    use stl_gpu::{GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
 
     /// The device engine of the rank and a description for the report.
     pub fn evaluator<'a>(
@@ -436,7 +436,11 @@ mod gpu {
         rank: usize,
     ) -> Result<(Box<dyn Evaluator + 'a>, serde_json::Value), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache_geometry: args.gpu_cache, ..Default::default() };
+        let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        if let Some(mb) = std::env::var("STL_GPU_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            opts.cache_bytes = mb << 20;
+        }
         if let Some(t) = std::env::var("STL_GPU_THREADS").ok().and_then(|v| v.parse().ok()) {
             opts.threads = t;
         }
@@ -447,7 +451,8 @@ mod gpu {
             "device_ordinal": gpu.ordinal(),
             "blocks_per_level": engine.blocks_per_level(),
             "block_rows": engine.block_rows(),
-            "cache_geometry": engine.caches_geometry(),
+            "geometry_cache": engine.geometry_cache().0.name(),
+            "geometry_cache_budget_bytes": engine.geometry_cache().1,
         });
         Ok((Box::new(GpuEvaluator::new(engine, plan)), info))
     }

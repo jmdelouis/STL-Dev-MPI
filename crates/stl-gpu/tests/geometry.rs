@@ -9,7 +9,7 @@ use stl_core::neighbours::dilate_fine;
 use stl_core::stencil::Gauge;
 use stl_core::wavelet::wavelet_weights;
 use stl_gpu::device::NULL;
-use stl_gpu::geometry::{DeviceGeometry, Grid};
+use stl_gpu::geometry::{DeviceGeometry, Grid, Spec};
 use stl_gpu::Gpu;
 
 fn gpu() -> Option<Gpu> {
@@ -58,8 +58,19 @@ fn geometry_and_convolution_match_cpu() {
             let cpu = ConvGeometry::rows(&domain, rows, nside, ksz, l, Gauge::Cosmo);
             let grid = Grid::new(&gpu, &domain, own);
             let rows_d = gpu.upload(rows);
-            let dev = DeviceGeometry::build(&gpu, &grid, &rows_d, rows.len(), nside, ksz, l, Gauge::Cosmo, true);
-            let (pos, w, comp) = (gpu.download(&dev.pos), gpu.download(&dev.w), gpu.download(dev.complete.as_ref().unwrap()));
+            let spec = Spec { nside, kernel_sz: ksz, g: l, gauge: Gauge::Cosmo };
+            let mut dev = DeviceGeometry::build(&gpu, &grid, &rows_d, rows.len(), &spec, true);
+            let (pos, w, comp) = (
+                gpu.download(dev.pos.as_ref().unwrap()),
+                gpu.download(dev.w.as_ref().unwrap()),
+                gpu.download(dev.complete.as_ref().unwrap()),
+            );
+            // Dropping and recomputing the weights gives them back to the bit.
+            let wt = gpu.download(dev.wt.as_ref().unwrap());
+            dev.strip();
+            dev.refresh(&gpu, &grid, &rows_d, &spec);
+            assert_eq!(gpu.download(dev.w.as_ref().unwrap()), w);
+            assert_eq!(gpu.download(dev.wt.as_ref().unwrap()), wt);
             let k = rows.len();
             let (mut werr, mut bad_pos, mut bad_complete) = (0f64, 0usize, 0usize);
             for kk in 0..k {
@@ -74,7 +85,7 @@ fn geometry_and_convolution_match_cpu() {
                         let mut diff: Vec<(u32, f64)> = Vec::new();
                         for n in 0..4 {
                             let c = cpu.at(n, g, kk, pp);
-                            let d = ((g * 4 + n) * k + kk) * p + pp;
+                            let d = ((g * 4 + n) * p + pp) * k + kk;
                             diff.push((cpu.pos[c], cpu.w[c]));
                             diff.push((pos[d], -w[d]));
                         }

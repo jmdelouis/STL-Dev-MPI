@@ -20,7 +20,7 @@
 //! accumulated in plan order.
 
 use crate::device::{Arg, Gpu, NULL};
-use crate::geometry::{DeviceGeometry, Grid};
+use crate::geometry::{DeviceGeometry, Grid, Spec};
 use crate::topology::{HostCsr, Topology};
 use cudarc::driver::{CudaSlice, DeviceRepr};
 use num_complex::Complex64;
@@ -34,14 +34,50 @@ use stl_core::plan::{Coefficient, Family};
 /// Pixels per partial sum of a coefficient (then summed in chunk order).
 const CHUNK: usize = 1 << 16;
 
+/// What is kept of the convolution geometry of the blocks between sweeps
+/// (it depends on the decomposition only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeometryCache {
+    /// Everything when it fits, else the transposition (below).
+    Auto,
+    /// Positions, weights and transposition (24 bytes per entry), for the
+    /// blocks that fit; the others keep their transposition if it fits.
+    Full,
+    /// The transposition only (4 bytes per entry; the weights are
+    /// recomputed at every sweep), for the blocks that fit.
+    Transposition,
+    /// Nothing: everything recomputed at every sweep.
+    None,
+}
+
+impl GeometryCache {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(GeometryCache::Auto),
+            "full" | "yes" => Some(GeometryCache::Full),
+            "transposition" => Some(GeometryCache::Transposition),
+            "none" | "no" => Some(GeometryCache::None),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            GeometryCache::Auto => "auto",
+            GeometryCache::Full => "full",
+            GeometryCache::Transposition => "transposition",
+            GeometryCache::None => "none",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GpuOptions {
     /// Owned cells per device block; 0: from the device memory.
     pub block_rows: usize,
-    /// Keep the convolution geometry of every block on the device across
-    /// sweeps and evaluations when it fits (`None`: when it takes less than
-    /// half of the free memory).
-    pub cache_geometry: Option<bool>,
+    pub cache: GeometryCache,
+    /// Bytes for the geometry cache; 0: from the device memory.
+    pub cache_bytes: usize,
     /// Host threads for the setup.
     pub threads: usize,
 }
@@ -50,7 +86,8 @@ impl Default for GpuOptions {
     fn default() -> Self {
         GpuOptions {
             block_rows: 0,
-            cache_geometry: None,
+            cache: GeometryCache::Auto,
+            cache_bytes: 0,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
@@ -166,7 +203,10 @@ pub struct GpuEngine<'a> {
     down: Vec<DevCsr>,
     up: Vec<DevCsr>,
     cache: Vec<Vec<Option<DeviceGeometry>>>,
-    cache_geometry: bool,
+    cache_mode: GeometryCache,
+    /// Budget and use of the geometry cache, bytes.
+    cache_bytes: usize,
+    cached_bytes: usize,
     dmap: CudaSlice<i32>,
     /// `maps[n]` `[B C, |layout n|]`.
     pub maps: Vec<CudaSlice<f64>>,
@@ -202,12 +242,21 @@ impl<'a> GpuEngine<'a> {
         let field_doubles: usize =
             (0..levels).map(|n| held[n] * (2 * bc + 3 * bc * l + 2 * n * bc * l + bc * l)).sum();
         let (free, _total) = gpu.memory();
-        let per_row = DeviceGeometry::bytes_per_row(l, p) + levels * bc * l * l * 32 + bc * l * 48;
+        // Held cells of the levels with a decimation: about 30 + 7.5 nonzero
+        // weights (12 bytes) per coarse / fine row, plus the block topology.
+        let csr_bytes: usize = held[..levels - 1].iter().sum::<usize>() * 200;
+        let fixed = field_doubles * 8 + csr_bytes + held.iter().sum::<usize>() * 32 + (512 << 20);
+        let avail = free.saturating_sub(fixed);
+        // Transients of one block: its geometry while built (and the
+        // transposition temporaries), second wavelets and their cotangents.
+        let per_row = DeviceGeometry::bytes_per_row(l, p) * 3 / 2 + levels * bc * l * l * 32 + bc * l * 48;
+        // At most 2^20 owned cells: the convolution rows (with their halo)
+        // must stay within geometry::MAX_ROWS (packed transposed entries).
+        let max_rows = crate::geometry::MAX_ROWS / 2;
         let block_rows = if opts.block_rows > 0 {
-            opts.block_rows
+            opts.block_rows.min(max_rows)
         } else {
-            let budget = free.saturating_sub(field_doubles * 8) as f64 * 0.4;
-            ((budget / per_row as f64) as usize).clamp(1024, 1 << 24)
+            ((avail as f64 * 0.3 / per_row as f64) as usize).clamp(1024, max_rows)
         };
         let started = Instant::now();
         let topo = Topology::new(geo, &part, block_rows, opts.threads);
@@ -218,12 +267,21 @@ impl<'a> GpuEngine<'a> {
         let a1_pos = topo.levels.iter().map(|lv| lv.blocks.iter().map(|b| gpu.upload(&b.a1pos)).collect()).collect();
         let down = topo.down.iter().map(|h| DevCsr::new(&gpu, h)).collect();
         let up = topo.up.iter().map(|h| DevCsr::new(&gpu, h)).collect();
-        let geom_bytes: usize = topo
-            .levels
-            .iter()
-            .flat_map(|lv| lv.blocks.iter().map(|b| b.a1.len() * DeviceGeometry::bytes_per_row(l, p)))
-            .sum();
-        let cache_geometry = opts.cache_geometry.unwrap_or(geom_bytes < free.saturating_sub(field_doubles * 8) / 2);
+        let rows_total: usize = topo.levels.iter().flat_map(|lv| lv.blocks.iter().map(|b| b.a1.len())).sum();
+        let largest = topo.levels.iter().flat_map(|lv| lv.blocks.iter().map(|b| b.a1.len())).max().unwrap_or(0);
+        // Cache budget from what is free once the topology is on the device
+        // (the level fields are allocated at the first sweeps).
+        let cache_bytes = if opts.cache_bytes > 0 {
+            opts.cache_bytes
+        } else {
+            let (free_now, _) = gpu.memory();
+            free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20)) * 4 / 5
+        };
+        let cache_mode = match opts.cache {
+            GeometryCache::Auto if rows_total * DeviceGeometry::bytes_per_row(l, p) <= cache_bytes => GeometryCache::Full,
+            GeometryCache::Auto => GeometryCache::Transposition,
+            m => m,
+        };
         let cache = topo.levels.iter().map(|lv| lv.blocks.iter().map(|_| None).collect()).collect();
         let dmap = gpu.zeros::<i32>(held.iter().copied().max().unwrap_or(0));
         let mut timers = BTreeMap::new();
@@ -243,7 +301,9 @@ impl<'a> GpuEngine<'a> {
             down,
             up,
             cache,
-            cache_geometry,
+            cache_mode,
+            cache_bytes,
+            cached_bytes: 0,
             dmap,
             maps: Vec::new(),
             m: BTreeMap::new(),
@@ -279,8 +339,9 @@ impl<'a> GpuEngine<'a> {
         self.topo.levels.iter().map(|lv| lv.blocks.len()).collect()
     }
 
-    pub fn caches_geometry(&self) -> bool {
-        self.cache_geometry
+    /// The geometry cache policy, its budget and its use, bytes.
+    pub fn geometry_cache(&self) -> (GeometryCache, usize, usize) {
+        (self.cache_mode, self.cache_bytes, self.cached_bytes)
     }
 
     fn tick(&mut self, name: &'static str, since: Instant) {
@@ -312,29 +373,38 @@ impl<'a> GpuEngine<'a> {
 
     // -- geometry -------------------------------------------------------------------
 
+    fn spec(&self, n: usize) -> Spec {
+        Spec { nside: self.topo.levels[n].nside, kernel_sz: self.geo.kernel_sz, g: self.geo.l, gauge: self.geo.gauge }
+    }
+
     fn take_geometry(&mut self, n: usize, b: usize) -> DeviceGeometry {
-        if let Some(g) = self.cache[n][b].take() {
+        let spec = self.spec(n);
+        if let Some(mut g) = self.cache[n][b].take() {
+            self.cached_bytes -= g.bytes();
+            if g.is_stripped() {
+                let t = Instant::now();
+                g.refresh(&self.gpu, &self.grids[n], &self.a1_ids[n][b], &spec);
+                self.tick("gpu_geometry_weights", t);
+            }
             return g;
         }
         let t = Instant::now();
-        let lv = &self.topo.levels[n];
-        let g = DeviceGeometry::build(
-            &self.gpu,
-            &self.grids[n],
-            &self.a1_ids[n][b],
-            lv.blocks[b].a1.len(),
-            lv.nside,
-            self.geo.kernel_sz,
-            self.geo.l,
-            self.geo.gauge,
-            false,
-        );
+        let k = self.topo.levels[n].blocks[b].a1.len();
+        let g = DeviceGeometry::build(&self.gpu, &self.grids[n], &self.a1_ids[n][b], k, &spec, false);
         self.tick("gpu_geometry", t);
         g
     }
 
-    fn put_geometry(&mut self, n: usize, b: usize, g: DeviceGeometry) {
-        if self.cache_geometry {
+    /// Keeps the geometry of a block as the policy and the budget allow.
+    fn put_geometry(&mut self, n: usize, b: usize, mut g: DeviceGeometry) {
+        if self.cache_mode == GeometryCache::None {
+            return;
+        }
+        if self.cache_mode != GeometryCache::Full || self.cached_bytes + g.bytes() > self.cache_bytes {
+            g.strip();
+        }
+        if self.cached_bytes + g.bytes() <= self.cache_bytes {
+            self.cached_bytes += g.bytes();
             self.cache[n][b] = Some(g);
         }
     }
