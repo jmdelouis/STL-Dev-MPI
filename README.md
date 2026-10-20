@@ -15,7 +15,10 @@ see `CLAUDE.md` for the model, the architecture and the milestones, and
 | `crates/stl-mpi` | decomposition, halo exchange, ghost accumulation (`Comm`: threads or MPI), distributed objective (`synthesis.rs`), npy / HEALPix FITS I/O |
 | `crates/stl-cli` | `stl-synth`: synthesis from a target map |
 | `tools/dump_reference.py` | dumps STL-Dev outputs as fixtures |
+| `tools/prepare_healpix_target.py`, `gaussianize.py`, `resample_nested.py` | target preparation: NESTED degrading, Gaussian anamorphosis and histogram matching, 2N up / N down resampling |
+| `tools/plot_mollweide.py`, `compare_syntheses.py` | figures |
 | `tools/datarmor/` | environment and PBS script for Datarmor |
+| `tools/hpc/` | environment and Slurm scripts for the hpc cluster (build, scaling, synthesis chain) |
 | `fixtures/<suite>/` | `.npy` arrays + `meta.json` per case, `index.json` per suite |
 | `benchmarks/datarmor/` | reports of the Datarmor runs |
 
@@ -244,6 +247,24 @@ small-scale texture shows a preferred east-west elongation that the
 target does not have (only two orientations, L = 2; to be checked with
 STL-Dev at the same resolution and with more orientations). Reports in
 `benchmarks/hpc/job1524066_*` and `job1524067_*`.
+
+Synthesis quality on a strongly non-Gaussian target (Takahashi et al. 2017
+lensing convergence, z_s = 0.05, nside 64, skewness 8.4; local runs, 400
+L-BFGS iterations):
+
+| Setting | Residual (rms, in ergodic sigma) S3 / S4 | Skewness | E-W / N-S small-scale power |
+|---|---|---|---|
+| target | | 8.38 | 1.11 +- 0.09 |
+| L = 2, unweighted loss | 1.22 / 2.87 | 3.49 | 0.83 +- 0.06 |
+| L = 2, ergodic 1/sigma^2 weights (`--weights ergodic`) | 0.00 / 0.00 | 3.80 | 1.06 +- 0.07 |
+| L = 2, ergodic, gaussianised target, inverted | 0.01 / 0.01 | 8.38 | 1.09 +- 0.07 |
+| L = 2, ergodic, gaussianised, synthesis at nside 128, cut to 64, histogram matched | 0.10 / 0.05 | 8.38 | 0.97 +- 0.10 |
+
+The weights fit every family and restore isotropy. The Gaussian
+anamorphosis (FOSCAT's `to_gaussian`) recovers the pixel distribution.
+Synthesising at 2N and cutting back to N removes the pixel-scale noise
+that the 5 x 5 stencil leaves. The last row is the recipe of
+`tools/hpc/chain_up.slurm` and `docs/USAGE.md` §4.
 
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in

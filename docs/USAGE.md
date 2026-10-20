@@ -79,10 +79,17 @@ export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
 ### 3.3 Sources and dependencies
 
 ```bash
-git clone https://github.com/jmdelouis/STL-Dev-MPI.git $W/src   # private repository: ask for access
+git clone https://github.com/jmdelouis/STL-Dev-MPI.git $W/src   # private repository: ask jmdelouis for access
 cd $W/src
+git checkout main
 cargo fetch                                                      # on a node with internet access
 ```
+
+`main` is the reference branch: everything in this guide is on `main`,
+and every merge into it has passed the fixture tests. Work in progress
+lives on feature branches (`m6-scaling`, ...), which are merged into `main`
+when their tests pass. To update an installation, run `git pull` on `main`,
+then `cargo fetch` and rebuild (§3.6).
 
 Compute nodes often have no internet access. `cargo fetch` on the login
 node downloads every crate into `$CARGO_HOME`; the build then runs anywhere
