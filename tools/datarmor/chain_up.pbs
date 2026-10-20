@@ -1,0 +1,42 @@
+#!/bin/bash
+# Datarmor (PBS, Intel MPI) version of tools/hpc/chain_up.slurm: synthesis
+# at 2N of the gaussianised, up-sampled target prepared in PREP
+# (target_gauss_up_nested.npy, gauss_table.npz; see docs/USAGE.md §4.3),
+# cut back to N, histogram matching.
+#
+#   qsub -v W=$W,PREP=$W/prep/name,L=2,NITER=400 $W/src/tools/datarmor/chain_up.pbs
+#
+# Optional: INIT (coarse-to-fine start), EXTRA (more stl-synth options).
+#PBS -N stl-chain
+#PBS -q mpi_4
+#PBS -l select=4:ncpus=28:mpiprocs=28:mem=100gb
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -S /bin/bash
+
+set -eu
+W=${W:-/home1/scratch/jmdeloui/stl-mpi}
+source "$W/env.sh"
+# No numpy in the system or miniforge Pythons: a venv under $W
+# (miniforge python3 -m venv $W/pyenv; $W/pyenv/bin/pip install numpy scipy).
+PY=${PY:-$W/pyenv/bin/python}
+T=$W/src/tools
+OUT="$W/runs/${PBS_JOBID%%.*}"
+mkdir -p "$OUT"
+cd "$OUT"
+NP=$(wc -l < "$PBS_NODEFILE")
+echo "job $PBS_JOBID on $(sort -u "$PBS_NODEFILE" | paste -sd' '), $NP ranks, prep $PREP, L ${L:-2}, niter ${NITER:-400}, init ${INIT:-noise}"
+ln -sf "$PREP/target_gauss_up_nested.npy" target_gauss_up_nested.npy
+cp "$PREP/gauss_table.npz" .
+INIT_OPT=""
+[ -n "${INIT:-}" ] && INIT_OPT="--init $INIT"
+time mpirun -np "$NP" -machinefile "$PBS_NODEFILE" \
+    "$CARGO_TARGET_DIR/release/stl-synth" --target target_gauss_up_nested.npy \
+    --L "${L:-2}" --weights ergodic --niter "${NITER:-400}" $INIT_OPT ${EXTRA:-} \
+    --out up 2> up.err | tee up.log
+tail -3 up.err
+time "$PY" "$T/resample_nested.py" down up_synthesis_nested.npy synthesis_gauss_nested.npy
+time "$PY" "$T/gaussianize.py" match gauss_table.npz synthesis_gauss_nested.npy synthesis_nested.npy
+rm -f up_target.fits
+echo "done $(date)"
