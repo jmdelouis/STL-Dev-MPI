@@ -6,7 +6,7 @@ use crate::decomposition::{build_partition, Decomposition};
 use crate::halo::HaloExchange;
 use num_complex::Complex64;
 use std::path::{Path, PathBuf};
-use stl_core::engine::{EngineConfig, LocalEngine};
+use stl_core::engine::{EngineConfig, LocalEngine, Partition};
 use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::stencil::Gauge;
@@ -97,20 +97,19 @@ pub fn run_rank_unit<C: Comm>(fx: &Fixture, comm: &C, unit: Option<i64>) -> Rank
     run_problem(&geo, &cfg, &plan, &map0, &gradient, batch, channels, comm, unit)
 }
 
-/// Forward and reverse sweeps of any problem on the rank of `comm`
-/// (`map0` full sky `[B, C, N_0]`, read on the owned cells only).
-#[allow(clippy::too_many_arguments)]
-pub fn run_problem<C: Comm>(
+/// Partition, exchange and level-0 input of the rank (halo cells of the
+/// input left at zero: they must come from the owners), cells held and
+/// halo cells per level.
+#[allow(clippy::type_complexity)]
+fn prepare<'c, C: Comm>(
     geo: &LocalGeometry,
     cfg: &EngineConfig,
-    plan: &[Coefficient],
     map0: &[f64],
-    gradient: &[Complex64],
     batch: usize,
     channels: usize,
-    comm: &C,
+    comm: &'c C,
     unit: Option<i64>,
-) -> RankResult {
+) -> (Partition, HaloExchange<'c, C>, Vec<f64>, Vec<usize>, Vec<usize>) {
     let dec = match unit {
         Some(u) => Decomposition::with_unit(geo, cfg.levels(), comm.size(), u),
         None => Decomposition::new(geo, cfg.levels(), comm.size()),
@@ -129,6 +128,28 @@ pub fn run_problem<C: Comm>(
     }
     let held = part.layouts.iter().map(|l| l.len()).collect();
     let halo = ex.halo_cells();
+    (part, ex, x, held, halo)
+}
+
+/// Forward and reverse sweeps of any problem on the rank of `comm`
+/// (`map0` full sky `[B, C, N_0]`, read on the owned cells only).
+#[allow(clippy::too_many_arguments)]
+pub fn run_problem<C: Comm>(
+    geo: &LocalGeometry,
+    cfg: &EngineConfig,
+    plan: &[Coefficient],
+    map0: &[f64],
+    gradient: &[Complex64],
+    batch: usize,
+    channels: usize,
+    comm: &C,
+    unit: Option<i64>,
+) -> RankResult {
+    #[cfg(feature = "gpu")]
+    if let Some(opts) = gpu_options() {
+        return run_problem_gpu(geo, cfg, plan, map0, gradient, batch, channels, comm, unit, &opts);
+    }
+    let (part, ex, x, held, halo) = prepare(geo, cfg, map0, batch, channels, comm, unit);
     let mut engine = LocalEngine::distributed(geo, cfg, part, &ex, x, batch, channels);
     let values = engine.forward(plan);
     let mg = engine.reverse(plan, gradient);
@@ -136,6 +157,88 @@ pub fn run_problem<C: Comm>(
     let (_, bands) = engine.analysis_vjp(mg);
     let bands = bands.iter().enumerate().map(|(d, g)| engine.owned_values(d, g)).collect();
     RankResult { values, owned: engine.part.owned.clone(), maps_gradient, bands, held, halo }
+}
+
+/// The device options when the checks run on GPUs (`STL_CHECK_GPU` set;
+/// its value, if a number, is the device block size).
+#[cfg(feature = "gpu")]
+pub fn gpu_options() -> Option<stl_gpu::GpuOptions> {
+    let v = std::env::var("STL_CHECK_GPU").ok()?;
+    let mut opts = stl_gpu::GpuOptions::default();
+    if let Ok(n) = v.parse::<usize>() {
+        opts.block_rows = n;
+    }
+    Some(opts)
+}
+
+/// [`run_problem`] on the rank's device (`Gpu::for_rank`).
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments)]
+pub fn run_problem_gpu<C: Comm>(
+    geo: &LocalGeometry,
+    cfg: &EngineConfig,
+    plan: &[Coefficient],
+    map0: &[f64],
+    gradient: &[Complex64],
+    batch: usize,
+    channels: usize,
+    comm: &C,
+    unit: Option<i64>,
+    opts: &stl_gpu::GpuOptions,
+) -> RankResult {
+    let (part, ex, x, held, halo) = prepare(geo, cfg, map0, batch, channels, comm, unit);
+    gpu::run(geo, cfg, plan, gradient, batch, channels, comm, part, &ex, x, held, halo, opts)
+}
+
+#[cfg(feature = "gpu")]
+mod gpu {
+    use super::RankResult;
+    use crate::comm::Comm;
+    use crate::halo::HaloExchange;
+    use num_complex::Complex64;
+    use std::sync::Arc;
+    use stl_core::engine::{EngineConfig, Partition};
+    use stl_core::local::LocalGeometry;
+    use stl_core::plan::Coefficient;
+    use stl_gpu::{Gpu, GpuEngine, GpuOptions};
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run<C: Comm>(
+        geo: &LocalGeometry,
+        cfg: &EngineConfig,
+        plan: &[Coefficient],
+        gradient: &[Complex64],
+        batch: usize,
+        channels: usize,
+        comm: &C,
+        part: Partition,
+        ex: &HaloExchange<C>,
+        x: Vec<f64>,
+        held: Vec<usize>,
+        halo: Vec<usize>,
+        opts: &GpuOptions,
+    ) -> RankResult {
+        let gpu = Arc::new(Gpu::for_rank(comm.rank()).expect("CUDA device"));
+        let owned_of = |part: &Partition, d: usize, g: &[f64]| -> Vec<f64> {
+            let layout = &part.layouts[d];
+            let (s, e) = part.owned[d];
+            if s == e {
+                return Vec::new();
+            }
+            let p0 = layout.pos(s);
+            g.chunks(layout.len()).flat_map(|row| row[p0..p0 + (e - s) as usize].iter().copied()).collect()
+        };
+        let owned = part.owned.clone();
+        let mut engine = GpuEngine::new(gpu.clone(), geo, cfg, part.clone(), batch, channels, opts);
+        engine.load(ex, &x);
+        let (values, _) = engine.forward(ex, plan, false);
+        let mg = engine.reverse(ex, plan, gradient);
+        let maps_gradient: Vec<Vec<f64>> = mg.iter().enumerate().map(|(d, g)| owned_of(&part, d, &gpu.download(g))).collect();
+        let g0 = gpu.download(&engine.analysis_vjp(ex, mg));
+        let bands = engine.bands(ex, g0);
+        let bands = bands.iter().enumerate().map(|(d, g)| owned_of(&part, d, g)).collect();
+        RankResult { values, owned, maps_gradient, bands, held, halo }
+    }
 }
 
 /// Collective: every rank's result on rank 0 (`None` elsewhere).

@@ -16,6 +16,6 @@ num-complex.workspace = true
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-version-from-build-system", "fallback-latest"] }
 
 [dev-dependencies]
-stl-mpi = { path = "../stl-mpi" }
+stl-mpi = { path = "../stl-mpi", features = ["gpu"] }
 npyz.workspace = true
 serde_json.workspace = true

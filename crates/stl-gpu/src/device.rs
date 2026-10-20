@@ -150,6 +150,10 @@ impl Gpu {
         Self::new(ordinal)
     }
 
+    pub fn ordinal(&self) -> usize {
+        self.ctx.ordinal()
+    }
+
     /// Free and total device memory, bytes.
     pub fn memory(&self) -> (usize, usize) {
         self.ctx.bind_to_thread().unwrap();
@@ -164,7 +168,7 @@ impl Gpu {
     }
 
     pub fn download<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> Vec<T> {
-        if s.len() == 0 {
+        if s.is_empty() {
             return Vec::new();
         }
         let v = self.stream.clone_dtoh(s).expect("device to host copy");
@@ -188,13 +192,13 @@ impl Gpu {
     }
 
     pub fn clear<T: DeviceRepr + ValidAsZeroBits>(&self, s: &mut CudaSlice<T>) {
-        if s.len() > 0 {
+        if !s.is_empty() {
             self.stream.memset_zeros(s).unwrap();
         }
     }
 
     pub fn copy<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> CudaSlice<T> {
-        if s.len() == 0 {
+        if s.is_empty() {
             return self.stream.null().unwrap();
         }
         self.stream.clone_dtod(s).unwrap()

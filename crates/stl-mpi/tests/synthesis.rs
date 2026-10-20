@@ -43,6 +43,7 @@ fn first_evaluation() {
             let target = probe.statistics(&probe.slice(&fx.f64("target_map")));
             let obj = Objective::new(&geo, &cfg, &plan, &target, 1, 1, comm);
             let (loss, _) = obj.loss_and_grad(&obj.slice(&fx.f64("initial_map")));
+            drop(obj);
             (target, loss)
         });
         let (target, loss) = &out[0];

@@ -38,6 +38,10 @@ stl-synth --target MAP [options]
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>)
   --ranks N             thread ranks in this process (builds without MPI)
+  --gpu                 one CUDA device per rank (feature gpu): device = local rank modulo the
+                        visible devices, or STL_GPU_DEVICE
+  --gpu-block-rows N    owned cells per device block (default: from the device memory)
+  --gpu-cache C         keep the convolution geometry on the device: 'auto' (default), 'yes', 'no'
   --quiet               no line per evaluation
 ";
 
@@ -60,6 +64,9 @@ pub struct Args {
     pub out: Option<String>,
     pub ranks: usize,
     pub quiet: bool,
+    pub gpu: bool,
+    pub gpu_block_rows: usize,
+    pub gpu_cache: Option<bool>,
 }
 
 impl Args {
@@ -82,6 +89,9 @@ impl Args {
             out: None,
             ranks: 1,
             quiet: false,
+            gpu: false,
+            gpu_block_rows: 0,
+            gpu_cache: None,
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -121,12 +131,25 @@ impl Args {
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
                 "--ranks" => a.ranks = num(it.next(), k)?,
                 "--quiet" => a.quiet = true,
+                "--gpu" => a.gpu = true,
+                "--gpu-block-rows" => a.gpu_block_rows = num(it.next(), k)?,
+                "--gpu-cache" => {
+                    a.gpu_cache = match it.next().map(String::as_str) {
+                        Some("auto") => None,
+                        Some("yes") => Some(true),
+                        Some("no") => Some(false),
+                        _ => return Err("--gpu-cache is 'auto', 'yes' or 'no'".into()),
+                    }
+                }
                 "-h" | "--help" => return Err(USAGE.into()),
                 other => return Err(format!("unknown option {other}\n\n{USAGE}")),
             }
         }
         if a.target.as_os_str().is_empty() {
             return Err(format!("--target is required\n\n{USAGE}"));
+        }
+        if a.gpu && !cfg!(feature = "gpu") {
+            return Err("--gpu: built without the feature gpu".into());
         }
         Ok(a)
     }
@@ -185,7 +208,16 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let plan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &Family::ALL);
     let started_setup = Instant::now();
     let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
-    let probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+    #[allow(unused_mut)]
+    let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+    #[allow(unused_mut)]
+    let mut gpu_info = serde_json::Value::Null;
+    #[cfg(feature = "gpu")]
+    if args.gpu {
+        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank())?;
+        probe.set_evaluator(ev);
+        gpu_info = info;
+    }
     let (s, e) = probe.owned();
     let (s, e) = (s as usize, e as usize);
 
@@ -248,8 +280,12 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // Target statistics with the same distributed engine, and the spatial
     // variance of every coefficient's terms for the ergodic weights.
     let (target_stats, target_var) = probe.statistics_moments(&target);
+    let evaluator = probe.take_evaluator();
     drop(probe);
     let mut obj = Objective::new(&geo, &cfg, &plan, &target_stats, 1, 1, comm);
+    if let Some(ev) = evaluator {
+        obj.set_evaluator(ev);
+    }
     if args.ergodic_weights {
         obj.weights = ergodic_weights(&geo, &plan, &target_var);
     }
@@ -288,8 +324,18 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             per_family.insert(fam.name().into(), serde_json::json!({"count": z.len(), "rms_sigma": rms, "max_sigma": z.iter().cloned().fold(0.0, f64::max)}));
         }
     }
-    let timers: serde_json::Map<String, serde_json::Value> =
+    let mut timers: serde_json::Map<String, serde_json::Value> =
         obj.timers.borrow().iter().map(|(k, v)| (k.to_string(), serde_json::json!((v * 10.0).round() / 10.0))).collect();
+    // Device phases (whole run, target statistics included) and memory.
+    let (device_timers, device_memory) = obj.evaluator_report();
+    for (k, v) in device_timers {
+        timers.insert(k.to_string(), serde_json::json!((v * 100.0).round() / 100.0));
+    }
+    let device_peaks = comm.allgather_i64(device_memory.map_or(0, |m| m.0 as i64));
+    if let Some(info) = gpu_info.as_object_mut() {
+        info.insert("memory_peak_bytes_per_rank".into(), serde_json::json!(device_peaks));
+        info.insert("memory_total_bytes".into(), serde_json::json!(device_memory.map(|m| m.1)));
+    }
     let floor = obj.memory_floor_bytes(args.history_size);
     let floors: Vec<i64> = comm.allgather_i64(
         floor.as_object().unwrap().iter().filter_map(|(_, v)| v.as_i64()).sum(),
@@ -344,6 +390,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "conv_chunk": args.conv_chunk,
         "variables": "map",
         "ranks": comm.size(),
+        "backend": if args.gpu { "gpu" } else { "cpu" },
+        "gpu": gpu_info,
         "setup_seconds": (setup_seconds * 100.0).round() / 100.0,
         "seconds": (seconds * 100.0).round() / 100.0,
         "seconds_per_evaluation": (seconds / history.len().max(1) as f64 * 1000.0).round() / 1000.0,
@@ -367,4 +415,40 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
 
 pub fn exists(p: &Path) -> bool {
     p.exists()
+}
+
+#[cfg(feature = "gpu")]
+mod gpu {
+    use super::Args;
+    use std::sync::Arc;
+    use stl_core::engine::{EngineConfig, Evaluator, Partition};
+    use stl_core::local::LocalGeometry;
+    use stl_core::plan::Coefficient;
+    use stl_gpu::{Gpu, GpuEngine, GpuEvaluator, GpuOptions};
+
+    /// The device engine of the rank and a description for the report.
+    pub fn evaluator<'a>(
+        args: &Args,
+        geo: &'a LocalGeometry,
+        cfg: &'a EngineConfig,
+        plan: &'a [Coefficient],
+        part: &Partition,
+        rank: usize,
+    ) -> Result<(Box<dyn Evaluator + 'a>, serde_json::Value), String> {
+        let gpu = Arc::new(Gpu::for_rank(rank)?);
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache_geometry: args.gpu_cache, ..Default::default() };
+        if let Some(t) = std::env::var("STL_GPU_THREADS").ok().and_then(|v| v.parse().ok()) {
+            opts.threads = t;
+        }
+        let engine = GpuEngine::new(gpu.clone(), geo, cfg, part.clone(), 1, 1, &opts);
+        let info = serde_json::json!({
+            "device": gpu.name,
+            "devices_visible": Gpu::count()?,
+            "device_ordinal": gpu.ordinal(),
+            "blocks_per_level": engine.blocks_per_level(),
+            "block_rows": engine.block_rows(),
+            "cache_geometry": engine.caches_geometry(),
+        });
+        Ok((Box::new(GpuEvaluator::new(engine, plan)), info))
+    }
 }

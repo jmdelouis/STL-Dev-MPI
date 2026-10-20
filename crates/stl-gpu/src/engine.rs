@@ -177,6 +177,9 @@ pub struct GpuEngine<'a> {
     absz: Vec<CudaSlice<f64>>,
     z: Vec<CudaSlice<f64>>,
     pub timers: BTreeMap<&'static str, f64>,
+    block_rows: usize,
+    /// Largest device memory in use seen at the phase ends (whole device).
+    peak_used: usize,
 }
 
 impl<'a> GpuEngine<'a> {
@@ -247,7 +250,20 @@ impl<'a> GpuEngine<'a> {
             absz: Vec::new(),
             z: Vec::new(),
             timers,
+            block_rows,
+            peak_used: 0,
         }
+    }
+
+    /// Owned cells per device block.
+    pub fn block_rows(&self) -> usize {
+        self.block_rows
+    }
+
+    /// Peak and total device memory, bytes.
+    pub fn device_memory(&self) -> (usize, usize) {
+        let (free, total) = self.gpu.memory();
+        (self.peak_used.max(total - free), total)
     }
 
     pub fn levels(&self) -> usize {
@@ -270,6 +286,8 @@ impl<'a> GpuEngine<'a> {
     fn tick(&mut self, name: &'static str, since: Instant) {
         self.gpu.sync();
         *self.timers.entry(name).or_default() += since.elapsed().as_secs_f64();
+        let (free, total) = self.gpu.memory();
+        self.peak_used = self.peak_used.max(total - free);
     }
 
     // -- exchanges ----------------------------------------------------------------
@@ -994,7 +1012,6 @@ impl Evaluator for GpuEvaluator<'_> {
     }
 
     fn device_memory(&self) -> Option<(usize, usize)> {
-        let (free, total) = self.engine.gpu.memory();
-        Some((total - free, total))
+        Some(self.engine.device_memory())
     }
 }

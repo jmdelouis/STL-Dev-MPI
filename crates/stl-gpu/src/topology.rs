@@ -189,7 +189,7 @@ fn decimation(geo: &LocalGeometry, fine: &LevelTopo, coarse: &LevelTopo, threads
             }
             out
         });
-        entries.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        entries.sort_unstable_by_key(|e| (e.0, e.1));
         let mut k = 0;
         for j in fs..fe {
             while k < entries.len() && entries[k].0 == j {

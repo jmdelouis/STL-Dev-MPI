@@ -97,4 +97,8 @@ impl<C: Comm> Exchange for HaloExchange<'_, C> {
     fn allreduce(&self, values: &mut [f64]) {
         self.comm.allreduce_sum(values);
     }
+
+    fn trivial(&self) -> bool {
+        self.comm.size() == 1
+    }
 }

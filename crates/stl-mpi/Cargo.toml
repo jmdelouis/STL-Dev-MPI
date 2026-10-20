@@ -9,9 +9,12 @@ repository.workspace = true
 [features]
 # The MPI backend (rsmpi); needs an MPI installation and libclang.
 mpi = ["dep:mpi"]
+# Device engine (one CUDA GPU per rank) for the checks: STL_CHECK_GPU=1.
+gpu = ["dep:stl-gpu"]
 
 [dependencies]
 stl-core = { path = "../stl-core" }
+stl-gpu = { path = "../stl-gpu", optional = true }
 num-complex.workspace = true
 npyz.workspace = true
 serde_json.workspace = true

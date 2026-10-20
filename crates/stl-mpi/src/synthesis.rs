@@ -8,7 +8,7 @@ use crate::decomposition::{build_partition, Decomposition};
 use crate::halo::HaloExchange;
 use num_complex::Complex64;
 use std::time::Instant;
-use stl_core::engine::{EngineConfig, LocalEngine, Partition};
+use stl_core::engine::{EngineConfig, Evaluator, LocalEngine, Partition};
 use stl_core::lbfgs::{minimize, LbfgsOptions, Reduce};
 use stl_core::local::LocalGeometry;
 use stl_core::plan::Coefficient;
@@ -45,6 +45,8 @@ pub struct Objective<'a, C: Comm> {
     halo: HaloExchange<'a, C>,
     /// Seconds per phase, summed over the evaluations.
     pub timers: std::cell::RefCell<std::collections::BTreeMap<&'static str, f64>>,
+    /// Backend replacing the CPU sweeps (a device engine), if any.
+    evaluator: Option<std::cell::RefCell<Box<dyn Evaluator + 'a>>>,
 }
 
 impl<'a, C: Comm> Objective<'a, C> {
@@ -75,6 +77,29 @@ impl<'a, C: Comm> Objective<'a, C> {
             part,
             halo,
             timers: Default::default(),
+            evaluator: None,
+        }
+    }
+
+    /// Evaluates with `evaluator` (built on this objective's partition and
+    /// plan) instead of the CPU sweeps.
+    pub fn set_evaluator(&mut self, evaluator: Box<dyn Evaluator + 'a>) {
+        self.evaluator = Some(std::cell::RefCell::new(evaluator));
+    }
+
+    pub fn take_evaluator(&mut self) -> Option<Box<dyn Evaluator + 'a>> {
+        self.evaluator.take().map(|e| e.into_inner())
+    }
+
+    /// Phase timers of the evaluator since the last call, and its device memory.
+    #[allow(clippy::type_complexity)]
+    pub fn evaluator_report(&self) -> (Vec<(&'static str, f64)>, Option<(usize, usize)>) {
+        match &self.evaluator {
+            Some(e) => {
+                let mut e = e.borrow_mut();
+                (e.take_timers(), e.device_memory())
+            }
+            None => (Vec::new(), None),
         }
     }
 
@@ -115,6 +140,9 @@ impl<'a, C: Comm> Objective<'a, C> {
 
     /// Statistics `[B, len(plan)]` of the map whose owned slice is `x`.
     pub fn statistics(&self, x: &[f64]) -> Vec<Complex64> {
+        if let Some(ev) = &self.evaluator {
+            return ev.borrow_mut().forward(&self.halo, &self.to_layout(x), false).0;
+        }
         let mut engine =
             LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
         engine.forward(self.plan)
@@ -123,18 +151,16 @@ impl<'a, C: Comm> Objective<'a, C> {
     /// Statistics and, per coefficient, the spatial variance of the terms
     /// it averages ([`LocalEngine::forward_moments`]).
     pub fn statistics_moments(&self, x: &[f64]) -> (Vec<Complex64>, Vec<f64>) {
+        if let Some(ev) = &self.evaluator {
+            return ev.borrow_mut().forward(&self.halo, &self.to_layout(x), true);
+        }
         let mut engine =
             LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
         engine.forward_moments(self.plan)
     }
 
-    /// Loss and owned slice of its gradient (`loss_and_grad_local`, map variable).
-    pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
-        let start = Instant::now();
-        let mut engine =
-            LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
-        let values = engine.forward(self.plan);
-        self.tick("forward", start);
+    /// Loss and its cotangent on the statistics.
+    fn loss_cotangent(&self, values: &[Complex64]) -> (f64, Vec<Complex64>) {
         let n = self.plan.len();
         let mut loss = 0.0;
         let cotangent: Vec<Complex64> = values
@@ -149,6 +175,35 @@ impl<'a, C: Comm> Objective<'a, C> {
                 2.0 * w * residual
             })
             .collect();
+        (loss, cotangent)
+    }
+
+    /// Loss and owned slice of its gradient (`loss_and_grad_local`, map variable).
+    pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
+        let start = Instant::now();
+        if let Some(ev) = &self.evaluator {
+            let mut ev = ev.borrow_mut();
+            let (values, _) = ev.forward(&self.halo, &self.to_layout(x), false);
+            self.tick("forward", start);
+            let (loss, cotangent) = self.loss_cotangent(&values);
+            let start = Instant::now();
+            let g0 = ev.gradient(&self.halo, &cotangent);
+            self.tick("reverse", start);
+            let (s, e) = self.owned();
+            if s == e {
+                return (loss, Vec::new());
+            }
+            let layout = &self.part.layouts[0];
+            let len = (e - s) as usize;
+            let p0 = layout.pos(s);
+            let owned: Vec<f64> = g0.chunks(layout.len()).flat_map(|row| row[p0..p0 + len].iter().copied()).collect();
+            return (loss, owned);
+        }
+        let mut engine =
+            LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
+        let values = engine.forward(self.plan);
+        self.tick("forward", start);
+        let (loss, cotangent) = self.loss_cotangent(&values);
         let start = Instant::now();
         let mg = engine.reverse(self.plan, &cotangent);
         let (g0, _) = engine.analysis_vjp(mg);

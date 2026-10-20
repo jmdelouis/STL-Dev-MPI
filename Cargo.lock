@@ -895,6 +895,7 @@ dependencies = [
  "num-complex",
  "serde_json",
  "stl-core",
+ "stl-gpu",
  "stl-mpi",
 ]
 
@@ -929,6 +930,7 @@ dependencies = [
  "num-complex",
  "serde_json",
  "stl-core",
+ "stl-gpu",
 ]
 
 [[package]]
