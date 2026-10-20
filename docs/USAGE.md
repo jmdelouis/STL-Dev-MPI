@@ -238,10 +238,10 @@ holding `target_gauss_up_nested.npy` and `gauss_table.npz` as `PREP`.
 
 ```bash
 # one node, thread ranks (binary built with or without --features mpi)
-stl-synth --target T_gauss_up.npy --L 2 --weights ergodic --niter 400 --ranks 8 --out run
+stl-synth --target T_gauss_up.npy --L 4 --weights ergodic --niter 400 --ranks 8 --out run
 
 # MPI
-mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --L 2 --weights ergodic --niter 400 --out run
+mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --L 4 --weights ergodic --niter 400 --out run
 ```
 
 ### 5.1 Options
@@ -254,7 +254,7 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--init-noise X` | `auto` | noise added to `--init`; `auto` = RMS of the target's scales missing at the init nside |
 | `--seed N` | 11 | white-noise seed (the same map whatever the number of ranks) |
 | `--J N` | log2(nside) - 1 | number of scales |
-| `--L N` | 2 | wavelet orientations |
+| `--L N` | 4 | wavelet orientations (`--L 2` reproduces STL-Dev's reference runs, but see below) |
 | `--kernel-size N` | 5 | stencil size |
 | `--fewer` | off | `has_fewer_convolutions` definitions of S3/S4 |
 | `--weights W` | `none` | `none`: sum of squared differences; `ergodic`: reduced chi^2 (below) |
@@ -274,6 +274,13 @@ The loss becomes `mean_i |S_i - S_i(target)|^2 / sigma_i^2`. Without these
 weights the loss is dominated by the low-order coefficients, and S3/S4
 stay at 1 to 3 sigma even after 400 iterations. With them, every family
 converges to well below 1 sigma. Use them for any real synthesis.
+
+**Orientations.** Use L = 4 (the default). With L = 2, even with ergodic
+weights and a gaussianised target, the syntheses come out elongated
+east-west and the high values clump into blobs. On the Takahashi
+convergence map at nside 256, the east-west / north-south small-scale power
+ratio is 0.89 +- 0.03 against 1.02 +- 0.05 for the target. L = 4 costs
+about 1.4 times L = 2.
 
 ### 5.2 Outputs
 
@@ -316,7 +323,7 @@ set -eu
 source $W/src/tools/<site>/env.sh
 OUT=$W/runs/$SLURM_JOB_ID; mkdir -p $OUT; cd $OUT
 mpirun -np $SLURM_NTASKS --map-by core --bind-to core \
-    $CARGO_TARGET_DIR/release/stl-synth --target $TARGET --L 2 --weights ergodic --niter 400 --out run \
+    $CARGO_TARGET_DIR/release/stl-synth --target $TARGET --L 4 --weights ergodic --niter 400 --out run \
     2> run.err | tee run.log
 ```
 
@@ -330,23 +337,40 @@ allowed CPUs over several nodes, use `--nodes=2 --ntasks-per-node=96`.
 
 ### 6.2 PBS
 
-`tools/datarmor/synth_nside64.pbs` is a working example (Intel MPI,
-`mpirun -np $NCPUS`). Submit it with `qsub -v W=$W script.pbs`.
+`tools/datarmor/chain_up.pbs` (synthesis chain of §4.3) and
+`tools/datarmor/synth_nside64.pbs` are working examples (Intel MPI,
+`mpirun -np $NCPUS`). Submit with `qsub -v W=$W,... script.pbs`.
+
+### 6.3 TGCC Irene (`ccc_msub`)
+
+`tools/irene/` holds the environment (`rust`, `mpi/openmpi/4.1.6` and
+`python3/3.12` modules, the system's libclang 17), the chain job
+`chain_up.msub` and `submit_c2f.sh`. The latter submits a coarse-to-fine
+series, one job per target nside, chained with `afterok`. Irene has no
+internet access: ship the sources with their crates vendored (`cargo
+vendor`, plus the `.cargo/config.toml` it prints), then build `--offline`.
 
 ## 7. Sizing
 
-Measured with L = 2, kernel 5, blocks of 16384:
+Measured with kernel 5 and blocks of 16384:
 
-| nside | Ranks | s / evaluation | Code memory per rank | Note |
-|---|---|---|---|---|
-| 64 | 1 | 3.3 | 87 MB | AMD EPYC 9655, OpenMPI 5 |
-| 64 | 28 | 0.8 | 21 MB | Xeon E5-2680 v4, Intel MPI |
-| 128 | 8 threads | 7 | n/a | 20-core workstation |
-| 1024 | 24 | 61 | 155 MB | |
-| 1024 | 192 | 10.2 | 100 MB | 75 % efficiency from 24 to 192 ranks |
+| nside synthesised | L | Ranks | s / evaluation | Code memory per rank | Machine |
+|---|---|---|---|---|---|
+| 64 | 2 | 1 | 3.3 | 87 MB | AMD EPYC 9655, OpenMPI 5 |
+| 64 | 2 | 28 | 0.8 | 21 MB | Xeon E5-2680 v4, Intel MPI |
+| 128 | 2 | 8 threads | 7 | n/a | 20-core workstation |
+| 1024 | 2 | 24 | 61 | 155 MB | EPYC 9655 |
+| 1024 | 2 | 192 | 10.2 | 100 MB | EPYC 9655, 75 % efficiency from 24 to 192 ranks |
+| 1024 | 2 | 128 | 30.2 | | Irene Rome (EPYC 7H12), OpenMPI 4.1 |
+| 1024 | 2 | 512 | 8.9 | | Irene Rome, 85 % efficiency from 128 ranks |
+| 1024 | 4 | 512 | 12.8 | | Irene Rome |
 
 - Time scales as the number of pixels divided by the number of ranks, as
-  long as a rank owns at least about 16k level-0 pixels.
+  long as a rank owns at least about 16k level-0 pixels. Every exchange of
+  an evaluation goes to neighbours only (point-to-point halos, sums by
+  gather and broadcast), so this holds beyond a few hundred ranks. The
+  first versions, which used all-to-all exchanges, ran slower at 512 ranks
+  than at 128.
 - L = 4 costs about 1.3 to 1.5 times L = 2.
 - An L-BFGS iteration costs about 1.1 evaluations on average.
 - The memory per rank is the state (maps, stored moduli, their cotangents,

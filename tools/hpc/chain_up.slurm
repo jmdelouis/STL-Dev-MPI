@@ -5,7 +5,7 @@
 #   3. synthesis at 2N (ergodic weights);
 #   4. cut back to N (mean of the 4 children);
 #   5. rank-based histogram matching on T_N.
-#   sbatch --nodes=1 --ntasks=96 --export=ALL,W=$W,TARGET=$W/data/x_nside256_nested.npy,L=2,NITER=400 \
+#   sbatch --nodes=1 --ntasks=96 --export=ALL,W=$W,TARGET=$W/data/x_nside256_nested.npy,L=4,NITER=400 \
 #          $W/src/tools/hpc/chain_up.slurm
 # Optional: INIT (a NESTED map at nside <= 2N in the units of the
 # gaussianised up target, e.g. up_synthesis_nested.npy of the chain at
@@ -26,7 +26,7 @@ T=$W/src/tools
 OUT="$W/runs/$SLURM_JOB_ID"
 mkdir -p "$OUT"
 cd "$OUT"
-echo "job $SLURM_JOB_ID: $SLURM_JOB_NUM_NODES node(s) $SLURM_JOB_NODELIST, $SLURM_NTASKS tasks, target $TARGET, L ${L:-2}, niter ${NITER:-400}, init ${INIT:-noise}"
+echo "job $SLURM_JOB_ID: $SLURM_JOB_NUM_NODES node(s) $SLURM_JOB_NODELIST, $SLURM_NTASKS tasks, target $TARGET, L ${L:-4}, niter ${NITER:-400}, init ${INIT:-noise}"
 if [ -n "${PREP:-}" ]; then
     # Steps 1-2 done elsewhere (healpix_geo needs Python >= 3.10):
     # PREP holds target_gauss_up_nested.npy and gauss_table.npz.
@@ -41,7 +41,7 @@ INIT_OPT=""
 [ -n "${INIT:-}" ] && INIT_OPT="--init $INIT"
 time mpirun -np "$SLURM_NTASKS" --map-by core --bind-to core \
     "$CARGO_TARGET_DIR/release/stl-synth" --target target_gauss_up_nested.npy \
-    --L "${L:-2}" --weights ergodic --niter "${NITER:-400}" $INIT_OPT ${EXTRA:-} \
+    --L "${L:-4}" --weights ergodic --niter "${NITER:-400}" $INIT_OPT ${EXTRA:-} \
     --out up 2> up.err | tee up.log
 tail -3 up.err
 time "$PY" "$T/resample_nested.py" down up_synthesis_nested.npy synthesis_gauss_nested.npy

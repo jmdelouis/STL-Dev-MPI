@@ -13,7 +13,7 @@ mkdir -p "$S/runs" && cd "$S/runs"
 for step in "$@"; do
     IFS=: read -r N P NITER SECS <<< "$step"
     RUN=$S/runs/${NAME}_c2f_$N
-    EXPORT="ALL,PREP=$S/prep/${NAME}_$N,RUN=$RUN,L=${L:-2},NITER=$NITER${init:+,INIT=$init}"
+    EXPORT="ALL,PREP=$S/prep/${NAME}_$N,RUN=$RUN,L=${L:-4},NITER=$NITER${init:+,INIT=$init}"
     E="--export=$EXPORT${dep:+ --dependency=afterok:$dep}"
     out=$(ccc_msub -r "stl-c2f-$N" -n "$P" -T "$SECS" -E "$E" "$W/src/tools/irene/chain_up.msub")
     id=$(echo "$out" | grep -oE '[0-9]+' | tail -n 1)
