@@ -27,18 +27,22 @@ def up(src, dst):
     x = np.load(src).astype(np.float64)
     nside = nside_of(x.size)
     depth = int(np.log2(nside))
-    ids = np.arange(12 * (2 * nside) ** 2, dtype=np.uint64)
-    lon, lat = healpix_to_lonlat(ids, depth + 1, ellipsoid="sphere")
-    cells, weights = bilinear_interpolation(np.asarray(lon), np.asarray(lat), depth, ellipsoid="sphere")
-    c = np.asarray(getattr(cells, "data", cells)).astype(np.int64)
-    w = np.asarray(getattr(weights, "data", weights)).astype(np.float64)
-    mask = getattr(cells, "mask", None)
-    if mask is not None and np.any(mask):
-        w = np.where(np.asarray(mask), 0.0, w)
-        c = np.where(np.asarray(mask), 0, c)
-    w /= w.sum(axis=1, keepdims=True)
-    y = (x[c] * w).sum(axis=1)
-    np.save(dst, y)
+    n_up = 12 * (2 * nside) ** 2
+    y = np.lib.format.open_memmap(dst, mode="w+", dtype=np.float64, shape=(n_up,))
+    chunk = 1 << 24
+    for s in range(0, n_up, chunk):
+        ids = np.arange(s, min(s + chunk, n_up), dtype=np.uint64)
+        lon, lat = healpix_to_lonlat(ids, depth + 1, ellipsoid="sphere")
+        cells, weights = bilinear_interpolation(np.asarray(lon), np.asarray(lat), depth, ellipsoid="sphere")
+        c = np.asarray(getattr(cells, "data", cells)).astype(np.int64)
+        w = np.asarray(getattr(weights, "data", weights)).astype(np.float64)
+        mask = getattr(cells, "mask", None)
+        if mask is not None and np.any(mask):
+            w = np.where(np.asarray(mask), 0.0, w)
+            c = np.where(np.asarray(mask), 0, c)
+        w /= w.sum(axis=1, keepdims=True)
+        y[s:s + ids.size] = (x[c] * w).sum(axis=1)
+    y.flush()
     back = y.reshape(-1, 4).mean(axis=1)
     print(f"up {nside} -> {2 * nside}: std {x.std():.4e} -> {y.std():.4e}; degrade(up(x)) - x: rms {np.sqrt(np.mean((back - x) ** 2)):.3e}")
 
