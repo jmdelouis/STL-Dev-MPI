@@ -32,8 +32,8 @@ stl-synth --target MAP [options]
                         application (less memory, more time; default: whole block)
   --niter N             L-BFGS iterations (default 50)
   --weights W           loss weights: 'none' (default, sum |S - S_target|^2) or 'ergodic'
-                        (1/sigma^2, sigma^2 = spatial variance of each coefficient's terms on
-                        the target / pixels of its level)
+                        (reduced chi^2: mean of |S - S_target|^2 / sigma^2, sigma^2 = spatial
+                        variance of each coefficient's terms on the target / pixels of its level)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>)

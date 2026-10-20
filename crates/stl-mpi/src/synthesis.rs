@@ -173,11 +173,15 @@ impl<'a, C: Comm> Objective<'a, C> {
     }
 }
 
-/// Ergodic weights `1 / sigma_i^2` with `sigma_i^2 = V_i / N_i`: `V_i` the
-/// spatial variance of the terms averaged by coefficient `i` on the
+/// Ergodic weights `1 / (n sigma_i^2)` with `sigma_i^2 = V_i / N_i`: `V_i`
+/// the spatial variance of the terms averaged by coefficient `i` on the
 /// target, `N_i` the pixels of its native level (variance of a mean of
-/// independent pixels).  Normalised to a mean of 1; a zero variance (a
-/// coefficient that is exactly constant) gets the largest finite weight.
+/// independent pixels), `n` the number of coefficients: the loss is the
+/// reduced chi^2, the mean of `|S_i - S_target,i|^2 / sigma_i^2`.  (A
+/// normalisation by the mean weight would be dominated by the most precise
+/// coefficients and shrink the loss and its gradient below the L-BFGS
+/// tolerances.)  A zero variance (an exactly constant coefficient) gets the
+/// largest finite weight.
 pub fn ergodic_weights(geo: &LocalGeometry, plan: &[Coefficient], variance: &[f64]) -> Vec<f64> {
     let mut w: Vec<f64> = plan
         .iter()
@@ -193,8 +197,8 @@ pub fn ergodic_weights(geo: &LocalGeometry, plan: &[Coefficient], variance: &[f6
         .collect();
     let max_finite = w.iter().copied().filter(|v| v.is_finite()).fold(0.0, f64::max);
     w.iter_mut().filter(|v| !v.is_finite()).for_each(|v| *v = max_finite);
-    let mean = w.iter().sum::<f64>() / w.len() as f64;
-    w.iter_mut().for_each(|v| *v /= mean);
+    let n = w.len() as f64;
+    w.iter_mut().for_each(|v| *v /= n);
     w
 }
 
