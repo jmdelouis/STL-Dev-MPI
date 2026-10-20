@@ -113,6 +113,41 @@ fn statistics_and_gradients() {
     }
 }
 
+/// The geometry cache only saves work: every policy and budget gives the
+/// same statistics and gradients, to the bit, over two evaluations.
+#[test]
+fn geometry_cache_policies_agree() {
+    use stl_gpu::GeometryCache;
+    let Some(gpu) = gpu() else { return };
+    let case = cases("stats", "stats").into_iter().find(|c| c.name().contains("n32_J4_L4_k5_C1")).unwrap();
+    let s = setup(&case);
+    let x = case.f64("map0");
+    let g = complex(&case, "gradient");
+    let run = |cache: GeometryCache, cache_bytes: usize| {
+        let part = Partition::serial(&s.geo, s.cfg.levels());
+        let opts = GpuOptions { block_rows: 1500, cache, cache_bytes, ..Default::default() };
+        let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            e.load(&Serial, &x);
+            let (v, _) = e.forward(&Serial, &s.plan, false);
+            let mg = e.reverse(&Serial, &s.plan, &g);
+            out.push((v, gpu.download(&e.analysis_vjp(&Serial, mg))));
+        }
+        out
+    };
+    let reference = run(GeometryCache::None, 0);
+    assert_eq!(reference[0], reference[1]);
+    for (cache, bytes) in [
+        (GeometryCache::Full, 1 << 34),
+        (GeometryCache::Full, 3 << 20),
+        (GeometryCache::Transposition, 1 << 34),
+        (GeometryCache::Transposition, 2 << 20),
+    ] {
+        assert_eq!(run(cache, bytes), reference, "{cache:?} with {bytes} bytes");
+    }
+}
+
 /// Device against CPU engine on the same inputs: statistics, their spatial
 /// variance and the level-0 gradient agree to rounding.
 #[test]

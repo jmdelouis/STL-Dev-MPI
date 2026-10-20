@@ -3,8 +3,10 @@
 # stl-synth --gpu on garoupe: 3 L-BFGS iterations (4 evaluations) from
 # white noise, J = log2(nside) - 1, kernel 5, one T4 per MPI rank.
 #   W=$HOME/stl-gpu-work bash $W/src/tools/garoupe/bench.sh "256 1024 2048" "2 4" "1 2 3"
-# Targets: $W/bench/field_nside<N>_nested.npy (made here if missing: a
-# lognormal field, its content does not change the cost).
+# Runs in $BENCH (default /tmp/$USER-stl-gpu-bench: the home quota is
+# small); the output maps are deleted, the JSON reports kept.  Targets:
+# $BENCH/field_nside<N>_nested.npy (made here if missing: a lognormal
+# field, its content does not change the cost).
 set -u
 : "${W:=$HOME/stl-gpu-work}"
 source "$W/src/tools/garoupe/env.sh"
@@ -12,7 +14,8 @@ NSIDES=${1:-"256 1024 2048"}
 LS=${2:-"2 4"}
 RANKS=${3:-"1 2 3"}
 BIN=$CARGO_TARGET_DIR/release/stl-synth
-mkdir -p "$W/bench" && cd "$W/bench"
+: "${BENCH:=/tmp/$USER-stl-gpu-bench}"
+mkdir -p "$BENCH" && cd "$BENCH"
 for N in $NSIDES; do
     f=field_nside${N}_nested.npy
     if [ ! -f "$f" ]; then
@@ -35,6 +38,7 @@ EOF
             echo "== nside $N L $L ranks $P $(date +%T)"
             STL_GPU_THREADS=$((12 / P)) mpirun --bind-to none -n "$P" "$BIN" --target "$f" --niter 3 --L "$L" --gpu --quiet --out "$out" > "$out.log" 2>&1
             tail -1 "$out.log"
+            rm -f "$out"_*.fits "$out"_*.npy
         done
     done
 done

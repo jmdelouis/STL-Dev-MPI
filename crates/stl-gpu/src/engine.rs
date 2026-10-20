@@ -207,6 +207,9 @@ pub struct GpuEngine<'a> {
     /// Budget and use of the geometry cache, bytes.
     cache_bytes: usize,
     cached_bytes: usize,
+    /// Part of the budget for whole geometries under `Transposition`.
+    whole_budget: usize,
+    whole_used: usize,
     dmap: CudaSlice<i32>,
     /// `maps[n]` `[B C, |layout n|]`.
     pub maps: Vec<CudaSlice<f64>>,
@@ -304,6 +307,8 @@ impl<'a> GpuEngine<'a> {
             cache_mode,
             cache_bytes,
             cached_bytes: 0,
+            whole_budget: cache_bytes.saturating_sub(rows_total * DeviceGeometry::transposition_bytes_per_row(l, p)),
+            whole_used: 0,
             dmap,
             maps: Vec::new(),
             m: BTreeMap::new(),
@@ -381,6 +386,9 @@ impl<'a> GpuEngine<'a> {
         let spec = self.spec(n);
         if let Some(mut g) = self.cache[n][b].take() {
             self.cached_bytes -= g.bytes();
+            if !g.is_stripped() && self.cache_mode != GeometryCache::Full {
+                self.whole_used -= g.bytes() - DeviceGeometry::stripped_bytes(&g);
+            }
             if g.is_stripped() {
                 let t = Instant::now();
                 g.refresh(&self.gpu, &self.grids[n], &self.a1_ids[n][b], &spec);
@@ -395,16 +403,29 @@ impl<'a> GpuEngine<'a> {
         g
     }
 
-    /// Keeps the geometry of a block as the policy and the budget allow.
+    /// Keeps the geometry of a block as the policy and the budget allow:
+    /// with `Transposition`, the budget left once every block's
+    /// transposition is counted keeps whole geometries, first come.
     fn put_geometry(&mut self, n: usize, b: usize, mut g: DeviceGeometry) {
         if self.cache_mode == GeometryCache::None {
             return;
         }
-        if self.cache_mode != GeometryCache::Full || self.cached_bytes + g.bytes() > self.cache_bytes {
+        let whole = g.bytes();
+        let mut stripped = DeviceGeometry::stripped_bytes(&g);
+        let keep_whole = match self.cache_mode {
+            GeometryCache::Full => self.cached_bytes + whole <= self.cache_bytes,
+            _ => self.whole_used + (whole - stripped) <= self.whole_budget,
+        };
+        if keep_whole {
+            if self.cache_mode != GeometryCache::Full {
+                self.whole_used += whole - stripped;
+            }
+            stripped = whole;
+        } else {
             g.strip();
         }
-        if self.cached_bytes + g.bytes() <= self.cache_bytes {
-            self.cached_bytes += g.bytes();
+        if self.cached_bytes + stripped <= self.cache_bytes {
+            self.cached_bytes += stripped;
             self.cache[n][b] = Some(g);
         }
     }

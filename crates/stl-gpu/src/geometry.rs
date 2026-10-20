@@ -233,7 +233,12 @@ impl DeviceGeometry {
     pub fn bytes(&self) -> usize {
         let n = self.kgp.len();
         let weights = if self.is_stripped() { 0 } else { n * 20 };
-        weights + n * 4 + self.dest.len() * 4 + self.offsets.len() * 4
+        weights + Self::stripped_bytes(self)
+    }
+
+    /// Bytes once stripped (the transposition).
+    pub fn stripped_bytes(&self) -> usize {
+        self.kgp.len() * 4 + self.dest.len() * 4 + self.offsets.len() * 4
     }
 
     /// Bytes per output row (`G` gauges, `P` taps): everything, or the
