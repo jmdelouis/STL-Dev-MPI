@@ -40,6 +40,10 @@ The package contains:
 Without MPI, everything still runs on one node with thread ranks
 (`--ranks N`), which is enough up to nside 128 to 256.
 
+With CUDA GPUs, `stl-synth --gpu` (feature `gpu`) runs one device per
+rank; it needs only the NVIDIA driver and an NVRTC library at run time
+(no toolkit to build). See [`docs/gpu.md`](gpu.md) §4.
+
 ## 3. Installation
 
 Put everything in a work directory with enough quota (toolchain about

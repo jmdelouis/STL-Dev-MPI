@@ -27,6 +27,79 @@ fn same_printed(a: f64, b: f64) -> bool {
     format!("{a:.6e}") == format!("{b:.6e}")
 }
 
+/// The objective on devices equals the CPU one for 1, 2 and 3 ranks, over
+/// consecutive evaluations at different maps (state reused).
+#[test]
+fn objective_gradient_rank_counts() {
+    use stl_core::engine::EngineConfig;
+    use stl_core::local::LocalGeometry;
+    use stl_core::plan::{build_plan, Family};
+    use stl_core::stencil::Gauge;
+    if Gpu::count().map_or(true, |n| n == 0) {
+        return;
+    }
+    let nside: i64 = std::env::var("STL_TEST_NSIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+    let j = (63 - nside.leading_zeros() as usize).saturating_sub(1);
+    let geo = LocalGeometry::new(nside, 5, 2, Gauge::Cosmo, 16384);
+    let cfg = EngineConfig::new(j, false);
+    let plan = build_plan(j, 2, &cfg.j_to_dg, 1, None, &Family::ALL);
+    let n0 = geo.pixels(0);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let target_map: Vec<f64> = (0..n0).map(|_| next()).collect();
+    let maps: Vec<Vec<f64>> = (0..3).map(|_| (0..n0).map(|_| next()).collect()).collect();
+    let run = |p: usize, gpu: bool| -> Vec<(f64, Vec<f64>)> {
+        let per_rank = run_ranks(p, |comm| {
+            let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
+            let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+            if gpu {
+                let g = Arc::new(Gpu::for_rank(comm.rank()).unwrap());
+                let e = GpuEngine::new(g, &geo, &cfg, probe.part.clone(), 1, 1, &GpuOptions::default());
+                probe.set_evaluator(Box::new(GpuEvaluator::new(e, &plan)));
+            }
+            let target = probe.statistics(&probe.slice(&target_map));
+            let ev = probe.take_evaluator();
+            let mut obj = Objective::new(&geo, &cfg, &plan, &target, 1, 1, comm);
+            if let Some(ev) = ev {
+                obj.set_evaluator(ev);
+            }
+            let out: Vec<(f64, Vec<f64>, (i64, i64))> =
+                maps.iter().map(|m| {
+                    let (l, g) = obj.loss_and_grad(&obj.slice(m));
+                    (l, g, obj.owned())
+                }).collect();
+            drop(obj);
+            out
+        });
+        (0..maps.len())
+            .map(|k| {
+                let mut g = vec![0.0; n0];
+                for r in &per_rank {
+                    let (s, e) = r[k].2;
+                    g[s as usize..e as usize].copy_from_slice(&r[k].1);
+                }
+                (per_rank[0][k].0, g)
+            })
+            .collect()
+    };
+    let cpu = run(1, false);
+    for p in [1usize, 2, 3] {
+        let dev = run(p, true);
+        for (k, ((lc, gc), (lg, gg))) in cpu.iter().zip(&dev).enumerate() {
+            let scale = gc.iter().fold(0f64, |m, v| m.max(v.abs()));
+            let dg = gc.iter().zip(gg).fold(0f64, |m, (a, b)| m.max((a - b).abs())) / scale;
+            let dl = (lc - lg).abs() / lc;
+            eprintln!("nside {nside} P={p} evaluation {k}: loss {dl:.1e}, gradient {dg:.1e} (relative to CPU)");
+            assert!(dl <= 1e-10 && dg <= 1e-9, "P={p} evaluation {k}");
+        }
+    }
+}
+
 #[test]
 fn trajectory_matches_stl_dev() {
     if Gpu::count().map_or(true, |n| n == 0) {
