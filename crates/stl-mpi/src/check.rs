@@ -82,14 +82,41 @@ pub struct RankResult {
 /// Forward and reverse sweeps of the fixture on the rank of `comm`.  Halo
 /// cells of the input map are left at zero: they must come from the owners.
 pub fn run_rank<C: Comm>(fx: &Fixture, comm: &C) -> RankResult {
+    run_rank_unit(fx, comm, None)
+}
+
+/// [`run_rank`] with the level-0 ranges aligned on `unit` instead of the
+/// default (to test ranges that do not align with the coarse levels).
+pub fn run_rank_unit<C: Comm>(fx: &Fixture, comm: &C, unit: Option<i64>) -> RankResult {
     let geo = fx.geometry();
     let cfg = fx.config();
     let plan = fx.plan();
     let (batch, channels) = (fx.int("batch") as usize, fx.int("channels") as usize);
-    let dec = Decomposition::new(&geo, cfg.levels(), comm.size());
-    let part = build_partition(&geo, &dec, comm.rank());
-    let ex = HaloExchange::new(comm, &dec, &part);
     let map0 = fx.f64("map0");
+    let gradient = fx.complex("gradient");
+    run_problem(&geo, &cfg, &plan, &map0, &gradient, batch, channels, comm, unit)
+}
+
+/// Forward and reverse sweeps of any problem on the rank of `comm`
+/// (`map0` full sky `[B, C, N_0]`, read on the owned cells only).
+#[allow(clippy::too_many_arguments)]
+pub fn run_problem<C: Comm>(
+    geo: &LocalGeometry,
+    cfg: &EngineConfig,
+    plan: &[Coefficient],
+    map0: &[f64],
+    gradient: &[Complex64],
+    batch: usize,
+    channels: usize,
+    comm: &C,
+    unit: Option<i64>,
+) -> RankResult {
+    let dec = match unit {
+        Some(u) => Decomposition::with_unit(geo, cfg.levels(), comm.size(), u),
+        None => Decomposition::new(geo, cfg.levels(), comm.size()),
+    };
+    let part = build_partition(geo, &dec, comm.rank());
+    let ex = HaloExchange::new(comm, &dec, &part);
     let (n0, layout0) = (geo.pixels(0), &part.layouts[0]);
     let mut x = vec![0.0; batch * channels * layout0.len()];
     for r in 0..batch * channels {
@@ -102,9 +129,9 @@ pub fn run_rank<C: Comm>(fx: &Fixture, comm: &C) -> RankResult {
     }
     let held = part.layouts.iter().map(|l| l.len()).collect();
     let halo = ex.halo_cells();
-    let mut engine = LocalEngine::distributed(&geo, &cfg, part, &ex, x, batch, channels);
-    let values = engine.forward(&plan);
-    let mg = engine.reverse(&plan, &fx.complex("gradient"));
+    let mut engine = LocalEngine::distributed(geo, cfg, part, &ex, x, batch, channels);
+    let values = engine.forward(plan);
+    let mg = engine.reverse(plan, gradient);
     let maps_gradient: Vec<Vec<f64>> = mg.iter().enumerate().map(|(d, g)| engine.owned_values(d, g)).collect();
     let (_, bands) = engine.analysis_vjp(mg);
     let bands = bands.iter().enumerate().map(|(d, g)| engine.owned_values(d, g)).collect();

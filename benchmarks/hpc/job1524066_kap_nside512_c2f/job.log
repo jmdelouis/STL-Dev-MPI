@@ -1,0 +1,72 @@
+job 1524066: 1 node(s) compute-116-31, 192 tasks, target /home/jmdeloui/stl-mpi/data/kap_nside512_nested.npy, niter 50
+=== 192 ranks
+[rust-local P=192] evaluation    1  loss = 2.064167e-2  t =     2.7 s
+[rust-local P=192] evaluation    2  loss = 2.064167e-2  t =     5.4 s
+[rust-local P=192] evaluation    3  loss = 2.064164e-2  t =     8.1 s
+[rust-local P=192] evaluation    4  loss = 2.064147e-2  t =    10.8 s
+[rust-local P=192] evaluation    5  loss = 2.064057e-2  t =    13.5 s
+[rust-local P=192] evaluation    6  loss = 2.063066e-2  t =    16.2 s
+[rust-local P=192] evaluation    7  loss = 2.053222e-2  t =    18.9 s
+[rust-local P=192] evaluation    8  loss = 1.961977e-2  t =    21.7 s
+[rust-local P=192] evaluation    9  loss = 1.326925e-2  t =    24.4 s
+[rust-local P=192] evaluation   10  loss = 9.358958e-3  t =    27.2 s
+[rust-local P=192] evaluation   11  loss = 2.862797e-3  t =    30.0 s
+[rust-local P=192] evaluation   12  loss = 1.483224e-3  t =    32.7 s
+[rust-local P=192] evaluation   13  loss = 5.911209e-4  t =    35.5 s
+[rust-local P=192] evaluation   14  loss = 4.375363e-4  t =    38.2 s
+[rust-local P=192] evaluation   15  loss = 3.719391e-4  t =    41.0 s
+[rust-local P=192] evaluation   16  loss = 6.932581e-5  t =    43.8 s
+[rust-local P=192] evaluation   17  loss = 6.100353e-5  t =    46.5 s
+[rust-local P=192] evaluation   18  loss = 1.233928e-5  t =    49.3 s
+[rust-local P=192] evaluation   19  loss = 1.098310e-5  t =    52.0 s
+[rust-local P=192] evaluation   20  loss = 1.000466e-5  t =    54.8 s
+[rust-local P=192] evaluation   21  loss = 9.714281e-6  t =    57.6 s
+[rust-local P=192] evaluation   22  loss = 8.936301e-6  t =    60.4 s
+[rust-local P=192] evaluation   23  loss = 7.934310e-6  t =    63.1 s
+[rust-local P=192] evaluation   24  loss = 7.389163e-6  t =    65.9 s
+[rust-local P=192] evaluation   25  loss = 7.506398e-6  t =    68.7 s
+[rust-local P=192] evaluation   26  loss = 7.072961e-6  t =    71.5 s
+[rust-local P=192] evaluation   27  loss = 6.250140e-6  t =    74.3 s
+[rust-local P=192] evaluation   28  loss = 5.664853e-6  t =    77.1 s
+[rust-local P=192] evaluation   29  loss = 4.281946e-6  t =    79.9 s
+[rust-local P=192] evaluation   30  loss = 3.310831e-6  t =    82.6 s
+[rust-local P=192] evaluation   31  loss = 2.929249e-6  t =    85.4 s
+[rust-local P=192] evaluation   32  loss = 5.707621e-6  t =    88.3 s
+[rust-local P=192] evaluation   33  loss = 2.851054e-6  t =    91.1 s
+[rust-local P=192] evaluation   34  loss = 2.703961e-6  t =    93.9 s
+[rust-local P=192] evaluation   35  loss = 2.610875e-6  t =    96.7 s
+[rust-local P=192] evaluation   36  loss = 2.512129e-6  t =    99.6 s
+[rust-local P=192] evaluation   37  loss = 2.489552e-6  t =   102.4 s
+[rust-local P=192] evaluation   38  loss = 2.465378e-6  t =   105.2 s
+[rust-local P=192] evaluation   39  loss = 2.440627e-6  t =   108.0 s
+[rust-local P=192] evaluation   40  loss = 2.391979e-6  t =   110.9 s
+[rust-local P=192] evaluation   41  loss = 2.357467e-6  t =   113.7 s
+[rust-local P=192] evaluation   42  loss = 2.340083e-6  t =   116.7 s
+[rust-local P=192] evaluation   43  loss = 2.327237e-6  t =   119.5 s
+[rust-local P=192] evaluation   44  loss = 2.316332e-6  t =   122.4 s
+[rust-local P=192] evaluation   45  loss = 2.302321e-6  t =   125.3 s
+[rust-local P=192] evaluation   46  loss = 2.273622e-6  t =   128.1 s
+[rust-local P=192] evaluation   47  loss = 2.203279e-6  t =   131.1 s
+[rust-local P=192] evaluation   48  loss = 2.014395e-6  t =   134.0 s
+[rust-local P=192] evaluation   49  loss = 2.150697e-6  t =   137.0 s
+[rust-local P=192] evaluation   50  loss = 1.945925e-6  t =   139.9 s
+[rust-local P=192] evaluation   51  loss = 1.772080e-6  t =   142.9 s
+[rust-local P=192] evaluation   52  loss = 1.532926e-6  t =   145.9 s
+[rust-local P=192] evaluation   53  loss = 1.595662e-6  t =   148.9 s
+[rust-local P=192] evaluation   54  loss = 1.366845e-6  t =   152.0 s
+[rust-local P=192] evaluation   55  loss = 1.117737e-6  t =   155.1 s
+[rust-local P=192] evaluation   56  loss = 1.042348e-6  t =   158.2 s
+[rust-local P=192] evaluation   57  loss = 8.170405e-7  t =   161.4 s
+[rust-local P=192] evaluation   58  loss = 7.696679e-7  t =   164.6 s
+[rust-local P=192] evaluation   59  loss = 7.298848e-7  t =   167.6 s
+[rust-local P=192] evaluation   60  loss = 6.272844e-7  t =   170.8 s
+[rust-local P=192] evaluation   61  loss = 5.686300e-7  t =   174.2 s
+{"evaluations":61,"loss_first":0.0206416720355219,"loss_last":5.686299966537792e-7,"ranks":192,"seconds":174.18,"seconds_per_evaluation":2.855}
+
+real	3m7.701s
+user	511m2.525s
+sys	62m1.004s
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+[LOG_CAT_SBGP] libnuma.so: cannot open shared object file: No such file or directory
+[LOG_CAT_SBGP] Failed to dlopen libnuma.so. Fallback to GROUP_BY_SOCKET manual.
+done Fri Oct 16 02:11:36 PM CEST 2026

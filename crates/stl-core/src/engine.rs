@@ -24,7 +24,7 @@
 
 use crate::conv::ConvPlan;
 use crate::local::{modulus_vjp, positions, LocalGeometry};
-use crate::neighbours::{dilate_fine, parents};
+use crate::neighbours::{children, dilate_fine, parents};
 use crate::plan::{Coefficient, Family};
 use num_complex::Complex64;
 use std::collections::BTreeMap;
@@ -256,19 +256,19 @@ impl<'a> LocalEngine<'a> {
         self.gather(level, field, &ids)
     }
 
-    /// `maps[dg] -> maps[dg + 1]` on the owned cells, block by block
-    /// (`LocalGeometry.decimate`).
+    /// `maps[dg] -> maps[dg + 1]` on the owned cells, by blocks of owned
+    /// coarse cells: each row is exact on the domain of its children plus
+    /// the doubled decimation halo, the same rows (to the bit) as
+    /// `LocalGeometry.decimate` computes from the fine blocks.
     fn decimate(&self, dg: usize) -> Vec<f64> {
         let x = &self.maps[dg];
         let rows = self.batch * self.channels;
         let mut out = vec![0.0; rows * self.part.layouts[dg + 1].len()];
-        let rings = 2 * self.geo.down_rings(dg);
-        for block in &self.part.blocks[dg] {
-            let domain = dilate_fine(block, self.geo.nside(dg), rings);
+        for coarse in &self.part.blocks[dg + 1] {
+            let domain = decimation_domain(self.geo, dg, coarse);
             let down = self.geo.down(dg, &domain);
             let y = down.apply(&self.gather(dg, x, &domain));
-            let coarse = parents(block);
-            let picked = gather_cols(&y, down.out_ids.len(), &positions(&down.out_ids, &coarse));
+            let picked = gather_cols(&y, down.out_ids.len(), &positions(&down.out_ids, coarse));
             let layout = &self.part.layouts[dg + 1];
             let nl = layout.len();
             for r in 0..rows {
@@ -309,8 +309,24 @@ impl<'a> LocalEngine<'a> {
     /// Coefficient values `[B, len(plan)]` (summed over the processes);
     /// fills the stored moduli.
     pub fn forward(&mut self, plan: &[Coefficient]) -> Vec<Complex64> {
+        self.forward_impl(plan, false).0
+    }
+
+    /// [`forward`](Self::forward) plus, for every coefficient `S = <f_p>`
+    /// (a pixel mean at its native level), the spatial variance of the
+    /// summed terms, `V = <|f_p|^2> - |S|^2` `[B, len(plan)]`.  Under
+    /// ergodicity `V / N` (N pixels of the native level) estimates the
+    /// variance of the coefficient.
+    pub fn forward_moments(&mut self, plan: &[Coefficient]) -> (Vec<Complex64>, Vec<f64>) {
+        let (values, second) = self.forward_impl(plan, true);
+        let var = values.iter().zip(&second).map(|(s, m2)| (m2 - s.norm_sqr()).max(0.0)).collect();
+        (values, var)
+    }
+
+    fn forward_impl(&mut self, plan: &[Coefficient], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
         let groups = Self::groups(plan);
         let mut values = vec![ZERO; self.batch * plan.len()];
+        let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
         let rows = self.batch * self.channels * self.geo.l;
         for n in 0..self.levels() {
             for block in self.part.blocks[n].clone() {
@@ -320,6 +336,11 @@ impl<'a> LocalEngine<'a> {
                     let p = fields.partial(self, &plan[i], &a, &b);
                     for (bi, v) in p.into_iter().enumerate() {
                         values[bi * plan.len() + i] += v;
+                    }
+                    if moments {
+                        for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
+                            second[bi * plan.len() + i] += v;
+                        }
                     }
                 }
                 // Push |z_n| on F to every coarser level.
@@ -343,7 +364,10 @@ impl<'a> LocalEngine<'a> {
         }
         let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
         self.ex.allreduce(&mut flat);
-        flat.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect()
+        if moments {
+            self.ex.allreduce(&mut second);
+        }
+        (flat.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect(), second)
     }
 
     /// Map cotangents of every level (owned cells valid, halo zero) for the
@@ -398,7 +422,9 @@ impl<'a> LocalEngine<'a> {
         }
         let g0 = maps_gradient.swap_remove(0);
         let mut bands = vec![g0.clone()];
-        // Up-sampling adjoint: sum of the four children (owned with their parent).
+        // Up-sampling adjoint: sum of the four children.  A parent may be
+        // owned by another rank (coarse levels shared by more ranks than
+        // cells): its contributions are reduced to the owner.
         for d in 0..self.levels() - 1 {
             let fine = bands.last().unwrap();
             let (lf, lc) = (&self.part.layouts[d], &self.part.layouts[d + 1]);
@@ -409,10 +435,17 @@ impl<'a> LocalEngine<'a> {
                     coarse[r * lc.len() + lc.pos(p / 4)] += fine[r * lf.len() + lf.pos(p)];
                 }
             }
+            self.ex.reduce_ghosts(d + 1, &mut coarse, bc);
             bands.push(coarse);
         }
         (g0, bands)
     }
+}
+
+/// Fine cells read by the decimation of the coarse cells `coarse` (level
+/// `dg + 1`): their children plus the doubled decimation halo.
+pub fn decimation_domain(geo: &LocalGeometry, dg: usize, coarse: &[i64]) -> Vec<i64> {
+    dilate_fine(&children(coarse), geo.nside(dg), 2 * geo.down_rings(dg))
 }
 
 /// Supports of the decimation chain of a block of level `n`, one per level
@@ -632,6 +665,33 @@ impl Block {
                     _ => {
                         let b = &b[bi * nf..][..nf];
                         a.iter().zip(b).map(|(&x, &y)| x * y.conj()).sum()
+                    }
+                };
+                sum / n_total
+            })
+            .collect()
+    }
+
+    /// Partial sum `[B]` of `|f_p|^2 / N` over the block, `f_p` the terms
+    /// whose mean is the coefficient (see [`partial`](Self::partial)).
+    fn partial_second(&self, engine: &LocalEngine, c: &Coefficient, a: &[Complex64], b: &[Complex64]) -> Vec<f64> {
+        let n_total = engine.geo.pixels(self.n) as f64;
+        let nf = self.nf();
+        (0..engine.batch)
+            .map(|bi| {
+                let a = &a[bi * nf..][..nf];
+                let sum: f64 = match c.family {
+                    Family::Mean => a.iter().map(|v| v.norm_sqr()).sum(),
+                    Family::Var => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                    Family::S2 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                    Family::S1 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr()).sum(),
+                    Family::S1 => {
+                        let b = &b[bi * nf..][..nf];
+                        a.iter().zip(b).map(|(&x, &y)| (root_normalise(x) * root_normalise(y).conj()).norm_sqr()).sum()
+                    }
+                    _ => {
+                        let b = &b[bi * nf..][..nf];
+                        a.iter().zip(b).map(|(&x, &y)| (x * y.conj()).norm_sqr()).sum()
                     }
                 };
                 sum / n_total

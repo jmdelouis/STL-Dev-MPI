@@ -132,6 +132,36 @@ fn geometry_by_sub_blocks() {
     }
 }
 
+/// Second moments: the values are those of `forward` (bit for bit), and
+/// for `mean` and `var` the spatial variance is the variance of `x` and of
+/// `x^2` over the map.
+#[test]
+fn coefficient_spatial_variance() {
+    let case = cases("stats", "stats").into_iter().find(|c| c.name().contains("C2_B2_full_b64")).unwrap();
+    let s = setup(&case);
+    let x = case.f64("map0");
+    let mut e = LocalEngine::new(&s.geo, &s.cfg, x.clone(), s.batch, s.channels);
+    let values = e.forward(&s.plan);
+    let mut e = LocalEngine::new(&s.geo, &s.cfg, x.clone(), s.batch, s.channels);
+    let (values2, var) = e.forward_moments(&s.plan);
+    assert_eq!(values, values2);
+    let n = s.geo.pixels(0);
+    for (i, c) in s.plan.iter().enumerate() {
+        if !matches!(c.family, Family::Mean | Family::Var) {
+            continue;
+        }
+        for b in 0..s.batch {
+            let row = &x[(b * s.channels + c.c1) * n..][..n];
+            let f: Vec<f64> = row.iter().map(|v| if c.family == Family::Mean { *v } else { v * v }).collect();
+            let m = f.iter().sum::<f64>() / n as f64;
+            let expect = f.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n as f64;
+            let got = var[b * s.plan.len() + i];
+            assert!((got - expect).abs() <= 1e-12 * expect, "{:?} batch {b}: {got} vs {expect}", c.family);
+        }
+    }
+    assert!(var.iter().all(|v| *v >= 0.0));
+}
+
 #[test]
 fn statistics_and_gradients() {
     for case in cases("stats", "stats") {
