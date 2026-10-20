@@ -1,0 +1,21 @@
+[package]
+name = "stl-gpu"
+description = "CUDA backend of the block-wise scattering-covariance engine: one GPU per rank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+stl-core = { path = "../stl-core" }
+num-complex.workspace = true
+# Driver API and NVRTC, loaded at run time (libcuda.so, libnvrtc.so): the
+# crate builds without a CUDA toolkit.  The API version follows `nvcc
+# --version`, or `CUDARC_CUDA_VERSION` (e.g. 11040 for a CUDA 11.4 driver),
+# else the latest.
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-version-from-build-system", "fallback-latest"] }
+
+[dev-dependencies]
+stl-mpi = { path = "../stl-mpi" }
+npyz.workspace = true
+serde_json.workspace = true

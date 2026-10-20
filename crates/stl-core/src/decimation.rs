@@ -135,7 +135,6 @@ pub fn smooth_decimation(ids: &[i64], nside: i64, params: &DecimationParams) -> 
     let mut indices = Vec::new();
     let mut values = Vec::new();
     for (r, &c) in coarse.iter().enumerate() {
-        let (lon_c, lat_c) = centre_lonlat(c, nside / 2);
         let mut cols: Vec<usize> = cand[r]
             .iter()
             .filter(|&&v| v >= 0)
@@ -146,32 +145,8 @@ pub fn smooth_decimation(ids: &[i64], nside: i64, params: &DecimationParams) -> 
             .collect();
         cols.sort_unstable();
         cols.dedup();
-        let mut w: Vec<f64> = cols
-            .iter()
-            .map(|&q| {
-                let (lon_f, lat_f) = centre_lonlat(ids[q], nside);
-                let gamma = haversine(lat_c, lon_c, lat_f, lon_f);
-                let t = gamma / sigma;
-                if gamma > radius {
-                    0.0
-                } else {
-                    (-0.5 * (t * t)).exp()
-                }
-            })
-            .collect();
-        let mut row_sum = w.iter().fold(0.0, |s, &v| s + v);
-        if row_sum <= 0.0 && !w.is_empty() {
-            // Every candidate cut: uniform over the available pixels (library fallback).
-            let u = 1.0 / w.len() as f64;
-            w.iter_mut().for_each(|v| *v = u);
-            row_sum = w.iter().fold(0.0, |s, &v| s + v);
-        }
-        let scale = match params.norm {
-            WeightNorm::L1 => row_sum.max(1e-300),
-            WeightNorm::L2 => w.iter().fold(0.0, |s, &v| s + v * v).sqrt().max(1e-300),
-        };
-        for (&q, &v) in cols.iter().zip(&w) {
-            let v = v / scale;
+        let fine: Vec<i64> = cols.iter().map(|&q| ids[q]).collect();
+        for (q, v) in cols.into_iter().zip(row_weights(c, &fine, nside, radius, sigma, params.norm)) {
             if v != 0.0 {
                 indices.push(q);
                 values.push(v);
@@ -181,4 +156,53 @@ pub fn smooth_decimation(ids: &[i64], nside: i64, params: &DecimationParams) -> 
     }
     let n_rows = coarse.len();
     (coarse, Csr { n_rows, n_cols: ids.len(), indptr, indices, values })
+}
+
+/// Normalised weights of the coarse cell `c` over the available fine cells
+/// `fine` (sorted), zeros included.
+fn row_weights(c: i64, fine: &[i64], nside: i64, radius: f64, sigma: f64, norm: WeightNorm) -> Vec<f64> {
+    let (lon_c, lat_c) = centre_lonlat(c, nside / 2);
+    let mut w: Vec<f64> = fine
+        .iter()
+        .map(|&f| {
+            let (lon_f, lat_f) = centre_lonlat(f, nside);
+            let gamma = haversine(lat_c, lon_c, lat_f, lon_f);
+            let t = gamma / sigma;
+            if gamma > radius {
+                0.0
+            } else {
+                (-0.5 * (t * t)).exp()
+            }
+        })
+        .collect();
+    let mut row_sum = w.iter().fold(0.0, |s, &v| s + v);
+    if row_sum <= 0.0 && !w.is_empty() {
+        // Every candidate cut: uniform over the available pixels (library fallback).
+        let u = 1.0 / w.len() as f64;
+        w.iter_mut().for_each(|v| *v = u);
+        row_sum = w.iter().fold(0.0, |s, &v| s + v);
+    }
+    let scale = match norm {
+        WeightNorm::L1 => row_sum.max(1e-300),
+        WeightNorm::L2 => w.iter().fold(0.0, |s, &v| s + v * v).sqrt().max(1e-300),
+    };
+    w.iter().map(|&v| v / scale).collect()
+}
+
+/// Row of the coarse cell `c` (at `nside / 2`) of the full-sky decimation
+/// from `nside`: its fine cells (sorted) and nonzero weights.  It is the
+/// row [`smooth_decimation`] builds on any grid holding all its candidates,
+/// to the bit.
+pub fn decimation_row(c: i64, nside: i64, params: &DecimationParams) -> (Vec<i64>, Vec<f64>) {
+    let pix_deg = py_degrees((4.0 * PI / npix(nside) as f64).sqrt());
+    let radius = py_radians(params.radius_deg.unwrap_or(3.0 * pix_deg));
+    let sigma = match params.sigma_deg {
+        None => radius / 2.0,
+        Some(s) => py_radians(s),
+    };
+    let mut fine: Vec<i64> = candidates(&[c], nside).swap_remove(0).into_iter().filter(|&v| v >= 0).collect();
+    fine.sort_unstable();
+    fine.dedup();
+    let w = row_weights(c, &fine, nside, radius, sigma, params.norm);
+    fine.into_iter().zip(w).filter(|(_, v)| *v != 0.0).unzip()
 }
