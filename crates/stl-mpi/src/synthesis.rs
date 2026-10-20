@@ -24,8 +24,7 @@ impl<C: Comm> Reduce for CommReduce<'_, C> {
     }
 
     fn max(&self, local: f64) -> f64 {
-        let all = self.0.alltoallv_f64(vec![vec![local]; self.0.size()]);
-        all.iter().fold(f64::NEG_INFINITY, |m, v| m.max(v[0]))
+        self.0.allreduce_max(local)
     }
 }
 
