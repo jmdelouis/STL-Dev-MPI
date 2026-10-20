@@ -4,7 +4,8 @@ Pyramidal scattering-covariance statistics and gradients on HEALPix maps,
 in Rust with MPI, block-wise so that the memory of every rank is bounded by
 its share of the sky. Port of the patch-local engine of
 [STL-Dev](https://github.com/STL-Proj/STL-Dev) (branch `HealpixUpdate`);
-see `CLAUDE.md` for the model, the architecture and the milestones.
+see `CLAUDE.md` for the model, the architecture and the milestones, and
+[`docs/USAGE.md`](docs/USAGE.md) to install and run it on a computing centre.
 
 ## Layout
 
