@@ -60,9 +60,27 @@ impl<'a, C: Comm> Objective<'a, C> {
         channels: usize,
         comm: &'a C,
     ) -> Self {
-        assert_eq!(target.len(), batch * plan.len());
         let dec = Decomposition::new(geo, cfg.levels(), comm.size());
         let part = build_partition(geo, &dec, comm.rank());
+        Self::with_partition(geo, cfg, plan, target, batch, channels, comm, dec, part)
+    }
+
+    /// [`new`](Self::new) on a decomposition and partition already built
+    /// (by another objective of the same problem): `build_partition` is the
+    /// longest part of the setup at large nside.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_partition(
+        geo: &'a LocalGeometry,
+        cfg: &'a EngineConfig,
+        plan: &'a [Coefficient],
+        target: &'a [Complex64],
+        batch: usize,
+        channels: usize,
+        comm: &'a C,
+        dec: Decomposition,
+        part: Partition,
+    ) -> Self {
+        assert_eq!(target.len(), batch * plan.len());
         let halo = HaloExchange::new(comm, &dec, &part);
         Objective {
             geo,

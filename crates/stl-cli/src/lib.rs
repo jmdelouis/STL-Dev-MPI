@@ -281,8 +281,9 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // variance of every coefficient's terms for the ergodic weights.
     let (target_stats, target_var) = probe.statistics_moments(&target);
     let evaluator = probe.take_evaluator();
+    let (dec, part) = (probe.dec.clone(), probe.part.clone());
     drop(probe);
-    let mut obj = Objective::new(&geo, &cfg, &plan, &target_stats, 1, 1, comm);
+    let mut obj = Objective::with_partition(&geo, &cfg, &plan, &target_stats, 1, 1, comm, dec, part);
     if let Some(ev) = evaluator {
         obj.set_evaluator(ev);
     }

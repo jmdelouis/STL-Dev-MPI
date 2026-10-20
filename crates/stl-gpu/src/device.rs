@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 const SOURCE: &str = include_str!("kernels.cu");
 
-const KERNELS: [&str; 19] = [
+const KERNELS: [&str; 20] = [
+    "ring_thetas",
     "geom_build",
     "geom_pack",
     "geom_wt",

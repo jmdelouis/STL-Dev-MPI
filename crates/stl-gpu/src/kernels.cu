@@ -179,10 +179,40 @@ __device__ void ring_info(i64 ring, i64 nside, i64* startpix_o, i64* ringpix_o, 
     *startpix_o = startpix; *ringpix_o = ringpix; *theta_o = theta; *shifted_o = shifted;
 }
 
-__device__ void ring_pair(double phi, i64 ring, i64 nside, i64* pa, i64* pb, double* wa, double* wb, double* theta_ring) {
+// Colatitudes of the rings 0..4 nside - 1 (ring_info's theta), so that the
+// interpolation reads them instead of evaluating acos / atan2 per tap.
+extern "C" __global__ void ring_thetas(i64 nside, double* out) {
+    i64 r = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < 1 || r >= 4 * nside) return;
     i64 sp, nr;
     bool shifted;
-    ring_info(ring, nside, &sp, &nr, theta_ring, &shifted);
+    ring_info(r, nside, &sp, &nr, &out[r], &shifted);
+}
+
+// ring_info with the colatitude read from the table.
+__device__ __forceinline__ void ring_info_t(i64 ring, i64 nside, const double* thetas, i64* startpix_o, i64* ringpix_o, double* theta_o, bool* shifted_o) {
+    i64 ncap = 2 * nside * (nside - 1);
+    i64 npix = 12 * nside * nside;
+    i64 northring = ring > 2 * nside ? 4 * nside - ring : ring;
+    i64 ringpix, startpix;
+    bool shifted;
+    if (northring < nside) {
+        ringpix = 4 * northring;
+        shifted = true;
+        startpix = 2 * northring * (northring - 1);
+    } else {
+        ringpix = 4 * nside;
+        shifted = ((northring - nside) & 1) == 0;
+        startpix = ncap + (northring - nside) * 4 * nside;
+    }
+    if (northring != ring) startpix = npix - startpix - ringpix;
+    *startpix_o = startpix; *ringpix_o = ringpix; *theta_o = thetas[ring]; *shifted_o = shifted;
+}
+
+__device__ void ring_pair(double phi, i64 ring, i64 nside, const double* thetas, i64* pa, i64* pb, double* wa, double* wb, double* theta_ring) {
+    i64 sp, nr;
+    bool shifted;
+    ring_info_t(ring, nside, thetas, &sp, &nr, theta_ring, &shifted);
     double dphi = (2.0 * PI_D) / (double)nr;
     double half = shifted ? 0.5 : 0.0;
     double tmp = phi / dphi - half;
@@ -195,7 +225,7 @@ __device__ void ring_pair(double phi, i64 ring, i64 nside, i64* pa, i64* pb, dou
     *pa = sp + i1; *pb = sp + i2; *wa = 1.0 - w1; *wb = w1;
 }
 
-__device__ void get_interpol_ring(double theta, double phi, i64 nside, i64 pix[4], double wgt[4]) {
+__device__ void get_interpol_ring(double theta, double phi, i64 nside, const double* thetas, i64 pix[4], double wgt[4]) {
     i64 npix = 12 * nside * nside;
     double z = cos(theta);
     i64 ir1 = ring_above(z, nside);
@@ -204,9 +234,9 @@ __device__ void get_interpol_ring(double theta, double phi, i64 nside, i64 pix[4
     double w[4] = {0.0, 0.0, 0.0, 0.0};
     i64 p0, p1, p2, p3;
     double w0, w1, w2, w3, theta1, theta2;
-    ring_pair(phi, ir1 > 1 ? ir1 : 1, nside, &p0, &p1, &w0, &w1, &theta1);
+    ring_pair(phi, ir1 > 1 ? ir1 : 1, nside, thetas, &p0, &p1, &w0, &w1, &theta1);
     if (ir1 > 0) { p[0] = p0; p[1] = p1; w[0] = w0; w[1] = w1; }
-    ring_pair(phi, ir2 < 4 * nside - 1 ? ir2 : 4 * nside - 1, nside, &p2, &p3, &w2, &w3, &theta2);
+    ring_pair(phi, ir2 < 4 * nside - 1 ? ir2 : 4 * nside - 1, nside, thetas, &p2, &p3, &w2, &w3, &theta2);
     if (ir2 < 4 * nside) { p[2] = p2; p[3] = p3; w[2] = w2; w[3] = w3; }
     bool north = ir1 == 0;
     bool south = ir2 == 4 * nside && !north;
@@ -230,7 +260,7 @@ __device__ void get_interpol_ring(double theta, double phi, i64 nside, i64 pix[4
 
 __device__ __forceinline__ double norm3(double a, double b, double c) { return sqrt(a * a + b * b + c * c); }
 
-__device__ void interp_weights_nested(double v0, double v1, double v2, int order, i64 pix[4], double w[4]) {
+__device__ void interp_weights_nested(double v0, double v1, double v2, int order, const double* thetas, i64 pix[4], double w[4]) {
     double n = fmax(norm3(v0, v1, v2), 1e-12);
     double x = v0 / n, y = v1 / n, z = v2 / n;
     double theta = acos(fmin(fmax(z, -1.0), 1.0));
@@ -240,7 +270,7 @@ __device__ void interp_weights_nested(double v0, double v1, double v2, int order
     double theta2 = deg2rad(90.0 - lat_deg);
     double phi2 = py_remainder(deg2rad(lon_deg), 2.0 * PI_D);
     i64 rp[4];
-    get_interpol_ring(theta2, phi2, 1LL << order, rp, w);
+    get_interpol_ring(theta2, phi2, 1LL << order, thetas, rp, w);
     for (int i = 0; i < 4; i++) pix[i] = ring2nest(rp[i], order);
 }
 
@@ -266,7 +296,7 @@ __device__ __forceinline__ i64 grid_find(const i64* grid, i64 n_grid, i64 own_st
 extern "C" __global__ void geom_build(
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
     const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
-    const double* stencil, int p_ref,
+    const double* stencil, int p_ref, const double* thetas,
     u32* pos, double* wout, unsigned char* complete)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
@@ -308,7 +338,7 @@ extern "C" __global__ void geom_build(
         const double* v = stencil + 3 * p_ref;
         interp_weights_nested(r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
                               r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
-                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, ref_idx, ref_w);
+                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, thetas, ref_idx, ref_w);
     }
     bool comp = true;
     for (int p = 0; p < P; p++) {
@@ -317,7 +347,7 @@ extern "C" __global__ void geom_build(
         double wx[4];
         interp_weights_nested(r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
                               r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
-                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, ix, wx);
+                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, thetas, ix, wx);
         i64 found[4];
         bool any = false;
         for (int n = 0; n < 4; n++) {

@@ -80,6 +80,46 @@ fn misaligned_ranges() {
     }
 }
 
+/// A larger synthetic problem (nside `STL_TEST_NSIDE`, default 128, J =
+/// log2(nside) - 1, L = 2): statistics and gradient with 1, 2 and 3 ranks.
+#[test]
+fn larger_map_rank_counts() {
+    if !have_device() {
+        return;
+    }
+    let nside: i64 = std::env::var("STL_TEST_NSIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+    let j = (63 - nside.leading_zeros() as usize).saturating_sub(1);
+    let geo = LocalGeometry::new(nside, 5, 2, Gauge::Cosmo, 16384);
+    let cfg = EngineConfig::new(j, false);
+    let plan = build_plan(j, 2, &cfg.j_to_dg, 1, None, &Family::ALL);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let map0: Vec<f64> = (0..geo.pixels(0)).map(|_| next()).collect();
+    let gradient: Vec<Complex64> = plan.iter().map(|_| Complex64::new(next(), next())).collect();
+    let opts = GpuOptions::default();
+    let run = |p: usize| assemble(&run_ranks(p, |c| run_problem_gpu(&geo, &cfg, &plan, &map0, &gradient, 1, 1, c, None, &opts)), 1);
+    let one = run(1);
+    let scale = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
+    for p in [2usize, 3] {
+        let a = run(p);
+        let dv = a.values.iter().zip(&one.values).fold(0f64, |m, (x, y)| m.max((x - y).norm() / y.norm().max(1e-300)));
+        let dg = (0..one.maps_gradient.len())
+            .map(|d| {
+                let g = &one.maps_gradient[d];
+                a.maps_gradient[d].iter().zip(g).fold(0f64, |m, (x, y)| m.max((x - y).abs())) / scale(g).max(1e-300)
+            })
+            .fold(0f64, f64::max);
+        let db = a.bands[0].iter().zip(&one.bands[0]).fold(0f64, |m, (x, y)| m.max((x - y).abs())) / scale(&one.bands[0]);
+        eprintln!("nside {nside}, {} coefficients, P={p} vs P=1: statistics {dv:.1e} relative, map cotangents {dg:.1e}, level-0 gradient {db:.1e} (relative to max)", plan.len());
+        assert!(dv <= 1e-12 && dg <= 1e-12 && db <= 1e-12);
+    }
+}
+
 /// More ranks than cells at the coarsest level (nside 8, J = 3: 48 coarse
 /// cells, 52 ranks), against the CPU engine.
 #[test]

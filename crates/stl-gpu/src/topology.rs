@@ -115,6 +115,7 @@ impl Topology {
     /// `block_rows` owned cells.
     pub fn new(geo: &LocalGeometry, part: &Partition, block_rows: usize, threads: usize) -> Self {
         let levels = part.layouts.len();
+        let started = std::time::Instant::now();
         let mut lv = Vec::with_capacity(levels);
         for n in 0..levels {
             let ids = layout_ids(&part.layouts[n]);
@@ -135,12 +136,20 @@ impl Topology {
             }
             lv.push(LevelTopo { nside, ids, owned: (s, e), own_pos0, blocks });
         }
+        if std::env::var_os("STL_GPU_PROFILE").is_some() {
+            eprintln!("  topology: blocks {:.1} s", started.elapsed().as_secs_f64());
+        }
+        let profile = std::env::var_os("STL_GPU_PROFILE").is_some();
+        let t = std::time::Instant::now();
         let mut down = Vec::new();
         let mut up = Vec::new();
         for d in 0..levels.saturating_sub(1) {
             let (dn, upn) = decimation(geo, &lv[d], &lv[d + 1], threads);
             down.push(dn);
             up.push(upn);
+        }
+        if profile {
+            eprintln!("  topology: decimation rows {:.1} s", t.elapsed().as_secs_f64());
         }
         Topology { levels: lv, down, up }
     }
@@ -150,55 +159,73 @@ impl Topology {
 fn decimation(geo: &LocalGeometry, fine: &LevelTopo, coarse: &LevelTopo, threads: usize) -> (HostCsr, HostCsr) {
     let nside = fine.nside;
     let params = geo.down_params;
-    // Forward: owned coarse cells.
+    let (fs, fe) = fine.owned;
+    // Rows of the owned coarse cells (forward) and of every coarse cell whose
+    // candidates may contain an owned fine cell (transpose: 3 coarse rings
+    // around their parents, a superset), each computed once.
+    let mut cells: Vec<i64> = (coarse.owned.0..coarse.owned.1).collect();
+    if fs < fe {
+        let fine_owned: Vec<i64> = (fs..fe).collect();
+        cells.extend(par_map(&parents(&fine_owned), threads, |p| dilate(p, nside / 2, 3)));
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    let profile = std::env::var_os("STL_GPU_PROFILE").is_some();
+    let t = std::time::Instant::now();
+    let rows: Vec<(Vec<i64>, Vec<f64>)> =
+        par_map(&cells, threads, |cs| cs.iter().map(|&c| decimation_row(c, nside, &params)).collect());
+    if profile {
+        eprintln!("    level {}: {} rows computed in {:.1} s", fine.nside, cells.len(), t.elapsed().as_secs_f64());
+    }
+    // Forward: owned coarse cells, columns located in parallel.
     let owned_c: Vec<i64> = (coarse.owned.0..coarse.owned.1).collect();
-    let rows: Vec<(Vec<u32>, Vec<f64>)> = par_map(&owned_c, threads, |cs| {
+    let fwd: Vec<(Vec<u32>, &Vec<f64>)> = par_map(&owned_c, threads, |cs| {
         cs.iter()
             .map(|&c| {
-                let (f, w) = decimation_row(c, nside, &params);
+                let (f, w) = &rows[cells.binary_search(&c).unwrap()];
                 (f.iter().map(|&v| find(&fine.ids, v, "decimation")).collect(), w)
             })
             .collect()
     });
     let mut dn = HostCsr { indptr: vec![0], ..Default::default() };
-    for (cols, vals) in rows {
+    for (cols, w) in fwd {
         dn.cols.extend(cols);
-        dn.vals.extend(vals);
+        dn.vals.extend_from_slice(w);
         dn.indptr.push(dn.cols.len() as u32);
     }
-    // Transpose on the owned fine cells: every coarse cell whose candidates
-    // may contain one (3 coarse rings around their parents, a superset).
-    let (fs, fe) = fine.owned;
+    // Transpose on the owned fine cells.
     let mut up = HostCsr { indptr: vec![0], ..Default::default() };
     if fs < fe {
-        let fine_owned: Vec<i64> = (fs..fe).collect();
-        let near = par_map(&parents(&fine_owned), threads, |p| dilate(p, nside / 2, 3));
-        let mut near = near;
-        near.sort_unstable();
-        near.dedup();
-        // (fine, coarse, weight) for the owned fine cells.
-        let mut entries: Vec<(i64, i64, f64)> = par_map(&near, threads, |cs| {
-            let mut out = Vec::new();
-            for &c in cs {
-                let (f, w) = decimation_row(c, nside, &params);
-                for (fi, wi) in f.into_iter().zip(w) {
-                    if fi >= fs && fi < fe {
-                        out.push((fi, c, wi));
-                    }
+        // Counting sort by owned fine cell; the coarse cells come in
+        // increasing order, so they stay so within a row.
+        let n = (fe - fs) as usize;
+        let mut count = vec![0u32; n + 1];
+        for (f, _) in &rows {
+            for &fi in f {
+                if fi >= fs && fi < fe {
+                    count[(fi - fs) as usize + 1] += 1;
                 }
             }
-            out
-        });
-        entries.sort_unstable_by_key(|e| (e.0, e.1));
-        let mut k = 0;
-        for j in fs..fe {
-            while k < entries.len() && entries[k].0 == j {
-                up.cols.push(find(&coarse.ids, entries[k].1, "decimation transpose"));
-                up.vals.push(entries[k].2);
-                k += 1;
-            }
-            up.indptr.push(up.cols.len() as u32);
         }
+        for i in 0..n {
+            count[i + 1] += count[i];
+        }
+        let total = count[n] as usize;
+        let mut next = count.clone();
+        up.cols = vec![0u32; total];
+        up.vals = vec![0f64; total];
+        for (&c, (f, w)) in cells.iter().zip(&rows) {
+            let mut col = None;
+            for (&fi, &wi) in f.iter().zip(w) {
+                if fi >= fs && fi < fe {
+                    let slot = &mut next[(fi - fs) as usize];
+                    up.cols[*slot as usize] = *col.get_or_insert_with(|| find(&coarse.ids, c, "decimation transpose"));
+                    up.vals[*slot as usize] = wi;
+                    *slot += 1;
+                }
+            }
+        }
+        up.indptr = count;
     }
     (dn, up)
 }

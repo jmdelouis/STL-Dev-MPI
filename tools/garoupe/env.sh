@@ -12,4 +12,5 @@ export CUDARC_CUDA_VERSION=11040
 # NVRTC 11.8 (PyPI wheel; the system one is 10.0) and libclang for the mpi crate.
 NVRTC_DIR=$W/py/nvidia/cuda_nvrtc/lib
 export LIBCLANG_PATH=$W/py/clang/native
+export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
 export LD_LIBRARY_PATH=$W/lib:$NVRTC_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}

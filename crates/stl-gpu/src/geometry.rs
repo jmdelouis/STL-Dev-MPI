@@ -106,6 +106,9 @@ fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, c
     let w = gpu.zeros::<f64>(n_entries);
     let comp = complete.then(|| gpu.zeros::<u8>(k * s.g));
     let p_ref = (s.kernel_sz / 2) * (s.kernel_sz + 1);
+    let n_rings = 4 * s.nside as usize;
+    let thetas = gpu.zeros::<f64>(n_rings);
+    gpu.launch1("ring_thetas", n_rings, &[s.nside.into(), gpu.a(&thetas)]);
     gpu.launch1(
         "geom_build",
         k * s.g,
@@ -128,6 +131,7 @@ fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, c
             .into(),
             gpu.a(&stencil),
             (p_ref as i32).into(),
+            gpu.a(&thetas),
             gpu.a(&pos),
             gpu.a(&w),
             comp.as_ref().map_or(NULL, |c| gpu.a(c)),
