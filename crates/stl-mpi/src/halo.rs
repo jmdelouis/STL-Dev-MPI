@@ -38,6 +38,19 @@ impl<'c, C: Comm> HaloExchange<'c, C> {
             ghosts.push(gpos);
             lens.push(layout.len());
         }
+        // The point-to-point exchanges trust both sides' counts: check once
+        // that what each peer will send is what this rank expects.
+        let sizes: Vec<Vec<i64>> = (0..size)
+            .map(|p| serve.iter().chain(ghosts.iter()).map(|lv: &Vec<Vec<usize>>| lv[p].len() as i64).collect())
+            .collect();
+        let peer_sizes = comm.alltoallv_i64(sizes);
+        let levels = ghosts.len();
+        for (p, theirs) in peer_sizes.iter().enumerate() {
+            for l in 0..levels {
+                assert_eq!(theirs[l] as usize, ghosts[l][p].len(), "level {l}: rank {p} serves {} cells, rank {} expects {}", theirs[l], comm.rank(), ghosts[l][p].len());
+                assert_eq!(theirs[levels + l] as usize, serve[l][p].len(), "level {l}: rank {p} sends {} ghosts, rank {} expects {}", theirs[levels + l], comm.rank(), serve[l][p].len());
+            }
+        }
         HaloExchange { comm, ghosts, serve, lens }
     }
 

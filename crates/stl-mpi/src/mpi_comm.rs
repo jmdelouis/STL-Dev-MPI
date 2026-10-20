@@ -4,21 +4,39 @@
 //! sums by `MPI_Gather` to rank 0 (added there in rank order, as the
 //! threads backend does) and `MPI_Bcast`, maxima by `MPI_Allreduce`.  No
 //! per-evaluation operation costs O(P) messages per rank.
+//!
+//! Every point-to-point exchange carries its own tag (a counter, the same
+//! on every rank since all ranks make the same sequence of calls), and
+//! receives name that tag: a message can only match the exchange it
+//! belongs to.  `STL_MPI_HALO=alltoall` switches the halo exchanges back
+//! to `MPI_Alltoallv` (fallback, O(P) per rank).
 
 use crate::comm::Comm;
 use mpi::collective::SystemOperation;
 use mpi::datatype::{Partition, PartitionMut};
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
-use mpi::Count;
+use mpi::{Count, Tag};
+use std::cell::Cell;
 
 pub struct MpiComm {
     world: SimpleCommunicator,
+    seq: Cell<u64>,
+    alltoall_halo: bool,
 }
 
 impl MpiComm {
     pub fn new(world: SimpleCommunicator) -> Self {
-        MpiComm { world }
+        let alltoall_halo = std::env::var("STL_MPI_HALO").map_or(false, |v| v == "alltoall");
+        MpiComm { world, seq: Cell::new(0), alltoall_halo }
+    }
+
+    /// Tag of the next point-to-point exchange, in 1..=30000 (MPI
+    /// guarantees tags up to 32767).
+    fn next_tag(&self) -> Tag {
+        let s = self.seq.get();
+        self.seq.set(s + 1);
+        (s % 30000) as Tag + 1
     }
 
     fn alltoallv<T: Equivalence + Default + Clone>(&self, send: Vec<Vec<T>>) -> Vec<Vec<T>> {
@@ -69,26 +87,35 @@ impl Comm for MpiComm {
         let me = self.rank();
         assert_eq!(send.len(), self.size());
         assert_eq!(recv_counts.len(), self.size());
+        if self.alltoall_halo {
+            let recv = self.alltoallv(send);
+            assert!(recv.iter().zip(recv_counts).all(|(r, &n)| r.len() == n), "halo counts differ from the setup");
+            return recv;
+        }
+        let tag = self.next_tag();
         let mut recv: Vec<Vec<f64>> = recv_counts.iter().map(|&n| vec![0.0; n]).collect();
         recv[me] = std::mem::take(&mut send[me]);
-        // One message per (source, destination) pair and exchange, all
-        // completed before returning: MPI's non-overtaking order matches
-        // every receive with this exchange's message.
+        // One message per (source, destination) pair and exchange, with this
+        // exchange's tag, all completed before returning.
         mpi::request::scope(|scope| {
             let mut receives = Vec::new();
             for (p, buf) in recv.iter_mut().enumerate() {
                 if p != me && !buf.is_empty() {
-                    receives.push(self.world.process_at_rank(p as i32).immediate_receive_into(scope, &mut buf[..]));
+                    receives.push(self.world.process_at_rank(p as i32).immediate_receive_into_with_tag(scope, &mut buf[..], tag));
                 }
             }
             let mut sends = Vec::new();
             for (p, buf) in send.iter().enumerate() {
                 if p != me && !buf.is_empty() {
-                    sends.push(self.world.process_at_rank(p as i32).immediate_send(scope, &buf[..]));
+                    sends.push(self.world.process_at_rank(p as i32).immediate_send_with_tag(scope, &buf[..], tag));
                 }
             }
-            receives.into_iter().for_each(|r| {
-                r.wait();
+            let expected: Vec<(usize, usize)> =
+                recv_counts.iter().enumerate().filter(|&(p, &n)| p != me && n > 0).map(|(p, &n)| (p, n)).collect();
+            receives.into_iter().zip(expected).for_each(|(r, (p, n))| {
+                let status = r.wait();
+                let got = status.count(f64::equivalent_datatype()) as usize;
+                assert!(status.tag() == tag && got == n, "rank {me}: from {p} tag {} ({tag} expected), {got} values ({n} expected)", status.tag());
             });
             sends.into_iter().for_each(|r| {
                 r.wait();
