@@ -1,6 +1,8 @@
 //! `stl-synth`: synthesis of a HEALPix map from the ScatCov statistics of a
 //! target map, on any number of ranks.  Same objective, defaults and report
-//! fields as STL-Dev's `benchmark_synthesis.py --mode local --variables map`.
+//! fields as STL-Dev's `benchmark_synthesis.py --mode local --variables map`,
+//! except the orientations: L = 4 by default (pass `--L 2` to reproduce
+//! STL-Dev's runs).
 
 use num_complex::Complex64;
 use std::path::{Path, PathBuf};
@@ -24,7 +26,7 @@ stl-synth --target MAP [options]
                         missing small scales when the init nside is lower), a number, 0
   --seed N              white-noise seed (default 11)
   --J N                 scales (default log2(nside) - 1)
-  --L N                 orientations (default 2)
+  --L N                 orientations (default 4; L = 2 leaves anisotropic, blobby syntheses)
   --kernel-size N       stencil (default 5)
   --fewer               has_fewer_convolutions definitions of S3/S4
   --block-pixels N      block size per level (default 16384)
@@ -71,7 +73,7 @@ impl Args {
             init_noise: None,
             seed: 11,
             j: None,
-            l: 2,
+            l: 4,
             kernel_size: 5,
             fewer: false,
             block_pixels: 16384,

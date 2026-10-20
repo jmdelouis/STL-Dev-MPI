@@ -31,7 +31,7 @@ for RUN in ${RUNS:-1:16384 4:16384 16:16384 28:16384 1:4096 1:1024 1:16384:2048 
     echo "=== $P ranks, blocks of $B pixels${C:+, geometry by sub-blocks of $C rows}"
     /usr/bin/time -v mpirun -np "$P" -machinefile "$PBS_NODEFILE" \
         "$CARGO_TARGET_DIR/release/stl-synth" \
-        --target "$W/data/kap_nside64_nested.npy" \
+        --target "$W/data/kap_nside64_nested.npy" --L 2 \
         --init "$FIX/initial_map.npy" --init-units standardized --init-noise 0 \
         --block-pixels "$B" ${C:+--conv-chunk $C} --niter 20 --out "$OUT/$TAG" 2> "$OUT/$TAG.time" | tee "$OUT/$TAG.log"
     grep -E 'Maximum resident|Elapsed' "$OUT/$TAG.time"

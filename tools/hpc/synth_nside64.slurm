@@ -29,7 +29,7 @@ for RUN in ${RUNS:-1:16384 4:16384 16:16384 64:16384 128:16384 1:4096 1:16384:20
     # No /usr/bin/time on the nodes: stl-synth reports the per-rank peak (VmHWM).
     time mpirun -np "$P" --bind-to core \
         "$CARGO_TARGET_DIR/release/stl-synth" \
-        --target "$W/data/kap_nside64_nested.npy" \
+        --target "$W/data/kap_nside64_nested.npy" --L 2 \
         --init "$FIX/initial_map.npy" --init-units standardized --init-noise 0 \
         --block-pixels "$B" ${C:+--conv-chunk $C} --niter 20 --out "$OUT/$TAG" 2> "$OUT/$TAG.err" | tee "$OUT/$TAG.log"
     tail -3 "$OUT/$TAG.err"
