@@ -11,7 +11,7 @@ use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Family};
 use stl_core::stencil::Gauge;
 use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
-use stl_mpi::synthesis::{run_lbfgs, Objective};
+use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, Objective};
 use stl_mpi::Comm;
 
 pub const USAGE: &str = "\
@@ -31,6 +31,9 @@ stl-synth --target MAP [options]
   --conv-chunk N        rebuild the convolution geometry by sub-blocks of N rows at every
                         application (less memory, more time; default: whole block)
   --niter N             L-BFGS iterations (default 50)
+  --weights W           loss weights: 'none' (default, sum |S - S_target|^2) or 'ergodic'
+                        (1/sigma^2, sigma^2 = spatial variance of each coefficient's terms on
+                        the target / pixels of its level)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>)
@@ -51,6 +54,7 @@ pub struct Args {
     pub fewer: bool,
     pub block_pixels: usize,
     pub conv_chunk: Option<usize>,
+    pub ergodic_weights: bool,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -72,6 +76,7 @@ impl Args {
             fewer: false,
             block_pixels: 16384,
             conv_chunk: None,
+            ergodic_weights: false,
             niter: 50,
             history_size: 10,
             out: None,
@@ -104,6 +109,13 @@ impl Args {
                 "--fewer" => a.fewer = true,
                 "--block-pixels" => a.block_pixels = num(it.next(), k)?,
                 "--conv-chunk" => a.conv_chunk = Some(num(it.next(), k)?),
+                "--weights" => {
+                    a.ergodic_weights = match it.next().map(String::as_str) {
+                        Some("none") => false,
+                        Some("ergodic") => true,
+                        _ => return Err("--weights is 'none' or 'ergodic'".into()),
+                    }
+                }
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -233,10 +245,14 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
 
     // Resident memory once the inputs are read.
     let rss_baseline = proc_memory("VmRSS:");
-    // Target statistics with the same distributed engine.
-    let target_stats = probe.statistics(&target);
+    // Target statistics with the same distributed engine, and the spatial
+    // variance of every coefficient's terms for the ergodic weights.
+    let (target_stats, target_var) = probe.statistics_moments(&target);
     drop(probe);
-    let obj = Objective::new(&geo, &cfg, &plan, &target_stats, 1, 1, comm);
+    let mut obj = Objective::new(&geo, &cfg, &plan, &target_stats, 1, 1, comm);
+    if args.ergodic_weights {
+        obj.weights = ergodic_weights(&geo, &plan, &target_var);
+    }
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -253,7 +269,25 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let seconds = started.elapsed().as_secs_f64();
     let final_stats = obj.statistics(&x);
-    let final_loss: f64 = final_stats.iter().zip(&target_stats).map(|(a, b)| (a - b).norm_sqr()).sum();
+    let final_loss: f64 =
+        final_stats.iter().zip(&target_stats).zip(&obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
+    // Residual per family, in units of the ergodic sigma (|S - S_t| / sigma).
+    let mut per_family = serde_json::Map::new();
+    for fam in Family::ALL {
+        let z: Vec<f64> = plan
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.family == fam)
+            .map(|(i, c)| {
+                let sigma = (target_var[i] / geo.pixels(c.native_dg) as f64).sqrt();
+                (final_stats[i] - target_stats[i]).norm() / sigma.max(1e-300)
+            })
+            .collect();
+        if !z.is_empty() {
+            let rms = (z.iter().map(|v| v * v).sum::<f64>() / z.len() as f64).sqrt();
+            per_family.insert(fam.name().into(), serde_json::json!({"count": z.len(), "rms_sigma": rms, "max_sigma": z.iter().cloned().fold(0.0, f64::max)}));
+        }
+    }
     let timers: serde_json::Map<String, serde_json::Value> =
         obj.timers.borrow().iter().map(|(k, v)| (k.to_string(), serde_json::json!((v * 10.0).round() / 10.0))).collect();
     let floor = obj.memory_floor_bytes(args.history_size);
@@ -316,6 +350,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_first": history.first(),
         "loss_last": history.last(),
         "loss_final_map": final_loss,
+        "weights": if args.ergodic_weights { "ergodic" } else { "none" },
+        "final_residual_in_ergodic_sigma": per_family,
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
         "init": init_info,

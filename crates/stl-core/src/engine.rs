@@ -309,8 +309,24 @@ impl<'a> LocalEngine<'a> {
     /// Coefficient values `[B, len(plan)]` (summed over the processes);
     /// fills the stored moduli.
     pub fn forward(&mut self, plan: &[Coefficient]) -> Vec<Complex64> {
+        self.forward_impl(plan, false).0
+    }
+
+    /// [`forward`](Self::forward) plus, for every coefficient `S = <f_p>`
+    /// (a pixel mean at its native level), the spatial variance of the
+    /// summed terms, `V = <|f_p|^2> - |S|^2` `[B, len(plan)]`.  Under
+    /// ergodicity `V / N` (N pixels of the native level) estimates the
+    /// variance of the coefficient.
+    pub fn forward_moments(&mut self, plan: &[Coefficient]) -> (Vec<Complex64>, Vec<f64>) {
+        let (values, second) = self.forward_impl(plan, true);
+        let var = values.iter().zip(&second).map(|(s, m2)| (m2 - s.norm_sqr()).max(0.0)).collect();
+        (values, var)
+    }
+
+    fn forward_impl(&mut self, plan: &[Coefficient], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
         let groups = Self::groups(plan);
         let mut values = vec![ZERO; self.batch * plan.len()];
+        let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
         let rows = self.batch * self.channels * self.geo.l;
         for n in 0..self.levels() {
             for block in self.part.blocks[n].clone() {
@@ -320,6 +336,11 @@ impl<'a> LocalEngine<'a> {
                     let p = fields.partial(self, &plan[i], &a, &b);
                     for (bi, v) in p.into_iter().enumerate() {
                         values[bi * plan.len() + i] += v;
+                    }
+                    if moments {
+                        for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
+                            second[bi * plan.len() + i] += v;
+                        }
                     }
                 }
                 // Push |z_n| on F to every coarser level.
@@ -343,7 +364,10 @@ impl<'a> LocalEngine<'a> {
         }
         let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
         self.ex.allreduce(&mut flat);
-        flat.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect()
+        if moments {
+            self.ex.allreduce(&mut second);
+        }
+        (flat.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect(), second)
     }
 
     /// Map cotangents of every level (owned cells valid, halo zero) for the
@@ -641,6 +665,33 @@ impl Block {
                     _ => {
                         let b = &b[bi * nf..][..nf];
                         a.iter().zip(b).map(|(&x, &y)| x * y.conj()).sum()
+                    }
+                };
+                sum / n_total
+            })
+            .collect()
+    }
+
+    /// Partial sum `[B]` of `|f_p|^2 / N` over the block, `f_p` the terms
+    /// whose mean is the coefficient (see [`partial`](Self::partial)).
+    fn partial_second(&self, engine: &LocalEngine, c: &Coefficient, a: &[Complex64], b: &[Complex64]) -> Vec<f64> {
+        let n_total = engine.geo.pixels(self.n) as f64;
+        let nf = self.nf();
+        (0..engine.batch)
+            .map(|bi| {
+                let a = &a[bi * nf..][..nf];
+                let sum: f64 = match c.family {
+                    Family::Mean => a.iter().map(|v| v.norm_sqr()).sum(),
+                    Family::Var => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                    Family::S2 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                    Family::S1 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr()).sum(),
+                    Family::S1 => {
+                        let b = &b[bi * nf..][..nf];
+                        a.iter().zip(b).map(|(&x, &y)| (root_normalise(x) * root_normalise(y).conj()).norm_sqr()).sum()
+                    }
+                    _ => {
+                        let b = &b[bi * nf..][..nf];
+                        a.iter().zip(b).map(|(&x, &y)| (x * y.conj()).norm_sqr()).sum()
                     }
                 };
                 sum / n_total

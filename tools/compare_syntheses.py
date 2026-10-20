@@ -91,22 +91,29 @@ def main():
     # LABEL=PATH, split on the last '=' (labels may contain one, paths do not).
     syntheses = [(s.rsplit("=", 1)[0], load(s.rsplit("=", 1)[1])) for s in specs]
     maps = [("target", target)] + syntheses
-    full = raster_index(nside, 0, 360, -90, 90, min(512, 2 * nside))
-    zoom = raster_index(nside, 100, 120, 10, 30, min(340, nside // 3))
-    patches = gnomonic_patches(nside)
+    # Raster cells no finer than the pixels (about 58.6 deg / nside), zoom
+    # of at least ~20 pixels a side.
+    full = raster_index(nside, 0, 360, -90, 90, min(512, nside))
+    span = min(80.0, 20.0 * max(1.0, 256.0 / nside))
+    zlon0, zlat0 = 100.0, 20.0 - span / 2
+    zoom_extent = [zlon0, zlon0 + span, zlat0, zlat0 + span]
+    zoom = raster_index(nside, *zoom_extent, max(16, min(340, int(nside * span / 117.0))))
+    # Patches of at most ~45 deg: 256 samples from nside 512, fewer below.
+    n_patch = 256 if nside >= 512 else max(16, nside // 2)
+    patches = gnomonic_patches(nside, n=n_patch)
     print(f"nside {nside}")
     print(f"{'map':28s} {'mean':>11s} {'std':>10s} {'skew':>7s} {'max':>9s}  P(E-W)/P(N-S), small scales")
     ratios = []
     for name, m in maps:
         skew = ((m - m.mean()) ** 3).mean() / m.std() ** 3
-        r, err = anisotropy(m, patches)
+        r, err = anisotropy(m, patches, n=n_patch)
         ratios.append((r, err))
         print(f"{name:28s} {m.mean():+.4e} {m.std():.4e} {skew:+.3f} {m.max():+.3e}  {r:.3f} +- {err:.3f}")
     vmin, vmax = np.percentile(target, [0.5, 99.5])
     n = len(maps)
     fig, ax = plt.subplots(3, n, figsize=(6.5 * n, 14), squeeze=False)
     for k, (name, m) in enumerate(maps):
-        for row, (index, extent, what) in enumerate(((full, [0, 360, -90, 90], "full sky"), (zoom, [100, 120, 10, 30], "20 x 20 deg"))):
+        for row, (index, extent, what) in enumerate(((full, [0, 360, -90, 90], "full sky"), (zoom, zoom_extent, f"{span:.0f} x {span:.0f} deg"))):
             im = ax[row, k].imshow(raster(m, index), cmap="RdBu_r", vmin=vmin, vmax=vmax, extent=extent,
                                    aspect="auto", interpolation="nearest")
             ax[row, k].set_title(f"{name}, {what}")

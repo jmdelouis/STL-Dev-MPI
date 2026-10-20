@@ -120,6 +120,14 @@ impl<'a, C: Comm> Objective<'a, C> {
         engine.forward(self.plan)
     }
 
+    /// Statistics and, per coefficient, the spatial variance of the terms
+    /// it averages ([`LocalEngine::forward_moments`]).
+    pub fn statistics_moments(&self, x: &[f64]) -> (Vec<Complex64>, Vec<f64>) {
+        let mut engine =
+            LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
+        engine.forward_moments(self.plan)
+    }
+
     /// Loss and owned slice of its gradient (`loss_and_grad_local`, map variable).
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
         let start = Instant::now();
@@ -163,6 +171,31 @@ impl<'a, C: Comm> Objective<'a, C> {
             "cells_held_per_level": held,
         })
     }
+}
+
+/// Ergodic weights `1 / sigma_i^2` with `sigma_i^2 = V_i / N_i`: `V_i` the
+/// spatial variance of the terms averaged by coefficient `i` on the
+/// target, `N_i` the pixels of its native level (variance of a mean of
+/// independent pixels).  Normalised to a mean of 1; a zero variance (a
+/// coefficient that is exactly constant) gets the largest finite weight.
+pub fn ergodic_weights(geo: &LocalGeometry, plan: &[Coefficient], variance: &[f64]) -> Vec<f64> {
+    let mut w: Vec<f64> = plan
+        .iter()
+        .zip(variance)
+        .map(|(c, &v)| {
+            let n = geo.pixels(c.native_dg) as f64;
+            if v > 0.0 {
+                n / v
+            } else {
+                f64::INFINITY
+            }
+        })
+        .collect();
+    let max_finite = w.iter().copied().filter(|v| v.is_finite()).fold(0.0, f64::max);
+    w.iter_mut().filter(|v| !v.is_finite()).for_each(|v| *v = max_finite);
+    let mean = w.iter().sum::<f64>() / w.len() as f64;
+    w.iter_mut().for_each(|v| *v /= mean);
+    w
 }
 
 /// Run the synthesis from the owned slice `x` (updated in place); `report`
