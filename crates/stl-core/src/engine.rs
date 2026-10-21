@@ -158,6 +158,23 @@ pub trait Exchange {
     fn reduce_ghosts(&self, level: usize, field: &mut [f64], rows: usize);
     /// Element-wise sum over the processes, identical on every process.
     fn allreduce(&self, values: &mut [f64]);
+
+    /// [`halo`](Self::halo) of several fields `(level, field, rows)` at
+    /// once: a backend may send them in one message per peer.  Every
+    /// process passes the same list (same levels and rows, same order).
+    fn halo_many(&self, fields: &mut [(usize, &mut [f64], usize)]) {
+        for (level, field, rows) in fields.iter_mut() {
+            self.halo(*level, field, *rows);
+        }
+    }
+
+    /// [`reduce_ghosts`](Self::reduce_ghosts) of several fields at once;
+    /// per cell, the additions keep the order of the single-field version.
+    fn reduce_ghosts_many(&self, fields: &mut [(usize, &mut [f64], usize)]) {
+        for (level, field, rows) in fields.iter_mut() {
+            self.reduce_ghosts(*level, field, *rows);
+        }
+    }
 }
 
 /// The single-process exchange: nothing to do.
@@ -355,11 +372,14 @@ impl<'a> LocalEngine<'a> {
                 }
             }
             // The moduli pushed from level n are complete: owners collect
-            // them, then hand them out as halo to the coarser levels' readers.
-            for n2 in n + 1..self.levels() {
-                let field = self.m.get_mut(&(n, n2)).unwrap();
-                self.ex.reduce_ghosts(n2, field, rows);
-                self.ex.halo(n2, field, rows);
+            // them, then hand them out as halo to the coarser levels' readers
+            // (all coarser levels in one exchange each way).
+            let ex = self.ex;
+            let mut fields: Vec<(usize, &mut [f64], usize)> =
+                self.m.range_mut((n, n + 1)..(n + 1, 0)).map(|(&(_, n2), v)| (n2, v.as_mut_slice(), rows)).collect();
+            if !fields.is_empty() {
+                ex.reduce_ghosts_many(&mut fields);
+                ex.halo_many(&mut fields);
             }
         }
         let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
@@ -396,14 +416,18 @@ impl<'a> LocalEngine<'a> {
                 }
                 fields.finish_reverse(self, &mut maps_gradient);
             }
-            // gm[d][n] is complete once level n is done: collect, then hand
-            // out as halo to the finer levels' chains.
-            for d in 0..n {
-                let field = self.gm.get_mut(&(d, n)).unwrap();
-                self.ex.reduce_ghosts(n, field, rows);
-                self.ex.halo(n, field, rows);
+            // gm[d][n] is complete once level n is done: collect (with the
+            // map cotangent of level n, one exchange), then hand out as halo
+            // to the finer levels' chains (one exchange).
+            let ex = self.ex;
+            let mut fields: Vec<(usize, &mut [f64], usize)> =
+                self.gm.iter_mut().filter(|(&(_, k), _)| k == n).map(|(_, v)| (n, v.as_mut_slice(), rows)).collect();
+            fields.push((n, maps_gradient[n].as_mut_slice(), bc));
+            ex.reduce_ghosts_many(&mut fields);
+            fields.pop();
+            if !fields.is_empty() {
+                ex.halo_many(&mut fields);
             }
-            self.ex.reduce_ghosts(n, &mut maps_gradient[n], bc);
         }
         self.gm.clear();
         maps_gradient
@@ -413,14 +437,9 @@ impl<'a> LocalEngine<'a> {
     /// transposed decimations, then the band cotangents of the Laplacian
     /// pyramid (`LocalGeometry.analysis_vjp`).  Returns `(map0, bands)` over
     /// the layouts, owned cells valid.
-    pub fn analysis_vjp(&self, mut maps_gradient: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
+    pub fn analysis_vjp(&self, maps_gradient: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
         let bc = self.batch * self.channels;
-        for d in (1..self.levels()).rev() {
-            self.ex.halo(d, &mut maps_gradient[d], bc);
-            let (fine, coarse) = maps_gradient.split_at_mut(d);
-            self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1]);
-        }
-        let g0 = maps_gradient.swap_remove(0);
+        let g0 = self.map_cotangent(maps_gradient);
         let mut bands = vec![g0.clone()];
         // Up-sampling adjoint: sum of the four children.  A parent may be
         // owned by another rank (coarse levels shared by more ranks than
@@ -439,6 +458,19 @@ impl<'a> LocalEngine<'a> {
             bands.push(coarse);
         }
         (g0, bands)
+    }
+
+    /// Cotangent of the level-0 map only (the first part of
+    /// [`analysis_vjp`](Self::analysis_vjp), without the band cotangents
+    /// and their exchanges): what a synthesis with the map as variable needs.
+    pub fn map_cotangent(&self, mut maps_gradient: Vec<Vec<f64>>) -> Vec<f64> {
+        let bc = self.batch * self.channels;
+        for d in (1..self.levels()).rev() {
+            self.ex.halo(d, &mut maps_gradient[d], bc);
+            let (fine, coarse) = maps_gradient.split_at_mut(d);
+            self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1]);
+        }
+        maps_gradient.swap_remove(0)
     }
 }
 
