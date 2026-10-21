@@ -20,5 +20,5 @@ pub mod synthesis;
 pub mod threads;
 
 pub use comm::Comm;
-pub use decomposition::{build_partition, Decomposition};
+pub use decomposition::{build_overlap_partition, build_partition, build_partition_for, Decomposition};
 pub use halo::HaloExchange;

@@ -43,6 +43,8 @@ stl-synth --target MAP [options]
   --kernel-size N       stencil (default 5)
   --fewer               has_fewer_convolutions definitions of S3/S4
   --block-pixels N      block size per level (default 16384)
+  --overlap N           overlapping patches: levels < N evaluated with redundant halos (no
+                        exchange during the sweeps), levels >= N on rank 0; for a few ranks
   --conv-chunk N        rebuild the convolution geometry by sub-blocks of N rows at every
                         application (less memory, more time; default: whole block)
   --niter N             L-BFGS iterations (default 50)
@@ -145,6 +147,7 @@ pub struct Args {
     pub fewer: bool,
     pub block_pixels: usize,
     pub conv_chunk: Option<usize>,
+    pub overlap: Option<usize>,
     pub ergodic_weights: bool,
     pub family_weights: Vec<(Family, f64)>,
     pub ensemble: usize,
@@ -188,6 +191,7 @@ impl Args {
             fewer: false,
             block_pixels: 16384,
             conv_chunk: None,
+            overlap: None,
             ergodic_weights: false,
             family_weights: Vec::new(),
             ensemble: 1,
@@ -242,6 +246,7 @@ impl Args {
                 "--fewer" => a.fewer = true,
                 "--block-pixels" => a.block_pixels = num(it.next(), k)?,
                 "--conv-chunk" => a.conv_chunk = Some(num(it.next(), k)?),
+                "--overlap" => a.overlap = Some(num(it.next(), k)?),
                 "--weights" => {
                     a.ergodic_weights = match it.next().map(String::as_str) {
                         Some("none") => false,
@@ -410,7 +415,16 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let j = args.j.unwrap_or_else(|| (64 - (nside as u64).leading_zeros() as usize).saturating_sub(2).max(1));
     let mut geo = LocalGeometry::new(nside, args.kernel_size, args.l, Gauge::Cosmo, args.block_pixels);
     geo.conv_chunk = args.conv_chunk;
-    let cfg = EngineConfig::new(j, args.fewer);
+    let mut cfg = EngineConfig::new(j, args.fewer);
+    if let Some(coarse) = args.overlap {
+        if args.gpu {
+            return Err("--overlap runs on the CPU engine only (the device engine needs the standard partition)".into());
+        }
+        if coarse < 1 || coarse > cfg.levels() {
+            return Err(format!("--overlap {coarse}: the first coarse level must be in 1..={}", cfg.levels()));
+        }
+        cfg.overlap = Some(coarse);
+    }
     let plan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &Family::ALL);
     let started_setup = Instant::now();
     let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
@@ -723,6 +737,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "neighbour_exchanges_per_evaluation": per_eval(calls_before.0, calls_after.0),
         "engine_allreduces_per_evaluation": per_eval(calls_before.1, calls_after.1),
         "halo_mode": std::env::var("STL_MPI_HALO").unwrap_or_else(|_| "point-to-point".into()),
+        "overlap_first_coarse_level": args.overlap,
     });
     // Final statistics of this group's members and their mean over all members.
     let final_members = obj.statistics(&x);
