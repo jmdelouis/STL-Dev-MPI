@@ -4,7 +4,7 @@
 //! the owned slice `[B, C, end - start]` of level 0.
 
 use crate::comm::Comm;
-use crate::decomposition::{build_partition, Decomposition};
+use crate::decomposition::{build_partition_for, Decomposition};
 use crate::halo::HaloExchange;
 use num_complex::Complex64;
 use std::time::Instant;
@@ -59,7 +59,7 @@ impl<'a, C: Comm> Objective<'a, C> {
     ) -> Self {
         assert_eq!(target.len(), batch * plan.len());
         let dec = Decomposition::new(geo, cfg.levels(), comm.size());
-        let part = build_partition(geo, &dec, comm.rank());
+        let part = build_partition_for(geo, cfg, &dec, comm.rank());
         let halo = HaloExchange::new(comm, &dec, &part);
         Objective {
             geo,

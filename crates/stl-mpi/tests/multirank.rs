@@ -107,6 +107,47 @@ fn more_ranks_than_coarse_cells() {
     assert!(dv <= 1e-13 && dg <= 1e-13, "{dv:e} {dg:e}");
 }
 
+/// Overlap mode (patches with redundant halos, coarse levels on rank 0):
+/// statistics and level-0 map cotangent against the fixtures and against
+/// the classic mode, for every split level and 1, 2, 4 ranks.
+#[test]
+fn overlap_mode_matches_fixtures() {
+    use stl_mpi::check::{close_ratio, max_abs_diff, run_problem_overlap};
+    for fx in fixtures() {
+        let (geo, mut cfg) = (fx.geometry(), fx.config());
+        let plan = fx.plan();
+        let (batch, channels) = (fx.int("batch") as usize, fx.int("channels") as usize);
+        let (map0, gradient) = (fx.f64("map0"), fx.complex("gradient"));
+        let flat = |v: &[num_complex::Complex64]| v.iter().flat_map(|c| [c.re, c.im]).collect::<Vec<f64>>();
+        let want_values = flat(&fx.complex("values"));
+        let want_g0 = fx.f64("band_gradient0");
+        let classic = assemble(&run_ranks(1, |c| run_rank(&fx, c)), rows(&fx));
+        for coarse in 1..=cfg.levels() {
+            cfg.overlap = Some(coarse);
+            for size in [1usize, 2, 4] {
+                let results = run_ranks(size, |c| run_problem_overlap(&geo, &cfg, &plan, &map0, &gradient, batch, channels, c));
+                for r in &results {
+                    assert_eq!(r.0, results[0].0, "statistics differ between ranks");
+                }
+                let n0 = geo.pixels(0);
+                let mut g0 = vec![0.0; rows(&fx) * n0];
+                for (_, (s, e), part) in &results {
+                    let len = (e - s) as usize;
+                    for row in 0..rows(&fx) {
+                        g0[row * n0 + *s as usize..][..len].copy_from_slice(&part[row * len..][..len]);
+                    }
+                }
+                let values = flat(&results[0].0);
+                let sv = close_ratio(&values, &want_values, 1e-11, 1e-10);
+                let sg = close_ratio(&g0, &want_g0, 1e-10, 1e-9);
+                let dc = max_abs_diff(&values, &flat(&classic.values)).max(max_abs_diff(&g0, &classic.bands[0]));
+                eprintln!("{} overlap from level {coarse}, P={size}: stats {sv:.1e} x tol, gradient {sg:.1e} x tol, vs classic {dc:.1e}", fx.name());
+                assert!(sv <= 1.0 && sg <= 1.0 && dc <= 1e-13, "{} coarse {coarse} P={size}", fx.name());
+            }
+        }
+    }
+}
+
 #[test]
 fn ranks_agree_with_fixtures_and_each_other() {
     for fx in fixtures() {
