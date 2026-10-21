@@ -120,6 +120,11 @@ impl<'a, C: Comm> Objective<'a, C> {
         }
     }
 
+    /// `(neighbour exchanges, global sums)` issued by the sweeps so far.
+    pub fn exchange_calls(&self) -> (u64, u64) {
+        self.halo.calls()
+    }
+
     /// Owned range of level 0.
     pub fn owned(&self) -> (i64, i64) {
         self.part.owned[0]
@@ -223,7 +228,7 @@ impl<'a, C: Comm> Objective<'a, C> {
         let (loss, cotangent) = self.loss_cotangent(&values);
         let start = Instant::now();
         let mg = engine.reverse(self.plan, &cotangent);
-        let (g0, _) = engine.analysis_vjp(mg);
+        let g0 = engine.map_cotangent(mg);
         self.tick("reverse", start);
         (loss, engine.owned_values(0, &g0))
     }

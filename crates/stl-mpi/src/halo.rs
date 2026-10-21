@@ -2,6 +2,7 @@
 
 use crate::comm::Comm;
 use crate::decomposition::Decomposition;
+use std::cell::Cell;
 use stl_core::engine::{Exchange, Partition};
 
 /// Per level and peer: the halo positions of this rank owned by the peer
@@ -12,6 +13,9 @@ pub struct HaloExchange<'c, C: Comm> {
     ghosts: Vec<Vec<Vec<usize>>>,
     serve: Vec<Vec<Vec<usize>>>,
     lens: Vec<usize>,
+    /// Neighbour exchanges and global sums issued so far.
+    exchanges: Cell<u64>,
+    allreduces: Cell<u64>,
 }
 
 impl<'c, C: Comm> HaloExchange<'c, C> {
@@ -51,7 +55,7 @@ impl<'c, C: Comm> HaloExchange<'c, C> {
                 assert_eq!(theirs[levels + l] as usize, serve[l][p].len(), "level {l}: rank {p} sends {} ghosts, rank {} expects {}", theirs[levels + l], comm.rank(), serve[l][p].len());
             }
         }
-        HaloExchange { comm, ghosts, serve, lens }
+        HaloExchange { comm, ghosts, serve, lens, exchanges: Cell::new(0), allreduces: Cell::new(0) }
     }
 
     /// Number of halo cells per level (cells held but not owned).
@@ -59,58 +63,105 @@ impl<'c, C: Comm> HaloExchange<'c, C> {
         self.ghosts.iter().map(|g| g.iter().map(Vec::len).sum()).collect()
     }
 
-    fn pack(field: &[f64], len: usize, rows: usize, pos: &[usize]) -> Vec<f64> {
-        let mut out = Vec::with_capacity(rows * pos.len());
+    /// `(neighbour exchanges, global sums)` issued since the start.
+    pub fn calls(&self) -> (u64, u64) {
+        (self.exchanges.get(), self.allreduces.get())
+    }
+
+    fn pack_into(out: &mut Vec<f64>, field: &[f64], len: usize, rows: usize, pos: &[usize]) {
         for r in 0..rows {
             out.extend(pos.iter().map(|&p| field[r * len + p]));
         }
-        out
+    }
+
+    /// Values of every field at `from[level][peer]`, concatenated per peer
+    /// in the order of `fields` (then zeroed there when `clear_sent`); one
+    /// exchange; then `unpack(field, len, rows, to[level][peer], data)` per
+    /// peer in rank order and per field in the order of `fields`.
+    fn exchange_many(
+        &self,
+        fields: &mut [(usize, &mut [f64], usize)],
+        from: &[Vec<Vec<usize>>],
+        to: &[Vec<Vec<usize>>],
+        clear_sent: bool,
+        unpack: impl Fn(&mut [f64], usize, usize, &[usize], &[f64]),
+    ) {
+        let size = self.comm.size();
+        for (level, field, rows) in fields.iter() {
+            assert_eq!(field.len(), rows * self.lens[*level]);
+        }
+        let send: Vec<Vec<f64>> = (0..size)
+            .map(|peer| {
+                let mut out = Vec::new();
+                for (level, field, rows) in fields.iter() {
+                    Self::pack_into(&mut out, field, self.lens[*level], *rows, &from[*level][peer]);
+                }
+                out
+            })
+            .collect();
+        if clear_sent {
+            for (level, field, rows) in fields.iter_mut() {
+                let len = self.lens[*level];
+                for pos in &from[*level] {
+                    for r in 0..*rows {
+                        pos.iter().for_each(|&p| field[r * len + p] = 0.0);
+                    }
+                }
+            }
+        }
+        let counts: Vec<usize> =
+            (0..size).map(|peer| fields.iter().map(|(level, _, rows)| rows * to[*level][peer].len()).sum()).collect();
+        self.exchanges.set(self.exchanges.get() + 1);
+        let recv = self.comm.exchange_f64(send, &counts);
+        for (peer, data) in recv.iter().enumerate() {
+            assert_eq!(data.len(), counts[peer]);
+            let mut offset = 0;
+            for (level, field, rows) in fields.iter_mut() {
+                let pos = &to[*level][peer];
+                let n = *rows * pos.len();
+                unpack(field, self.lens[*level], *rows, pos, &data[offset..offset + n]);
+                offset += n;
+            }
+        }
     }
 }
 
 impl<C: Comm> Exchange for HaloExchange<'_, C> {
     fn halo(&self, level: usize, field: &mut [f64], rows: usize) {
-        let len = self.lens[level];
-        assert_eq!(field.len(), rows * len);
-        let send = self.serve[level].iter().map(|pos| Self::pack(field, len, rows, pos)).collect();
-        let counts: Vec<usize> = self.ghosts[level].iter().map(|pos| rows * pos.len()).collect();
-        let recv = self.comm.exchange_f64(send, &counts);
-        for (peer, data) in recv.iter().enumerate() {
-            let pos = &self.ghosts[level][peer];
-            assert_eq!(data.len(), rows * pos.len());
+        self.halo_many(&mut [(level, field, rows)]);
+    }
+
+    fn reduce_ghosts(&self, level: usize, field: &mut [f64], rows: usize) {
+        self.reduce_ghosts_many(&mut [(level, field, rows)]);
+    }
+
+    fn allreduce(&self, values: &mut [f64]) {
+        self.allreduces.set(self.allreduces.get() + 1);
+        self.comm.allreduce_sum(values);
+    }
+
+    /// Owners send their cells, one message per peer for all the fields.
+    fn halo_many(&self, fields: &mut [(usize, &mut [f64], usize)]) {
+        self.exchange_many(fields, &self.serve, &self.ghosts, false, |field, len, rows, pos, data| {
             for r in 0..rows {
                 for (i, &p) in pos.iter().enumerate() {
                     field[r * len + p] = data[r * pos.len() + i];
                 }
             }
-        }
+        });
     }
 
-    fn reduce_ghosts(&self, level: usize, field: &mut [f64], rows: usize) {
-        let len = self.lens[level];
-        assert_eq!(field.len(), rows * len);
-        let send = self.ghosts[level].iter().map(|pos| Self::pack(field, len, rows, pos)).collect();
-        for pos in &self.ghosts[level] {
-            for r in 0..rows {
-                pos.iter().for_each(|&p| field[r * len + p] = 0.0);
-            }
-        }
-        let counts: Vec<usize> = self.serve[level].iter().map(|pos| rows * pos.len()).collect();
-        let recv = self.comm.exchange_f64(send, &counts);
-        // Owner's own value first, then the peers' contributions in rank order.
-        for (peer, data) in recv.iter().enumerate() {
-            let pos = &self.serve[level][peer];
-            assert_eq!(data.len(), rows * pos.len());
+    /// Halo contributions to their owners, one message per peer for all
+    /// the fields.  Per cell: the owner's own value first, then the peers'
+    /// contributions in rank order (as with one field at a time).
+    fn reduce_ghosts_many(&self, fields: &mut [(usize, &mut [f64], usize)]) {
+        self.exchange_many(fields, &self.ghosts, &self.serve, true, |field, len, rows, pos, data| {
             for r in 0..rows {
                 for (i, &p) in pos.iter().enumerate() {
                     field[r * len + p] += data[r * pos.len() + i];
                 }
             }
-        }
-    }
-
-    fn allreduce(&self, values: &mut [f64]) {
-        self.comm.allreduce_sum(values);
+        });
     }
 
     fn trivial(&self) -> bool {

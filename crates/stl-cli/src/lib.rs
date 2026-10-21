@@ -324,6 +324,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let mut x = initial;
 
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
+    let calls_before = obj.exchange_calls();
     let started = Instant::now();
     let history = if args.niter == 0 {
         Vec::new()
@@ -335,6 +336,13 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         })
     };
     let seconds = started.elapsed().as_secs_f64();
+    let calls_after = obj.exchange_calls();
+    let per_eval = |a: u64, b: u64| ((b - a) as f64 / history.len().max(1) as f64 * 10.0).round() / 10.0;
+    let mpi_calls = serde_json::json!({
+        "neighbour_exchanges_per_evaluation": per_eval(calls_before.0, calls_after.0),
+        "engine_allreduces_per_evaluation": per_eval(calls_before.1, calls_after.1),
+        "halo_mode": std::env::var("STL_MPI_HALO").unwrap_or_else(|_| "point-to-point".into()),
+    });
     let final_stats = obj.statistics(&x);
     let final_loss: f64 =
         final_stats.iter().zip(&target_stats).zip(&obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
@@ -440,6 +448,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "memory_peak_bytes_per_rank": peaks,
         "rss_baseline_bytes_per_rank": baselines,
         "timers_seconds": timers,
+        "mpi_calls": mpi_calls,
     });
     std::fs::write(file(".json"), serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;
     Ok(Some(report))

@@ -24,7 +24,7 @@ T=$W/src/tools
 RUN=${RUN:-$S/runs/${SLURM_JOB_ID}}
 mkdir -p "$RUN"
 cd "$RUN"
-echo "job $SLURM_JOB_ID: $SLURM_JOB_NUM_NODES node(s), $SLURM_NTASKS tasks, prep $PREP, L ${L:-4}, niter ${NITER:-400}, init ${INIT:-noise}, run $RUN, halo exchanges ${STL_MPI_HALO:-point-to-point}"
+echo "job $SLURM_JOB_ID: $SLURM_JOB_NUM_NODES node(s), $SLURM_NTASKS tasks, prep $PREP, L ${L:-4}, niter ${NITER:-400}, init ${INIT:-noise}, run $RUN, halo exchanges ${STL_MPI_HALO:-point-to-point}, MPI $MPI_MODULE${OMPI_MCA_pml:+ pml $OMPI_MCA_pml}${UCX_TLS:+ UCX_TLS $UCX_TLS}"
 ln -sf "$PREP/target_gauss_up_nested.npy" target_gauss_up_nested.npy
 cp "$PREP/gauss_table.npz" .
 INIT_OPT=""
