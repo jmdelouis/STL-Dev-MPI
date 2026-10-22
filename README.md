@@ -13,12 +13,14 @@ see `CLAUDE.md` for the model, the architecture and the milestones, and
 |---|---|
 | `crates/stl-core` | HEALPix geometry (centres, `ring2nest`, bilinear interpolation, stencil rotation, binding), wavelet kernel, partial convolution and its adjoint, smooth decimation, block-wise `wave` / `decimate` / pieces and their transposes (`local.rs`); no MPI, `f64` |
 | `crates/stl-mpi` | decomposition, halo exchange, ghost accumulation (`Comm`: threads or MPI), distributed objective (`synthesis.rs`), npy / HEALPix FITS I/O |
+| `crates/stl-gpu` | the sweeps on CUDA devices, one per rank (`stl-synth --gpu`, feature `gpu`); see [`docs/gpu.md`](docs/gpu.md) |
 | `crates/stl-cli` | `stl-synth`: synthesis from a target map |
 | `tools/dump_reference.py` | dumps STL-Dev outputs as fixtures |
 | `tools/prepare_healpix_target.py`, `gaussianize.py`, `resample_nested.py` | target preparation: NESTED degrading, Gaussian anamorphosis and histogram matching, 2N up / N down resampling |
 | `tools/plot_mollweide.py`, `compare_syntheses.py` | figures |
 | `tools/datarmor/` | environment and PBS script for Datarmor |
 | `tools/hpc/` | environment and Slurm scripts for the hpc cluster (build, scaling, synthesis chain) |
+| `tools/garoupe/` | environment, setup and benchmark of the GPU build on garoupe (3 x Tesla T4) |
 | `fixtures/<suite>/` | `.npy` arrays + `meta.json` per case, `index.json` per suite |
 | `benchmarks/datarmor/` | reports of the Datarmor runs |
 
@@ -34,6 +36,15 @@ Under MPI (OpenMPI and `libclang-dev` installed):
 
 ```bash
 tools/mpi_check.sh 2 4
+```
+
+On CUDA devices (`CUDARC_CUDA_VERSION` is the driver's CUDA version, e.g.
+`12040`; the tests are skipped without a device), and one device per rank
+under MPI:
+
+```bash
+CUDARC_CUDA_VERSION=12040 cargo test --release -p stl-gpu
+STL_CHECK_GPU=1 tools/mpi_check.sh 2 3
 ```
 
 Regenerate the fixtures (STL-Dev synced in `~/stl-work`, CPU venv in
@@ -269,3 +280,32 @@ that the 5 x 5 stencil leaves. The last row is the recipe of
 Unsorted cell ids are rejected: with unsorted ids `TorchConv` (and
 healpix-analyse's `HealPixConv`, which it reproduces) returns its rows in
 neither the input nor the sorted order; STL-Dev always passes sorted ids.
+
+### GPU (`crates/stl-gpu`, `stl-synth --gpu`)
+
+The sweeps on CUDA devices, one per MPI rank, with the CPU decomposition,
+exchanges, objective and L-BFGS; `f64`, kernels compiled by NVRTC with
+`--fmad=false`, deterministic (no floating-point atomics). Design,
+validation and measurements in [`docs/gpu.md`](docs/gpu.md).
+
+| Check (laptop RTX A1000 and garoupe Tesla T4) | Result |
+|---|---|
+| device geometry vs `ConvGeometry`, nside 8 to 1024 | weights <= 0.07 x the rounding-noise bound |
+| the 8 stats fixtures (1 to 333 device blocks per level) | statistics <= 7e-6 x tolerance, gradients within tolerance |
+| 1 to 52 ranks (threads), 1 to 3 T4 under `mpirun` | <= 6.7e-16 from one rank |
+| synthesis nside 64, 20 iterations, 1 to 3 ranks | 25 / 25 loss values identical to STL-Dev |
+
+garoupe (3 x Tesla T4, weak FP64), seconds per evaluation (forward +
+gradient), `J = log2(nside) - 1`, kernel 5:
+
+| nside | L | 1 T4 | 2 T4 | 3 T4 |
+|---|---|---|---|---|
+| 256 | 2 | 0.37 | 0.23 | 0.19 |
+| 256 | 4 | 1.26 | 0.42 | 0.34 |
+| 1024 | 2 | 26.6 | 7.75 | 5.12 |
+| 1024 | 4 | 66.8 | 24.7 | 13.3 |
+| 2048 | 2 | out of memory | 107 | 45.6 |
+| 2048 | 4 | out of memory | 474 | 114 |
+
+At nside 1024, `L = 2`, three T4s take 5.1 s per evaluation against
+10.2 s for 192 EPYC 9655 ranks (one hpc node).

@@ -9,10 +9,13 @@ repository.workspace = true
 [features]
 # Run under mpirun (MPI_COMM_WORLD); without it, --ranks N runs N thread ranks.
 mpi = ["dep:mpi", "stl-mpi/mpi"]
+# --gpu: one CUDA device per rank (crate stl-gpu).
+gpu = ["dep:stl-gpu"]
 
 [dependencies]
 stl-core = { path = "../stl-core" }
 stl-mpi = { path = "../stl-mpi" }
+stl-gpu = { path = "../stl-gpu", optional = true }
 num-complex.workspace = true
 serde_json.workspace = true
 mpi = { workspace = true, optional = true }

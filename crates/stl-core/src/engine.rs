@@ -158,6 +158,11 @@ pub trait Exchange {
     fn reduce_ghosts(&self, level: usize, field: &mut [f64], rows: usize);
     /// Element-wise sum over the processes, identical on every process.
     fn allreduce(&self, values: &mut [f64]);
+    /// True when `halo` and `reduce_ghosts` do nothing (one process), so
+    /// that a device backend can skip copying its fields to the host.
+    fn trivial(&self) -> bool {
+        false
+    }
 }
 
 /// The single-process exchange: nothing to do.
@@ -167,6 +172,32 @@ impl Exchange for Serial {
     fn halo(&self, _: usize, _: &mut [f64], _: usize) {}
     fn reduce_ghosts(&self, _: usize, _: &mut [f64], _: usize) {}
     fn allreduce(&self, _: &mut [f64]) {}
+    fn trivial(&self) -> bool {
+        true
+    }
+}
+
+/// A backend evaluating the statistics of a fixed plan and their gradient
+/// on one process (a device backend instead of the CPU sweeps of
+/// [`LocalEngine`]).  Fields are over the layouts of the process's
+/// [`Partition`].
+pub trait Evaluator {
+    /// Statistics `[B, len(plan)]` of the map whose level-0 field is `x`
+    /// (owned cells read), summed over the processes; with `moments`, also
+    /// the spatial variance of every coefficient's terms
+    /// ([`LocalEngine::forward_moments`]), else an empty vector.
+    fn forward(&mut self, ex: &dyn Exchange, x: &[f64], moments: bool) -> (Vec<Complex64>, Vec<f64>);
+    /// After [`forward`](Self::forward): the level-0 map cotangent (owned
+    /// cells valid) of `Re sum(conj(cotangent) * values)`.
+    fn gradient(&mut self, ex: &dyn Exchange, cotangent: &[Complex64]) -> Vec<f64>;
+    /// Seconds per phase accumulated since the last call.
+    fn take_timers(&mut self) -> Vec<(&'static str, f64)> {
+        Vec::new()
+    }
+    /// Device memory peak and total, bytes, if any.
+    fn device_memory(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 static SERIAL: Serial = Serial;

@@ -1,0 +1,135 @@
+{
+  "J": 9,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 11354,
+  "conv_chunk": null,
+  "evaluations": 4,
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 36,
+      "max_sigma": 1125.5875190775294,
+      "rms_sigma": 485.68945293195907
+    },
+    "S2": {
+      "count": 36,
+      "max_sigma": 942.5531220711052,
+      "rms_sigma": 425.3583261963413
+    },
+    "S3": {
+      "count": 720,
+      "max_sigma": 1002.4748754236964,
+      "rms_sigma": 189.32635599361947
+    },
+    "S4": {
+      "count": 10560,
+      "max_sigma": 919.5216055645947,
+      "rms_sigma": 113.47903167211825
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 0.3878440146427443,
+      "rms_sigma": 0.3878440146427443
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 0.24066290236813945,
+      "rms_sigma": 0.24066290236813945
+    }
+  },
+  "fits": [
+    "bench_n1024_L4_P1_target.fits",
+    "bench_n1024_L4_P1_synthesis.fits"
+  ],
+  "gpu": {
+    "block_rows": 133180,
+    "blocks_per_level": [
+      95,
+      24,
+      6,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "device": "Tesla T4",
+    "device_ordinal": 0,
+    "devices_visible": 3,
+    "geometry_cache": "transposition",
+    "geometry_cache_budget_bytes": 4965121984,
+    "memory_peak_bytes_per_rank": [
+      13198163968
+    ],
+    "memory_total_bytes": 15843721216
+  },
+  "init": null,
+  "kernel_size": 5,
+  "loss_final_map": 0.007764780806081548,
+  "loss_first": 0.007764855990511606,
+  "loss_history": [
+    0.007764855990511606,
+    0.0077648552386551,
+    0.007764848471957696,
+    0.007764780806081548
+  ],
+  "loss_last": 0.007764780806081548,
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      12582912,
+      3145728,
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 2415919104,
+    "maps_and_gradients": 268434432,
+    "stored_moduli_and_cotangents": 357875712
+  },
+  "memory_floor_bytes_per_rank": [
+    3042229248
+  ],
+  "memory_peak_bytes_per_rank": [
+    5754621952
+  ],
+  "mode": "rust-local",
+  "niter": 3,
+  "nside": 1024,
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    4459544576
+  ],
+  "seconds": 267.17,
+  "seconds_per_evaluation": 66.792,
+  "setup_seconds": 147.12,
+  "target": {
+    "file": "field_nside1024_nested.npy",
+    "mean": 1.0729090293808858,
+    "std": 0.41699669254469973
+  },
+  "timers_seconds": {
+    "analysis_vjp": 0.04,
+    "forward": 183.83,
+    "gpu_forward_coefficients": 2.28,
+    "gpu_forward_conv": 12.71,
+    "gpu_forward_decimation": 1.63,
+    "gpu_geometry": 261.61,
+    "gpu_geometry_weights": 13.82,
+    "gpu_reverse_adjoint": 18.85,
+    "gpu_reverse_chain": 0.2,
+    "gpu_reverse_coefficients": 4.74,
+    "gpu_reverse_conv": 4.85,
+    "gpu_reverse_exchange": 0.45,
+    "gpu_setup_topology": 22.67,
+    "reverse": 138.18
+  },
+  "variables": "map",
+  "weights": "none"
+}

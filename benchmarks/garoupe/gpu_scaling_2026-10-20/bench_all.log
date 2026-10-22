@@ -1,0 +1,36 @@
+== nside 256 L 2 ranks 1 17:06:02
+{"evaluations":4,"loss_first":0.0038785241140730994,"loss_last":0.003878309564404144,"ranks":1,"seconds":1.49,"seconds_per_evaluation":0.372}
+== nside 256 L 2 ranks 2 17:06:15
+{"evaluations":4,"loss_first":0.003878524114073994,"loss_last":0.0038783095644050383,"ranks":2,"seconds":0.92,"seconds_per_evaluation":0.229}
+== nside 256 L 2 ranks 3 17:06:24
+{"evaluations":4,"loss_first":0.0038785241140736437,"loss_last":0.003878134426506219,"ranks":3,"seconds":0.75,"seconds_per_evaluation":0.188}
+== nside 256 L 4 ranks 1 17:06:32
+{"evaluations":4,"loss_first":0.007830939476980672,"loss_last":0.007830203617474956,"ranks":1,"seconds":5.04,"seconds_per_evaluation":1.261}
+== nside 256 L 4 ranks 2 17:06:50
+{"evaluations":4,"loss_first":0.00783093947698228,"loss_last":0.007830203617476562,"ranks":2,"seconds":1.7,"seconds_per_evaluation":0.424}
+== nside 256 L 4 ranks 3 17:07:00
+{"evaluations":4,"loss_first":0.007830939476981652,"loss_last":0.007830203617475936,"ranks":3,"seconds":1.34,"seconds_per_evaluation":0.335}
+== nside 1024 L 2 ranks 1 17:07:09
+{"evaluations":4,"loss_first":0.0038323308160873337,"loss_last":0.003832324724211473,"ranks":1,"seconds":106.23,"seconds_per_evaluation":26.557}
+== nside 1024 L 2 ranks 2 17:11:20
+{"evaluations":4,"loss_first":0.003832330816090613,"loss_last":0.003832324724214744,"ranks":2,"seconds":30.99,"seconds_per_evaluation":7.748}
+== nside 1024 L 2 ranks 3 17:13:04
+{"evaluations":4,"loss_first":0.003832330816091183,"loss_last":0.0038323197492313005,"ranks":3,"seconds":20.47,"seconds_per_evaluation":5.117}
+== nside 1024 L 4 ranks 1 17:14:19
+{"evaluations":4,"loss_first":0.007764855990511606,"loss_last":0.007764780806081548,"ranks":1,"seconds":267.17,"seconds_per_evaluation":66.792}
+== nside 1024 L 4 ranks 2 17:21:47
+{"evaluations":4,"loss_first":0.007764855990518255,"loss_last":0.007764780806088212,"ranks":2,"seconds":98.74,"seconds_per_evaluation":24.686}
+== nside 1024 L 4 ranks 3 17:24:54
+{"evaluations":4,"loss_first":0.007764855990519397,"loss_last":0.007764780806089355,"ranks":3,"seconds":53.36,"seconds_per_evaluation":13.34}
+== nside 2048 L 2 ranks 1 17:26:57
+--------------------------------------------------------------------------
+== nside 2048 L 2 ranks 2 17:35:18
+{"evaluations":4,"loss_first":0.0038217102352951053,"loss_last":0.0038217073921528906,"ranks":2,"seconds":426.72,"seconds_per_evaluation":106.679}
+== nside 2048 L 2 ranks 3 17:48:11
+{"evaluations":4,"loss_first":0.003821710235294465,"loss_last":0.003821707392152251,"ranks":3,"seconds":182.39,"seconds_per_evaluation":45.597}
+== nside 2048 L 4 ranks 1 17:55:02
+--------------------------------------------------------------------------
+== nside 2048 L 4 ranks 2 18:03:17
+{"evaluations":4,"loss_first":0.007741535785588477,"loss_last":0.00774152529736845,"ranks":2,"seconds":1896.64,"seconds_per_evaluation":474.16}
+== nside 2048 L 4 ranks 3 18:47:00
+{"evaluations":4,"loss_first":0.007741535785587104,"loss_last":0.00774152529736707,"ranks":3,"seconds":457.13,"seconds_per_evaluation":114.283}
