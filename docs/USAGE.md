@@ -215,6 +215,11 @@ recipe is:
    ```bash
    python tools/resample_nested.py up T_gauss.npy T_gauss_up.npy      # needs healpix-geo; chunked
    ```
+   With `--keep-mean`, every group of 4 children is shifted so its mean is
+   the parent's value: cutting back gives the target exactly. The plain
+   bilinear interpolation smooths the target's finest scale (on the
+   Takahashi map at nside 2048, only 35 % of the variance of the finest
+   details survives up then down).
 3. run the synthesis at `2N` (§5);
 4. cut back to `N` (mean of the 4 children):
    ```bash

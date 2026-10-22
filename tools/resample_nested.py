@@ -1,13 +1,17 @@
 """Change the nside of a NESTED map by a factor 2.
 
-    python3 tools/resample_nested.py up IN.npy OUT.npy     # nside -> 2 nside
-    python3 tools/resample_nested.py down IN.npy OUT.npy   # nside -> nside / 2
+    python3 tools/resample_nested.py up IN.npy OUT.npy [--keep-mean]   # nside -> 2 nside
+    python3 tools/resample_nested.py down IN.npy OUT.npy                # nside -> nside / 2
 
 up: bilinear interpolation (healpix_geo, 4 nearest centres) of the map at
 the centres of the children, so the new finest level carries almost no
 power of its own: synthesising at 2 nside then degrading back keeps the
-scales the stencil handles badly out of the result.  down: mean of the 4
-children (NESTED: consecutive ids).
+scales the stencil handles badly out of the result.  The interpolation
+smooths the finest scale of the input: down(up(x)) keeps only ~35 % of the
+variance of x's finest details (Takahashi kappa, nside 2048).  --keep-mean
+shifts every group of 4 children so its mean is the parent's value:
+down(up(x)) = x exactly, the new level keeps the smooth bilinear variation
+inside each group.  down: mean of the 4 children (NESTED: consecutive ids).
 """
 
 import sys
@@ -21,8 +25,11 @@ def nside_of(n):
     return nside
 
 
-def up(src, dst):
+def up(src, dst, *opts):
     from healpix_geo.nested import bilinear_interpolation, healpix_to_lonlat
+
+    assert set(opts) <= {"--keep-mean"}, f"unknown options {opts}"
+    keep_mean = "--keep-mean" in opts
 
     x = np.load(src).astype(np.float64)
     nside = nside_of(x.size)
@@ -41,10 +48,16 @@ def up(src, dst):
             w = np.where(np.asarray(mask), 0.0, w)
             c = np.where(np.asarray(mask), 0, c)
         w /= w.sum(axis=1, keepdims=True)
-        y[s:s + ids.size] = (x[c] * w).sum(axis=1)
+        v = (x[c] * w).sum(axis=1)
+        if keep_mean:
+            # Chunks start on multiples of 4: whole groups of children.
+            g = v.reshape(-1, 4)
+            g += (x[s // 4:s // 4 + g.shape[0]] - g.mean(axis=1))[:, None]
+        y[s:s + ids.size] = v
     y.flush()
     back = y.reshape(-1, 4).mean(axis=1)
-    print(f"up {nside} -> {2 * nside}: std {x.std():.4e} -> {y.std():.4e}; degrade(up(x)) - x: rms {np.sqrt(np.mean((back - x) ** 2)):.3e}")
+    print(f"up {nside} -> {2 * nside}{' (keep mean)' if keep_mean else ''}: std {x.std():.4e} -> {y.std():.4e}; "
+          f"degrade(up(x)) - x: rms {np.sqrt(np.mean((back - x) ** 2)):.3e}")
 
 
 def down(src, dst):
