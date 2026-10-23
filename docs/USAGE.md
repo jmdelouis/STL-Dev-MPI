@@ -258,6 +258,7 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--kernel-size N` | 5 | stencil size |
 | `--fewer` | off | `has_fewer_convolutions` definitions of S3/S4 |
 | `--weights W` | `none` | `none`: sum of squared differences; `ergodic`: reduced chi^2 (below) |
+| `--family-weights F` | 1 | extra factors on whole families, e.g. `S1=10,S2=10` (families `mean`, `var`, `S1`..`S4`) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |

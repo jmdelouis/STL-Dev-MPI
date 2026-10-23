@@ -34,6 +34,8 @@ stl-synth --target MAP [options]
   --weights W           loss weights: 'none' (default, sum |S - S_target|^2) or 'ergodic'
                         (reduced chi^2: mean of |S - S_target|^2 / sigma^2, sigma^2 = spatial
                         variance of each coefficient's terms on the target / pixels of its level)
+  --family-weights F    extra factors on the weights of whole families, e.g. 'S1=10,S2=10'
+                        (families mean, var, S1, S2, S3, S4; default 1)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>)
@@ -46,6 +48,21 @@ stl-synth --target MAP [options]
                         else transposition); budget from the device memory or STL_GPU_CACHE_MB
   --quiet               no line per evaluation
 ";
+
+/// `S1=10,S2=10` -> [(S1, 10), (S2, 10)]: factors on the weights of whole families.
+fn parse_family_weights(v: &str) -> Result<Vec<(Family, f64)>, String> {
+    v.split(',')
+        .map(|item| {
+            let (name, f) = item.split_once('=').ok_or(format!("--family-weights: '{item}' is not FAMILY=FACTOR"))?;
+            let fam = Family::parse(name.trim()).ok_or(format!("--family-weights: unknown family '{name}'"))?;
+            let f: f64 = f.trim().parse().map_err(|_| format!("--family-weights: '{f}' is not a number"))?;
+            if !(f.is_finite() && f >= 0.0) {
+                return Err(format!("--family-weights: factor {f} must be finite and >= 0"));
+            }
+            Ok((fam, f))
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct Args {
@@ -61,6 +78,7 @@ pub struct Args {
     pub block_pixels: usize,
     pub conv_chunk: Option<usize>,
     pub ergodic_weights: bool,
+    pub family_weights: Vec<(Family, f64)>,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -86,6 +104,7 @@ impl Args {
             block_pixels: 16384,
             conv_chunk: None,
             ergodic_weights: false,
+            family_weights: Vec::new(),
             niter: 50,
             history_size: 10,
             out: None,
@@ -127,6 +146,10 @@ impl Args {
                         Some("ergodic") => true,
                         _ => return Err("--weights is 'none' or 'ergodic'".into()),
                     }
+                }
+                "--family-weights" => {
+                    let v = it.next().ok_or("--family-weights needs a value")?;
+                    a.family_weights = parse_family_weights(v)?;
                 }
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
@@ -290,6 +313,11 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     if args.ergodic_weights {
         obj.weights = ergodic_weights(&geo, &plan, &target_var);
     }
+    for (w, c) in obj.weights.iter_mut().zip(&plan) {
+        if let Some(&(_, f)) = args.family_weights.iter().find(|(fam, _)| *fam == c.family) {
+            *w *= f;
+        }
+    }
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -400,6 +428,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_last": history.last(),
         "loss_final_map": final_loss,
         "weights": if args.ergodic_weights { "ergodic" } else { "none" },
+        "family_weights": args.family_weights.iter().map(|(f, w)| (f.name().to_string(), serde_json::json!(w))).collect::<serde_json::Map<_, _>>(),
         "final_residual_in_ergodic_sigma": per_family,
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
