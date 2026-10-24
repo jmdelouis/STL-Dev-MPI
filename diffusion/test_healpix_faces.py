@@ -71,7 +71,34 @@ def test_haar(nside):
     assert np.isclose(np.mean(d**2), np.mean((h**2).sum(axis=-2)) / 4)
 
 
+def test_orient_haar(nside, h):
+    """Haar details of the padded fine faces (computed in the padded face's
+    frame) equal the padded parent-grid details re-oriented by orient_haar,
+    outside the corner squares of the 3-face vertices."""
+    fine = np.random.default_rng(2).normal(size=12 * (2 * nside) ** 2)
+    img = fine[hf.pad_nest(2 * nside, 2 * h)]
+    c0, c1, c2, c3 = img[:, 0::2, 0::2], img[:, 1::2, 0::2], img[:, 0::2, 1::2], img[:, 1::2, 1::2]
+    direct = np.stack([(c1 + c3 - c0 - c2) / 2, (c2 + c3 - c0 - c1) / 2, (c0 + c3 - c1 - c2) / 2], axis=1)
+    _, det = hf.haar(fine)
+    flat = hf.to_faces(det).reshape(3, -1)
+    ids, bits = hf.pad_flat(nside, h, with_bits=True)
+    m = nside + 2 * h
+    gathered = flat[:, ids.reshape(12, -1)].transpose(1, 0, 2)  # [12, 3, m*m]
+    oriented = hf.orient_haar(gathered, bits.reshape(12, -1)).reshape(12, 3, m, m)
+    r = np.arange(-h, nside + h)
+    out = (r < 0) | (r >= nside)
+    corner = out[:, None] & out[None, :]
+    err = np.abs(oriented - direct)[:, :, ~corner].max()
+    unoriented = np.abs(gathered.reshape(12, 3, m, m) - direct)[:, :, ~corner].max()
+    assert err < 1e-12, f"max error {err}"
+    return unoriented
+
+
 if __name__ == "__main__":
+    for nside, h in ((4, 2), (8, 8), (32, 12)):
+        u = test_orient_haar(nside, h)
+        print(f"nside {nside} halo {h}: re-oriented padded details equal the details of the padded fine faces "
+              f"(without re-orientation: max error {u:.2f})")
     for nside in (2, 4, 8, 32):
         test_face_layout(nside)
         n = test_pad_neighbours(nside)

@@ -84,9 +84,12 @@ def from_faces(img):
     return out
 
 
-def pad_nest(nside, p):
+def pad_nest(nside, p, with_bits=False):
     """`[12, nside + 2p, nside + 2p]` NESTED ids of every face padded by `p`
-    pixels of its neighbours (`p <= nside`)."""
+    pixels of its neighbours (`p <= nside`).  With `with_bits`, also the
+    frame change of every padded pixel (`NB_SWAP` bits: 1 flips x, 2 flips
+    y, 4 then swaps x and y; 0 inside the face), for the oriented channels
+    (`orient_haar`)."""
     assert 0 <= p <= nside
     n = nside
     r = np.arange(-p, n + p)
@@ -108,15 +111,37 @@ def pad_nest(nside, p):
     x = np.where(bits & 1, n - x - 1, x)
     y = np.where(bits & 2, n - y - 1, y)
     x, y = np.where(bits & 4, y, x), np.where(bits & 4, x, y)
-    return xyf2nest(n, x, y, f)
+    ids = xyf2nest(n, x, y, f)
+    return (ids, bits) if with_bits else ids
 
 
-def pad_flat(nside, p):
+def pad_flat(nside, p, with_bits=False):
     """Like `pad_nest`, as indices into the flattened face images
     `img.reshape(..., 12 nside^2)`."""
     flat_of_nest = np.empty(12 * nside * nside, dtype=np.int64)
     flat_of_nest[face_nest(nside).ravel()] = np.arange(12 * nside * nside)
-    return flat_of_nest[pad_nest(nside, p)]
+    ids, bits = pad_nest(nside, p, with_bits=True)
+    return (flat_of_nest[ids], bits) if with_bits else flat_of_nest[ids]
+
+
+def orient_haar(h, bits):
+    """Haar details `[..., 3, *pix]` gathered from a neighbouring face,
+    expressed in the frame of the padded face.  The neighbour's frame is
+    reached by flipping x (bit 1) and y (bit 2), then swapping x and y (bit
+    4), so along the padded face's x the neighbour's details read
+    `sx * (hy if swap else hx)`, along y `sy * (hx if swap else hy)`, and the
+    diagonal `sx * sy * hd`.  Works on numpy arrays and torch tensors."""
+    sx = 1 - 2 * (bits & 1 != 0)
+    sy = 1 - 2 * (bits & 2 != 0)
+    swap = bits & 4 != 0
+    hx, hy, hd = h[..., 0, :], h[..., 1, :], h[..., 2, :]
+    if isinstance(h, np.ndarray):
+        a, b = np.where(swap, hy, hx), np.where(swap, hx, hy)
+        return np.stack([sx * a, sy * b, sx * sy * hd], axis=-2)
+    import torch
+
+    a, b = torch.where(swap, hy, hx), torch.where(swap, hx, hy)
+    return torch.stack([sx * a, sy * b, sx * sy * hd], dim=-2)
 
 
 def down(m):

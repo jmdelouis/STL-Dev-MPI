@@ -7,12 +7,15 @@ by `c_in`) and the whitened coarse map `[B, 1, n, n]` on the same parent
 grid; output: the `F` of EDM, `D = c_skip x + c_out F`.
 
 Padding: every 3 x 3 convolution pads its input by one pixel, either with
-zeros (`mode = "zeros"`, training on crops) or with the neighbouring faces
-(`mode = "healpix"`, sampling on full skies: the batch is then `S * 12`
-face images, the 12 faces of every sample contiguous and in face order).
-Normalisations are per pixel (over channels only), so the network is
-local and translation-equivariant: what it learns on crops applies to
-whole faces.
+zeros (`mode = "zeros"`: training crops, and the face tiles of `FaceTiles`,
+used for sampling) or with the neighbouring faces (`mode = "healpix"`: the
+batch is then `S * 12` face images, the 12 faces of every sample
+contiguous and in face order).  The "healpix" mode pads oriented channels
+and features across the edges between polar faces without turning them
+(the frames of these faces differ by 90 degrees or a flip): it is wrong
+there, and kept only to reproduce the first runs.  Normalisations are per
+pixel (over channels only), so the network is local and
+translation-equivariant: what it learns on crops applies to whole faces.
 """
 
 import math
@@ -184,6 +187,48 @@ class Denoiser(nn.Module):
         if mask is not None:
             return (err * mask).sum() / (mask.sum() * d.shape[0] * d.shape[1])
         return err.mean()
+
+
+class FaceTiles(nn.Module):
+    """A denoiser run face by face on full skies `[S * 12, 3, n, n]`: every
+    face is padded by `halo` pixels of its neighbours (`pad_flat`), the Haar
+    channels of the halo re-oriented to the face's frame (`orient_haar`: the
+    frames of neighbouring polar faces are turned by 90 degrees or flipped),
+    the network sees the tile with zero padding at the outer edge (like the
+    training crops, which were cut from the padded scalar map) and only the
+    face is kept.  Unlike the 12-face HEALPix padding of the network's
+    features, every layer works in one frame.  Activations of one face
+    instead of 12 (nside 2048: ~2 GB instead of ~24 GB for the finest level)."""
+
+    def __init__(self, denoiser, halo):
+        super().__init__()
+        self.denoiser = denoiser
+        self.halo = halo
+        self.tables = {}
+
+    def forward(self, x, sigma, cond):
+        b12, c, n, _ = x.shape
+        s, h = b12 // 12, min(self.halo, n)
+        key = (n, x.device)
+        if key not in self.tables:
+            ids, bits = hf.pad_flat(n, h, with_bits=True)
+            self.tables[key] = (torch.as_tensor(ids.reshape(12, -1), device=x.device),
+                                torch.as_tensor(bits.reshape(12, -1), device=x.device))
+        idx, bits = self.tables[key]
+
+        def flat(t):
+            return t.reshape(s, 12, t.shape[1], n * n).permute(0, 2, 1, 3).reshape(s, t.shape[1], 12 * n * n)
+
+        xf, cf = flat(x), flat(cond)
+        sig = sigma.reshape(s, 12)[:, 0]
+        out = torch.empty((s, 12, c, n, n), dtype=x.dtype, device=x.device)
+        self.denoiser.net.set_padding("zeros")
+        m = n + 2 * h
+        for f in range(12):
+            xi = hf.orient_haar(xf[:, :, idx[f]], bits[f]).reshape(s, c, m, m)
+            ci = cf[:, :, idx[f]].reshape(s, cond.shape[1], m, m)
+            out[:, f] = self.denoiser(xi, sig, ci)[..., h:h + n, h:h + n]
+        return out.reshape(b12, c, n, n)
 
 
 @torch.no_grad()

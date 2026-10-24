@@ -8,10 +8,19 @@ that nside, then averaged down; monopole set to the target's mean), the
 target's own coarse map (`--coarse target`: conditional super-resolution),
 or any NESTED map averaged down (`--coarse FILE`, e.g. an STL synthesis:
 STL for the large scales, diffusion for the finest levels; a stack
-`[S, npix]` gives one sample per map, e.g. the members of an STL ensemble).  Every finer
-level `n` draws its Haar details with the model
-`MODEL_DIR/level{n}.pt` on the 12 face images with HEALPix padding (EDM
-Heun sampler), and rebuilds `x_n` from `x_{n/2}`.  OUT.npy is `[S, npix]`.
+`[S, npix]` gives one sample per map, e.g. the members of an STL ensemble).
+Every finer level `n` draws its details with the model
+`MODEL_DIR/level{n}.pt` (EDM Heun sampler): a sphere-native model
+(`sphere_diffusion.py`, STL stencils) region by region on the scalar detail
+field, a face-image model face by face with a halo of
+the neighbouring faces re-oriented to the face's frame (`FaceTiles`), and
+rebuilds `x_n` from `x_{n/2}`.  OUT.npy is `[S, npix]`.
+
+`--tile-above N` keeps the 12-face denoiser with HEALPix padding of the
+network's features for parent grids up to nside N.  It is not consistent
+across the edges between polar faces (their frames are turned by 90
+degrees or flipped and the features are oriented): it is there only to
+reproduce the first nside 256 runs.
 """
 
 import argparse
@@ -23,7 +32,7 @@ import numpy as np
 import torch
 
 import healpix_faces as hf
-from model import Denoiser, amp_dtype, heun_sample
+from model import Denoiser, FaceTiles, amp_dtype, heun_sample
 
 
 def coarse_grf(target, nside, rng, oversample=8):
@@ -45,19 +54,28 @@ def coarse_grf(target, nside, rng, oversample=8):
 
 
 def load_level(models, n, dev):
-    ck = torch.load(os.path.join(models, f"level{n}.pt"), map_location=dev, weights_only=False)
+    path = os.path.join(models, f"level{n}.pt")
+    ck = torch.load(path, map_location=dev, weights_only=False)
+    if ck.get("kind") == "sphere":
+        from sphere_diffusion import load_sphere
+
+        return load_sphere(path, dev)
     model = Denoiser(**ck["unet"]).to(dev).eval()
     model.load_state_dict(ck["state"])
     model.net.set_padding("healpix")
     return model, ck
 
 
-def sample_details(model, ck, x, steps, gen, churn=0.0):
-    """Haar details `[3, npix(x)]` of the level above the NESTED map `x`, unwhitened."""
+def sample_details(model, ck, x, steps, gen, churn=0.0, tile_above=0, halo=48):
+    """Haar details `[3, npix(x)]` of the level above the NESTED map `x`, unwhitened.
+    Parent grids finer than nside `tile_above` (all by default) are denoised
+    face by face with a halo of `halo` pixels (`FaceTiles`), coarser ones as
+    12 faces with HEALPix padding of the features (see the module doc)."""
     dev = next(model.parameters()).device
     cond = torch.tensor(hf.to_faces(x) / ck["cond_std"], dtype=torch.float32, device=dev)[:, None]
+    net = FaceTiles(model, halo) if hf.nside_of(x.size) > tile_above else model
     with torch.autocast(dev.type, dtype=amp_dtype(dev)):
-        h = heun_sample(model, cond, steps=steps, generator=gen, s_churn=churn)
+        h = heun_sample(net, cond, steps=steps, generator=gen, s_churn=churn)
     h = h.float().cpu().numpy().transpose(1, 0, 2, 3)  # [3, 12, n, n]
     return hf.from_faces(h) * np.array(ck["det_std"])[:, None]
 
@@ -75,6 +93,9 @@ def main():
     p.add_argument("--churn", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--keep-levels", action="store_true", help="also save every intermediate level")
+    p.add_argument("--tile-above", type=int, default=0,
+                   help="12-face HEALPix-padded denoiser up to this parent nside (first runs only)")
+    p.add_argument("--halo", type=int, default=48)
     a = p.parse_args()
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,7 +116,13 @@ def main():
         n *= 2
         model, ck = load_level(a.models, n, dev)
         t0 = time.time()
-        xs = np.array([hf.unhaar(x, sample_details(model, ck, x, a.steps, gen, a.churn)) for x in xs])
+        if ck.get("kind") == "sphere":
+            from sphere_diffusion import sample_level
+
+            xs = np.array([sample_level(model, ck, x, a.steps, gen) for x in xs])
+        else:
+            xs = np.array([hf.unhaar(x, sample_details(model, ck, x, a.steps, gen, a.churn, a.tile_above, a.halo))
+                           for x in xs])
         levels[n] = xs
         print(f"level {n}: {time.time() - t0:.1f} s for {len(xs)} samples, std {xs.std():.4f}", flush=True)
     np.save(a.out, xs)

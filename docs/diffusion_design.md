@@ -85,12 +85,43 @@ pixel (one duplicated pixel per conv layer).  Tested against
 and the torch gather against the numpy table (`diffusion/test_model.py`).
 The padding costs one gather per conv, negligible next to the convolution.
 
+**Orientation across polar edges (bug found and fixed).**  The pixel
+positions of the padding are right, but the frames of neighbouring polar
+faces are turned by 90 degrees or flipped, so the oriented quantities that
+cross these edges must be turned too: the Haar channels (`hx` and `hy`
+swap, signs flip; `healpix_faces.orient_haar`, tested exactly against the
+Haar transform of the padded fine map: without it the halo is off by 5 to
+7 times the field's standard deviation), and the network's internal
+features, which no padding can turn.  The 12-face padded network of the
+first runs (`model.Padding`, mode "healpix") is therefore wrong across the
+8 polar-polar edges.  Sampling now runs face by face (`model.FaceTiles`):
+every face padded by a halo of 48 pixels of its neighbours, the Haar
+channels re-oriented, the network on the tile with zero padding (as on the
+training crops, cut from the padded scalar map), the face kept.  Every
+layer then works in one frame.  Cross-edge consistency of the denoiser
+(`diffusion/test_tiles.py`: the same pixels denoised in the halo of a face
+and in their own face, middle half of the edges): 5e-5 to 1e-3 of the
+output's RMS on edges between faces of the same frame, 12 to 17 % on polar
+edges (60 to 110 % without the re-orientation).  The remaining polar-edge
+difference does not depend on the halo (24 to 96 pixels): it is the
+network's own lack of equivariance to 90-degree rotations (D4 augmentation
+makes its distribution invariant, not its output).
+
+**Seams measured on samples** (`diffusion/seams.py`, finest detail variance
+and kurtosis against the distance to the nearest face edge, nside 256, the
+8-member hybrid ensemble made with the first 12-face sampler): variance 3
+to 7 % lower on the first row of pixels than in the face interiors, and the
+kurtosis of the details along the polar edges 0.23 instead of about 0.4
+(target 0.44 there): a seam in the non-Gaussianity, not in the power.  The
+STL minimisation, whose statistics are sky averages, does not remove it.
+
 Alternatives considered: local gnomonic patches with interpolation (break
 the exact pyramid and the 4-children structure); graph convolutions on the
 HEALPix mesh (DeepSphere: isotropic kernels, slower, no U-Net pooling
 mismatch but no standard tooling); patches of NESTED ids at a coarse level
 (`kth_neighbourhood` halos, as in the Rust engine: the right choice for an
-MPI version, see section 7, but no gain on one GPU).
+MPI version, see section 7, but no gain on one GPU).  The sphere-native
+network of section 4.1 removes faces and frames altogether.
 
 ## 4. Networks
 
@@ -113,9 +144,44 @@ One denoiser per level `n` (`diffusion/model.py`):
   white-Gaussian denoiser `D = x / (1 + sigma^2)`, so the training curve
   reads directly as the information the coarse map and the non-Gaussianity
   add;
-- sampling: EDM Heun sampler, 32 steps (63 denoiser evaluations), on the 12
-  faces of a sample at once with HEALPix padding, fp16 autocast on the T4
-  (bf16 on Ampere and later).
+- sampling: EDM Heun sampler, 32 steps (63 denoiser evaluations), face by
+  face with re-oriented halos (section 3; the first nside 256 runs used the
+  12-face padded network), fp16 autocast on the T4 (bf16 on Ampere and
+  later).
+
+### 4.1 Sphere-native variant: the STL stencils
+
+`diffusion/sphere_conv.py`, `diffusion/sphere_diffusion.py`: the same
+EDM denoiser per level with convolutions that know nothing of the faces.
+
+- Convolution: the stencil of the STL engine (`stl_torch_geometry.py`, the
+  torch port of healpix-analyse in STL-Dev, copied unchanged): `k x k` taps
+  in the tangent plane at the pixel spacing, rotated to each pixel and its
+  local north (gauge "cosmo", one orientation), each tap the bilinear
+  interpolation of its 4 nearest pixels; learned weights `[cout, k^2 cin]`
+  (k = 3).  The gather is a sparse matrix `S` (4 entries per pixel and tap,
+  transpose kept for the backward pass) followed by a dense matmul.
+- Variable: the scalar detail field `d_n = x_n - up(x_{n+1})` at the fine
+  nside, kept in the subspace "zero mean over every group of 4 siblings" by
+  projecting the noise and the denoiser's output (`sphere_conv.project`).
+  No oriented channel anywhere; 4 times the pixels of the parent-grid
+  version at the first U-Net level.
+- Regions: a central cell of the NESTED quadtree (64 x 64 fine pixels) and
+  2 rings of 8 x 8 sub-cells around it (HEALPix neighbours, across faces),
+  9216 pixels; the stencil taps outside the region are dropped with the
+  weights renormalised (the STL engine's `bind_support`); the loss and the
+  sampled values are those of the central cell.  The U-Net pools by NESTED
+  parents inside the region.
+- Augmentation: the north-oriented stencil makes the network see every
+  orientation of the sky in the same frame; the exact north-south and
+  east-west mirrors of the HEALPix grid are drawn at random (D4 crops do
+  not exist on the sphere).
+- Cost (RTX A1000, 64-128-128, bf16 dense part): 0.64 s per step for 8
+  regions (32 768 loss pixels), 4.5 GB, about 10 times the cost per loss
+  pixel of the face-image network.
+- Tests (`diffusion/test_sphere_conv.py`): stencil weights sum to 1 on every
+  tap, the centre tap returns the pixel, regions contain their central
+  cell, the denoiser's output has zero mean over every sibling group.
 
 Coarsest level: a Gaussian random field with the angular power of the
 target (healpy `synfast` at 8 times the coarse nside, then averaged down,
