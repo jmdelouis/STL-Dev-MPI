@@ -14,7 +14,7 @@
 use crate::comm::Comm;
 use mpi::collective::SystemOperation;
 use mpi::datatype::{Partition, PartitionMut};
-use mpi::topology::SimpleCommunicator;
+use mpi::topology::{Color, SimpleCommunicator};
 use mpi::traits::*;
 use mpi::{Count, Tag};
 use std::cell::Cell;
@@ -148,5 +148,11 @@ impl Comm for MpiComm {
         let mut out = f64::NEG_INFINITY;
         self.world.all_reduce_into(&local, &mut out, SystemOperation::max());
         out
+    }
+
+    /// `MPI_Comm_split`; the sub-communicator has its own tag sequence.
+    fn split(&self, color: usize, key: usize) -> Option<Self> {
+        let sub = self.world.split_by_color_with_key(Color::with_value(color as i32), key as i32)?;
+        Some(MpiComm { world: sub, seq: Cell::new(0), alltoall_halo: self.alltoall_halo })
     }
 }

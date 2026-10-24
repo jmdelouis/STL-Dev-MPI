@@ -13,7 +13,7 @@ use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Family};
 use stl_core::stencil::Gauge;
 use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
-use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, Objective};
+use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
 pub const USAGE: &str = "\
@@ -38,9 +38,14 @@ stl-synth --target MAP [options]
                         variance of each coefficient's terms on the target / pixels of its level)
   --family-weights F    extra factors on the weights of whole families, e.g. 'S1=10,S2=10'
                         (families mean, var, S1, S2, S3, S4; default 1)
+  --ensemble B          synthesise B maps whose MEAN statistics match the target (loss on the
+                        mean over the members; member m starts from seed + m); default 1
+  --groups G            split the ranks into G groups of consecutive ranks, each sharing the
+                        sky of B / G members (MPI; G divides B and the number of ranks); default 1
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
-                        PREFIX_target.fits (default synthesis_rust_nside<N>)
+                        PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
+                        PREFIX_mMMM_synthesis_nested.npy and _standardized.npy per member
   --ranks N             thread ranks in this process (builds without MPI)
   --gpu                 one CUDA device per rank (feature gpu): device = local rank modulo the
                         visible devices, or STL_GPU_DEVICE
@@ -81,6 +86,8 @@ pub struct Args {
     pub conv_chunk: Option<usize>,
     pub ergodic_weights: bool,
     pub family_weights: Vec<(Family, f64)>,
+    pub ensemble: usize,
+    pub groups: usize,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -107,6 +114,8 @@ impl Args {
             conv_chunk: None,
             ergodic_weights: false,
             family_weights: Vec::new(),
+            ensemble: 1,
+            groups: 1,
             niter: 50,
             history_size: 10,
             out: None,
@@ -153,6 +162,8 @@ impl Args {
                     let v = it.next().ok_or("--family-weights needs a value")?;
                     a.family_weights = parse_family_weights(v)?;
                 }
+                "--ensemble" => a.ensemble = num(it.next(), k)?.max(1),
+                "--groups" => a.groups = num(it.next(), k)?.max(1),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -222,8 +233,31 @@ pub fn proc_memory(key: &str) -> i64 {
 /// The whole command on the rank of `comm`; returns the JSON report on
 /// rank 0.  No rank holds a full-sky map: inputs are read and outputs
 /// written by owned slices of level 0.
+///
+/// With `--ensemble B --groups G`, the ranks form G groups of consecutive
+/// ranks; each group shares the sky of B / G members (the batch of its
+/// objective) and the loss is on the mean statistics of the B members.
 pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, String> {
     let root = comm.rank() == 0;
+    let (members, groups) = (args.ensemble, args.groups);
+    if members % groups != 0 || comm.size() % groups != 0 {
+        return Err(format!("--groups {groups} must divide --ensemble {members} and the number of ranks {}", comm.size()));
+    }
+    let per_group = comm.size() / groups;
+    let (group_id, group_rank) = (comm.rank() / per_group, comm.rank() % per_group);
+    // `group`: the ranks sharing the sky of this group's members; `cross`:
+    // the ranks of the same position in every group (sums over the groups).
+    let (group, cross) = if groups > 1 {
+        let g = comm.split(group_id, group_rank).ok_or("--groups needs the MPI backend")?;
+        let c = comm.split(group_rank, group_id).ok_or("--groups needs the MPI backend")?;
+        (Some(g), Some(c))
+    } else {
+        (None, None)
+    };
+    let gcomm: &C = group.as_ref().unwrap_or(comm);
+    let local_members = members / groups;
+    let first_member = group_id * local_members;
+
     let npix = map_len(&args.target)?;
     let nside = nside_of(npix)?;
     let j = args.j.unwrap_or_else(|| (64 - (nside as u64).leading_zeros() as usize).saturating_sub(2).max(1));
@@ -234,12 +268,12 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let started_setup = Instant::now();
     let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
     #[allow(unused_mut)]
-    let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+    let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, gcomm);
     #[allow(unused_mut)]
     let mut gpu_info = serde_json::Value::Null;
     #[cfg(feature = "gpu")]
     if args.gpu {
-        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank())?;
+        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), 1)?;
         probe.set_evaluator(ev);
         gpu_info = info;
     }
@@ -248,19 +282,25 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
 
     // Target slice, standardised with global moments (two passes).
     let raw = read_map_range(&args.target, s, e)?;
-    let bad = global_sum(comm, raw.iter().filter(|v| !v.is_finite()).count() as f64);
+    let bad = global_sum(gcomm, raw.iter().filter(|v| !v.is_finite()).count() as f64);
     if bad > 0.0 {
         return Err(format!("{}: {bad} non-finite values", args.target.display()));
     }
-    let mean = global_sum(comm, raw.iter().sum()) / npix as f64;
-    let std = (global_sum(comm, raw.iter().map(|x| (x - mean) * (x - mean)).sum()) / npix as f64).sqrt();
+    let mean = global_sum(gcomm, raw.iter().sum()) / npix as f64;
+    let std = (global_sum(gcomm, raw.iter().map(|x| (x - mean) * (x - mean)).sum()) / npix as f64).sqrt();
     let target: Vec<f64> = raw.iter().map(|v| (v - mean) / std).collect();
     drop(raw);
 
-    // Initial slice (standardised units).
+    // Initial slices of this group's members (standardised units); member m
+    // draws its noise with seed + m (member 0 is the single-map synthesis).
     let mut init_info = serde_json::Value::Null;
-    let initial: Vec<f64> = match &args.init {
-        None => (s..e).map(|p| pixel_normal(args.seed, p as i64)).collect(),
+    let mut initial: Vec<f64> = Vec::with_capacity(local_members * (e - s));
+    match &args.init {
+        None => {
+            for m in first_member..first_member + local_members {
+                initial.extend((s..e).map(|p| pixel_normal(args.seed + m as u64, p as i64)));
+            }
+        }
         Some(path) => {
             let n_init = map_len(path)?;
             let nside_init = nside_of(n_init)?;
@@ -286,54 +326,71 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                             c.iter().map(|v| (v - m) * (v - m)).sum::<f64>()
                         })
                         .sum();
-                    (global_sum(comm, local) / npix as f64).sqrt()
+                    (global_sum(gcomm, local) / npix as f64).sqrt()
                 }
                 None => 0.0,
             };
+            if members > 1 && noise_std <= 0.0 {
+                return Err("--ensemble from --init needs a noise (--init-noise > 0 or auto below the target nside): identical members stay identical".into());
+            }
             init_info = serde_json::json!({"file": path, "nside": nside_init, "noise_std": noise_std});
-            (s..e)
-                .map(|p| {
+            for m in first_member..first_member + local_members {
+                initial.extend((s..e).map(|p| {
                     let b = coarse[p / factor - s / factor];
-                    if noise_std > 0.0 { b + noise_std * pixel_normal(args.seed, p as i64) } else { b }
-                })
-                .collect()
+                    if noise_std > 0.0 { b + noise_std * pixel_normal(args.seed + m as u64, p as i64) } else { b }
+                }));
+            }
         }
-    };
+    }
 
     // Resident memory once the inputs are read.
     let rss_baseline = proc_memory("VmRSS:");
     // Target statistics with the same distributed engine, and the spatial
     // variance of every coefficient's terms for the ergodic weights.
     let (target_stats, target_var) = probe.statistics_moments(&target);
-    let evaluator = probe.take_evaluator();
+    #[allow(unused_mut)]
+    let mut evaluator = probe.take_evaluator();
     let (dec, part) = (probe.dec.clone(), probe.part.clone());
     drop(probe);
-    let mut obj = Objective::with_partition(&geo, &cfg, &plan, &target_stats, 1, 1, comm, dec, part);
+    #[cfg(feature = "gpu")]
+    if args.gpu && local_members > 1 {
+        // The device engine of the synthesis holds this group's members.
+        drop(evaluator.take());
+        evaluator = Some(gpu::evaluator(args, &geo, &cfg, &plan, &part, comm.rank(), local_members)?.0);
+    }
+    let target_rows = target_stats.repeat(local_members);
+    let mut obj = Objective::with_partition(&geo, &cfg, &plan, &target_rows, local_members, 1, gcomm, dec, part);
     if let Some(ev) = evaluator {
         obj.set_evaluator(ev);
     }
     if args.ergodic_weights {
         obj.weights = ergodic_weights(&geo, &plan, &target_var);
+        // Reduced chi^2 of the mean of B members (variance sigma^2 / B).
+        obj.weights.iter_mut().for_each(|w| *w *= members as f64);
     }
     for (w, c) in obj.weights.iter_mut().zip(&plan) {
         if let Some(&(_, f)) = args.family_weights.iter().find(|(fam, _)| *fam == c.family) {
             *w *= f;
         }
     }
+    let ens = Ensemble { obj: &obj, cross: cross.as_ref(), members, target: &target_stats };
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
     let calls_before = obj.exchange_calls();
     let started = Instant::now();
+    let print = |i: usize, loss: f64, t: f64| {
+        if root && !args.quiet {
+            println!("[rust-local P={}] evaluation {:4}  loss = {loss:.6e}  t = {t:7.1} s", comm.size(), i + 1);
+        }
+    };
     let history = if args.niter == 0 {
         Vec::new()
+    } else if members == 1 {
+        run_lbfgs(&obj, &mut x, &opts, print)
     } else {
-        run_lbfgs(&obj, &mut x, &opts, |i, loss, t| {
-            if root && !args.quiet {
-                println!("[rust-local P={}] evaluation {:4}  loss = {loss:.6e}  t = {t:7.1} s", comm.size(), i + 1);
-            }
-        })
+        run_lbfgs_with(comm, &mut x, &opts, |p| ens.loss_and_grad(p), print)
     };
     let seconds = started.elapsed().as_secs_f64();
     let calls_after = obj.exchange_calls();
@@ -343,24 +400,48 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "engine_allreduces_per_evaluation": per_eval(calls_before.1, calls_after.1),
         "halo_mode": std::env::var("STL_MPI_HALO").unwrap_or_else(|_| "point-to-point".into()),
     });
-    let final_stats = obj.statistics(&x);
+    // Final statistics of this group's members and their mean over all members.
+    let final_members = obj.statistics(&x);
+    let final_mean = ens.mean(&final_members);
     let final_loss: f64 =
-        final_stats.iter().zip(&target_stats).zip(&obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
-    // Residual per family, in units of the ergodic sigma (|S - S_t| / sigma).
+        final_mean.iter().zip(&target_stats).zip(&obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
+    let n = plan.len();
+    let sigma: Vec<f64> =
+        plan.iter().enumerate().map(|(i, c)| (target_var[i] / geo.pixels(c.native_dg) as f64).sqrt().max(1e-300)).collect();
+    // Residual of the mean per family, in units of its ergodic sigma
+    // (sigma / sqrt(B): sigma itself for one map).
+    let rescale = (members as f64).sqrt();
     let mut per_family = serde_json::Map::new();
-    for fam in Family::ALL {
-        let z: Vec<f64> = plan
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.family == fam)
-            .map(|(i, c)| {
-                let sigma = (target_var[i] / geo.pixels(c.native_dg) as f64).sqrt();
-                (final_stats[i] - target_stats[i]).norm() / sigma.max(1e-300)
-            })
-            .collect();
-        if !z.is_empty() {
-            let rms = (z.iter().map(|v| v * v).sum::<f64>() / z.len() as f64).sqrt();
-            per_family.insert(fam.name().into(), serde_json::json!({"count": z.len(), "rms_sigma": rms, "max_sigma": z.iter().cloned().fold(0.0, f64::max)}));
+    // Per member: residual to the target and scatter around the mean, in units of sigma
+    // (sums of squares per family, added over the groups).
+    let mut member_sq = vec![0.0; 2 * Family::ALL.len()];
+    for (f, fam) in Family::ALL.iter().enumerate() {
+        let idx: Vec<usize> = (0..n).filter(|&i| plan[i].family == *fam).collect();
+        if idx.is_empty() {
+            continue;
+        }
+        let z: Vec<f64> = idx.iter().map(|&i| (final_mean[i] - target_stats[i]).norm() / sigma[i] * rescale).collect();
+        let rms = (z.iter().map(|v| v * v).sum::<f64>() / z.len() as f64).sqrt();
+        per_family.insert(fam.name().into(), serde_json::json!({"count": z.len(), "rms_sigma": rms, "max_sigma": z.iter().cloned().fold(0.0, f64::max)}));
+        for member in final_members.chunks(n) {
+            for &i in &idx {
+                member_sq[2 * f] += ((member[i] - target_stats[i]).norm() / sigma[i]).powi(2);
+                member_sq[2 * f + 1] += ((member[i] - final_mean[i]).norm() / sigma[i]).powi(2);
+            }
+        }
+    }
+    if let Some(c) = &cross {
+        c.allreduce_sum(&mut member_sq);
+    }
+    let mut members_report = serde_json::Map::new();
+    for (f, fam) in Family::ALL.iter().enumerate() {
+        let count = plan.iter().filter(|c| c.family == *fam).count();
+        if count > 0 {
+            let k = (count * members) as f64;
+            members_report.insert(
+                fam.name().into(),
+                serde_json::json!({"residual_rms_sigma": (member_sq[2 * f] / k).sqrt(), "scatter_rms_sigma": (member_sq[2 * f + 1] / k).sqrt()}),
+            );
         }
     }
     let mut timers: serde_json::Map<String, serde_json::Value> =
@@ -383,16 +464,27 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let baselines = comm.allgather_i64(rss_baseline);
 
     // Outputs written by slices: rank 0 sizes the files, every rank writes
-    // its range (the collectives order creation before the writes).
+    // its range (the collectives order creation before the writes).  One map:
+    // PREFIX_synthesis*; an ensemble: PREFIX_mMMM_synthesis_{nested,standardized}.npy.
     let prefix = args.out.clone().unwrap_or_else(|| format!("synthesis_rust_nside{nside}"));
     let file = |suffix: &str| PathBuf::from(format!("{prefix}{suffix}"));
+    let member_file = |m: usize, suffix: &str| {
+        if members == 1 { file(suffix) } else { PathBuf::from(format!("{prefix}_m{m:03}{suffix}")) }
+    };
     let unstd = |v: &[f64]| v.iter().map(|x| x * std + mean).collect::<Vec<_>>();
-    let outputs = [
-        (SlicedMap::new(&file("_target.fits"), false), "TARGET", unstd(&target)),
-        (SlicedMap::new(&file("_synthesis.fits"), false), "SYNTHESIS", unstd(&x)),
-        (SlicedMap::new(&file("_synthesis_nested.npy"), false), "", unstd(&x)),
-        (SlicedMap::new(&file("_synthesis_standardized.npy"), false), "", x.clone()),
-    ];
+    // (file, FITS column, written by this rank: values)
+    let mut outputs: Vec<(SlicedMap, &str, Option<Vec<f64>>)> =
+        vec![(SlicedMap::new(&file("_target.fits"), false), "TARGET", (group_id == 0).then(|| unstd(&target)))];
+    let len = e - s;
+    for m in 0..members {
+        let mine = (first_member..first_member + local_members).contains(&m);
+        let slice = || &x[(m - first_member) * len..(m - first_member + 1) * len];
+        if members == 1 {
+            outputs.push((SlicedMap::new(&file("_synthesis.fits"), false), "SYNTHESIS", mine.then(|| unstd(slice()))));
+        }
+        outputs.push((SlicedMap::new(&member_file(m, "_synthesis_nested.npy"), false), "", mine.then(|| unstd(slice()))));
+        outputs.push((SlicedMap::new(&member_file(m, "_synthesis_standardized.npy"), false), "", mine.then(|| slice().to_vec())));
+    }
     let mut status = 0.0;
     if root {
         for (out, column, _) in &outputs {
@@ -406,9 +498,11 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         return Err("could not create the output files".into());
     }
     for (out, _, values) in &outputs {
-        if let Err(e) = out.write(s, values) {
-            eprintln!("stl-synth: rank {}: {e}", comm.rank());
-            status = 1.0;
+        if let Some(values) = values {
+            if let Err(e) = out.write(s, values) {
+                eprintln!("stl-synth: rank {}: {e}", comm.rank());
+                status = 1.0;
+            }
         }
     }
     if global_sum(comm, status) > 0.0 {
@@ -417,6 +511,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     if !root {
         return Ok(None);
     }
+    let synthesis_files: Vec<PathBuf> = (0..members).map(|m| member_file(m, "_synthesis_nested.npy")).collect();
     let report = serde_json::json!({
         "mode": "rust-local",
         "nside": nside,
@@ -429,6 +524,14 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "conv_chunk": args.conv_chunk,
         "variables": "map",
         "ranks": comm.size(),
+        "ensemble": {
+            "members": members,
+            "groups": groups,
+            "ranks_per_group": per_group,
+            "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2",
+            "member_files": synthesis_files,
+            "per_member_in_ergodic_sigma": members_report,
+        },
         "backend": if args.gpu { "gpu" } else { "cpu" },
         "gpu": gpu_info,
         "setup_seconds": (setup_seconds * 100.0).round() / 100.0,
@@ -475,6 +578,7 @@ mod gpu {
         plan: &'a [Coefficient],
         part: &Partition,
         rank: usize,
+        batch: usize,
     ) -> Result<(Box<dyn Evaluator + 'a>, serde_json::Value), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
@@ -485,7 +589,7 @@ mod gpu {
         if let Some(t) = std::env::var("STL_GPU_THREADS").ok().and_then(|v| v.parse().ok()) {
             opts.threads = t;
         }
-        let engine = GpuEngine::new(gpu.clone(), geo, cfg, part.clone(), 1, 1, &opts);
+        let engine = GpuEngine::new(gpu.clone(), geo, cfg, part.clone(), batch, 1, &opts);
         let info = serde_json::json!({
             "device": gpu.name,
             "devices_visible": Gpu::count()?,

@@ -259,6 +259,8 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--fewer` | off | `has_fewer_convolutions` definitions of S3/S4 |
 | `--weights W` | `none` | `none`: sum of squared differences; `ergodic`: reduced chi^2 (below) |
 | `--family-weights F` | 1 | extra factors on whole families, e.g. `S1=10,S2=10` (families `mean`, `var`, `S1`..`S4`) |
+| `--ensemble B` | 1 | synthesise B maps whose mean statistics match the target (§5.4) |
+| `--groups G` | 1 | split the ranks into G groups, each holding B / G members (MPI; §5.4) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
@@ -289,6 +291,7 @@ about 1.4 times L = 2.
 | `PREFIX.json` | report: `loss_history`, `evaluations`, `seconds`, `timers_seconds`, `memory_floor_bytes`, peak memory per rank, plan size, `weights`, `final_residual_in_ergodic_sigma` (rms and max per family) |
 | `PREFIX_synthesis_nested.npy` | the synthesis, NESTED, in the target's units |
 | `PREFIX_synthesis.fits`, `PREFIX_target.fits` | NESTED HEALPix binary tables |
+| `PREFIX_mMMM_synthesis_nested.npy` | member MMM of an ensemble (`--ensemble B > 1`, §5.4) |
 
 Every rank reads and writes only its own slice: no rank holds a full-sky
 map. `final_residual_in_ergodic_sigma` is the quickest convergence check:
@@ -305,6 +308,49 @@ every family at a few tenths of a sigma or less is a converged synthesis.
   (`N/8 -> N/4 -> N/2 -> N`), each initialised with the previous one
   (`--init`, default `--init-noise auto`), with fewer iterations at each
   step (a few hundred at the coarsest, tens at the finest).
+
+### 5.4 Ensembles of syntheses
+
+`--ensemble B` synthesises B maps together, with the loss on the mean of
+their statistics:
+
+    loss = sum_i w_i | (1/B) sum_m S_i(map_m) - S_i(target) |^2
+
+The target's statistics are then matched by the ensemble, not by every map:
+the ergodic scatter goes into the differences between the members. With
+`--weights ergodic` the weights are multiplied by B (variance sigma^2 / B of
+a mean of B maps), so the loss stays the reduced chi^2 of the mean. Member m
+starts from white noise with seed `--seed + m`, or from `--init` plus noise
+drawn with that seed; `--init-noise 0` is refused (identical members stay
+identical). Member 0 is the single-map synthesis, and `--ensemble 1` gives
+exactly the previous runs.
+
+Placement: `--groups G` splits the ranks into G groups of consecutive ranks
+(G divides B and the number of ranks). The ranks of a group share the sky
+of B / G members, held as a batch by the engine (CPU or GPU); the groups
+exchange one vector of `len(plan)` complex numbers per evaluation, the
+partial sums of the statistics. So:
+
+- `--groups 1`: every rank holds every member: memory and time per
+  evaluation grow with B, no extra communication. Small maps.
+- `--groups B`: one member per group: memory per rank and time per
+  evaluation of a single map, with B times the ranks (or GPUs). Large maps.
+
+Any G gives the same synthesis up to the order of the sums (relative
+differences around 1e-12 after 30 iterations on 4 ranks, nside 64).
+
+Outputs: `PREFIX_mMMM_synthesis_nested.npy` and
+`PREFIX_mMMM_synthesis_standardized.npy` per member, `PREFIX_target.fits`,
+and in `PREFIX.json`: `final_residual_in_ergodic_sigma` for the mean (in
+units of sigma / sqrt(B)), and `ensemble.per_member_in_ergodic_sigma`, per
+family, the RMS of every member's residual to the target and of its scatter
+around the mean (in units of sigma).
+
+```bash
+# 8 members on 8 GPUs (one per group), from the coarse-to-fine init
+mpirun -np 8 stl-synth --gpu --target T_gauss_up.npy --weights ergodic --niter 400 \
+    --ensemble 8 --groups 8 --init INIT.npy --out ens
+```
 
 ## 6. Batch jobs
 

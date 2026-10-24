@@ -202,12 +202,18 @@ impl<'a, C: Comm> Objective<'a, C> {
 
     /// Loss and owned slice of its gradient (`loss_and_grad_local`, map variable).
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
+        self.loss_and_grad_with(x, |values| self.loss_cotangent(values))
+    }
+
+    /// [`loss_and_grad`](Self::loss_and_grad) with another loss: `loss`
+    /// maps the statistics `[B, len(plan)]` to the loss and its cotangent.
+    pub fn loss_and_grad_with(&self, x: &[f64], loss: impl FnOnce(&[Complex64]) -> (f64, Vec<Complex64>)) -> (f64, Vec<f64>) {
         let start = Instant::now();
         if let Some(ev) = &self.evaluator {
             let mut ev = ev.borrow_mut();
             let (values, _) = ev.forward(&self.halo, &self.to_layout(x), false);
             self.tick("forward", start);
-            let (loss, cotangent) = self.loss_cotangent(&values);
+            let (loss, cotangent) = loss(&values);
             let start = Instant::now();
             let g0 = ev.gradient(&self.halo, &cotangent);
             self.tick("reverse", start);
@@ -225,7 +231,7 @@ impl<'a, C: Comm> Objective<'a, C> {
             LocalEngine::distributed(self.geo, self.cfg, self.part.clone(), &self.halo, self.to_layout(x), self.batch, self.channels);
         let values = engine.forward(self.plan);
         self.tick("forward", start);
-        let (loss, cotangent) = self.loss_cotangent(&values);
+        let (loss, cotangent) = loss(&values);
         let start = Instant::now();
         let mg = engine.reverse(self.plan, &cotangent);
         let g0 = engine.map_cotangent(mg);
@@ -285,17 +291,84 @@ pub fn run_lbfgs<C: Comm>(
     obj: &Objective<C>,
     x: &mut [f64],
     opts: &LbfgsOptions,
+    report: impl FnMut(usize, f64, f64),
+) -> Vec<f64> {
+    run_lbfgs_with(obj.comm, x, opts, |p| obj.loss_and_grad(p), report)
+}
+
+/// L-BFGS on any loss of the owned slice `x`, the dot products summed over
+/// `comm` (every rank of the problem).
+pub fn run_lbfgs_with<C: Comm>(
+    comm: &C,
+    x: &mut [f64],
+    opts: &LbfgsOptions,
+    mut loss_and_grad: impl FnMut(&[f64]) -> (f64, Vec<f64>),
     mut report: impl FnMut(usize, f64, f64),
 ) -> Vec<f64> {
     let started = Instant::now();
     let mut history = Vec::new();
-    let reduce = CommReduce(obj.comm);
+    let reduce = CommReduce(comm);
     let mut f = |p: &[f64]| {
-        let (loss, g) = obj.loss_and_grad(p);
+        let (loss, g) = loss_and_grad(p);
         history.push(loss);
         report(history.len() - 1, loss, started.elapsed().as_secs_f64());
         (loss, g)
     };
     minimize(x, opts, &reduce, &mut f);
     history
+}
+
+/// Ensemble synthesis: `members` maps whose mean statistics match the
+/// target, `loss = sum_i w_i |(1/B) sum_m S_{m,i} - T_i|^2`, so that the
+/// ergodic scatter of the target goes into the scatter between the members.
+/// The members are split over groups of ranks: the batch of `obj` holds the
+/// members of this rank's group, `obj.comm` the ranks of the group (which
+/// share the sky), `cross` the ranks of the same position in every group
+/// (None with one group).  Every member gets the same cotangent
+/// `2 w_i ((1/B) sum_m S_{m,i} - T_i) / B`.
+pub struct Ensemble<'o, 'a, C: Comm> {
+    pub obj: &'o Objective<'a, C>,
+    pub cross: Option<&'o C>,
+    pub members: usize,
+    pub target: &'o [Complex64],
+}
+
+impl<C: Comm> Ensemble<'_, '_, C> {
+    /// Mean over all the members of the statistics `[b, len(plan)]` of this
+    /// group's members (identical on every rank).
+    pub fn mean(&self, values: &[Complex64]) -> Vec<Complex64> {
+        let n = self.obj.plan.len();
+        let mut sum = vec![0.0; 2 * n];
+        for member in values.chunks(n) {
+            for (i, v) in member.iter().enumerate() {
+                sum[2 * i] += v.re;
+                sum[2 * i + 1] += v.im;
+            }
+        }
+        if let Some(cross) = self.cross {
+            cross.allreduce_sum(&mut sum);
+        }
+        let b = self.members as f64;
+        (0..n).map(|i| Complex64::new(sum[2 * i] / b, sum[2 * i + 1] / b)).collect()
+    }
+
+    /// Loss and owned slice of the gradient of this group's members.
+    pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
+        self.obj.loss_and_grad_with(x, |values| {
+            let mean = self.mean(values);
+            let b = self.members as f64;
+            let mut loss = 0.0;
+            let one: Vec<Complex64> = mean
+                .iter()
+                .zip(self.target)
+                .zip(&self.obj.weights)
+                .map(|((m, t), w)| {
+                    let residual = m - t;
+                    loss += w * residual.norm_sqr();
+                    2.0 * w * residual / b
+                })
+                .collect();
+            (loss, one.repeat(self.obj.batch))
+        })
+    }
 }

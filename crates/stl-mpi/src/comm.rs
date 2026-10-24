@@ -42,4 +42,14 @@ pub trait Comm {
     fn allgather_i64(&self, value: i64) -> Vec<i64> {
         self.alltoallv_i64(vec![vec![value]; self.size()]).into_iter().map(|v| v[0]).collect()
     }
+
+    /// Sub-communicator of the ranks passing the same `color`, ranked by
+    /// `key` (collective: every rank calls it).  None when the backend cannot
+    /// split.
+    fn split(&self, _color: usize, _key: usize) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
