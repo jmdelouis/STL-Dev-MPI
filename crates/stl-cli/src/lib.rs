@@ -47,6 +47,8 @@ stl-synth --target MAP [options]
   --scatter-weight X    with --ensemble B > 1, adds X / n sum_i (D_i / sigma_i^2 - 1)^2: the
                         scatter D_i of the members around their mean held at the ergodic
                         variance sigma_i^2 of a map (second moment of the ensemble); default 0
+  --freeze-nside M      hold the means of the map over the pixels of nside M at those of the
+                        initial map: only the scales finer than M move (coarse-to-fine steps)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -94,6 +96,7 @@ pub struct Args {
     pub ensemble: usize,
     pub groups: usize,
     pub scatter_weight: f64,
+    pub freeze_nside: Option<usize>,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -123,6 +126,7 @@ impl Args {
             ensemble: 1,
             groups: 1,
             scatter_weight: 0.0,
+            freeze_nside: None,
             niter: 50,
             history_size: 10,
             out: None,
@@ -178,6 +182,7 @@ impl Args {
                     }
                     a.scatter_weight = v;
                 }
+                "--freeze-nside" => a.freeze_nside = Some(num(it.next(), k)?),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -408,6 +413,33 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
+    // --freeze-nside M: the means of the map over the pixels of nside M (groups
+    // of `freeze` consecutive NESTED pixels) stay those of the initial map; the
+    // gradient is projected on the zero-mean details, so L-BFGS (directions
+    // built from projected gradients and steps) only moves the scales finer than M.
+    let freeze = match args.freeze_nside {
+        None => None,
+        Some(m) => {
+            let n = nside as usize;
+            if m == 0 || m > n || n % m != 0 || !m.is_power_of_two() {
+                return Err(format!("--freeze-nside {m}: a power of 2 dividing the target nside {nside}"));
+            }
+            let group = (n / m) * (n / m);
+            if s % group != 0 || e % group != 0 {
+                return Err(format!("--freeze-nside {m}: rank ranges are not aligned on its pixels (use fewer ranks)"));
+            }
+            Some(group)
+        }
+    };
+    let project = |g: &mut [f64]| {
+        if let Some(group) = freeze {
+            for c in g.chunks_mut(group) {
+                let mean = c.iter().sum::<f64>() / group as f64;
+                c.iter_mut().for_each(|v| *v -= mean);
+            }
+        }
+    };
+
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
     let calls_before = obj.exchange_calls();
     let started = Instant::now();
@@ -418,10 +450,15 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 {
+    } else if members == 1 && freeze.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
-        run_lbfgs_with(comm, &mut x, &opts, |p| ens.loss_and_grad(p), print)
+        let loss_and_grad = |p: &[f64]| {
+            let (loss, mut g) = if members == 1 { obj.loss_and_grad(p) } else { ens.loss_and_grad(p) };
+            project(&mut g);
+            (loss, g)
+        };
+        run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
     };
     let seconds = started.elapsed().as_secs_f64();
     let calls_after = obj.exchange_calls();
@@ -593,6 +630,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
         "init": init_info,
+        "freeze_nside": args.freeze_nside,
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
         "memory_peak_bytes_per_rank": peaks,
