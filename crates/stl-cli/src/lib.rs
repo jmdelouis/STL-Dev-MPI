@@ -20,7 +20,9 @@ pub const USAGE: &str = "\
 stl-synth --target MAP [options]
 
   --target MAP          NESTED full-sky map (.npy or HEALPix .fits), standardised
-  --init MAP            initial map (NESTED, nside <= target); default white noise
+  --init MAP            initial map (NESTED, nside <= target); default white noise; with
+                        --ensemble, '{m}' in MAP gives one init per member (3-digit index,
+                        e.g. prev_m{m}_synthesis_nested.npy)
   --init-units U        'target' (default: standardised like the target) or 'standardized'
   --init-noise X        noise std added to --init: 'auto' (default, RMS of the target's
                         missing small scales when the init nside is lower), a number, 0
@@ -314,18 +316,31 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             }
         }
         Some(path) => {
-            let n_init = map_len(path)?;
+            // A path holding "{m}" is one init per member: "{m}" becomes the
+            // member index on three digits (PREFIX_mMMM_... of an ensemble).
+            let per_member = path.to_string_lossy().contains("{m}");
+            let member_path = |m: usize| PathBuf::from(path.to_string_lossy().replace("{m}", &format!("{m:03}")));
+            let first = member_path(first_member);
+            let n_init = map_len(&first)?;
             let nside_init = nside_of(n_init)?;
             if nside_init > nside || nside % nside_init != 0 {
-                return Err(format!("{}: nside {nside_init} incompatible with {nside}", path.display()));
+                return Err(format!("{}: nside {nside_init} incompatible with {nside}", first.display()));
             }
             let factor = npix / n_init;
             if s % factor != 0 || e % factor != 0 {
                 return Err(format!("--init at nside {nside_init}: rank ranges are not aligned on its pixels (use fewer ranks)"));
             }
-            let mut coarse = read_map_range(path, s / factor, e / factor)?;
-            if !args.init_standardized {
-                coarse.iter_mut().for_each(|v| *v = (*v - mean) / std);
+            let mut coarse: Vec<Vec<f64>> = Vec::with_capacity(local_members);
+            for m in first_member..first_member + local_members {
+                let p = member_path(m);
+                if map_len(&p)? != n_init {
+                    return Err(format!("{}: not the nside of {}", p.display(), first.display()));
+                }
+                let mut c = read_map_range(&p, s / factor, e / factor)?;
+                if !args.init_standardized {
+                    c.iter_mut().for_each(|v| *v = (*v - mean) / std);
+                }
+                coarse.push(c);
             }
             let noise_std = match args.init_noise {
                 Some(v) => v,
@@ -342,13 +357,13 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 }
                 None => 0.0,
             };
-            if members > 1 && noise_std <= 0.0 {
-                return Err("--ensemble from --init needs a noise (--init-noise > 0 or auto below the target nside): identical members stay identical".into());
+            if members > 1 && !per_member && noise_std <= 0.0 {
+                return Err("--ensemble from one --init needs a noise (--init-noise > 0 or auto below the target nside), or one init per member ({m} in the path): identical members stay identical".into());
             }
-            init_info = serde_json::json!({"file": path, "nside": nside_init, "noise_std": noise_std});
-            for m in first_member..first_member + local_members {
+            init_info = serde_json::json!({"file": path, "per_member": per_member, "nside": nside_init, "noise_std": noise_std});
+            for (k, m) in (first_member..first_member + local_members).enumerate() {
                 initial.extend((s..e).map(|p| {
-                    let b = coarse[p / factor - s / factor];
+                    let b = coarse[k][p / factor - s / factor];
                     if noise_std > 0.0 { b + noise_std * pixel_normal(args.seed + m as u64, p as i64) } else { b }
                 }));
             }

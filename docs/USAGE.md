@@ -326,6 +326,12 @@ drawn with that seed; `--init-noise 0` is refused (identical members stay
 identical). Member 0 is the single-map synthesis, and `--ensemble 1` gives
 exactly the previous runs.
 
+Coarse-to-fine ensembles: `{m}` in the `--init` path gives every member its
+own init, the member of the previous step (`{m}` becomes the three-digit
+member index), e.g. `--init prev_m{m}_synthesis_nested.npy`. The noise rule
+is the same (`auto`: the RMS of the target's scales missing at the init
+nside, drawn per member), and `--init-noise 0` is allowed.
+
 The mean alone leaves the scatter of the members free: at nside 64 (4
 members, 300 iterations) every member ends about 3 sigma from the target,
 where an ergodic realisation sits about 1 sigma away. `--scatter-weight X`
