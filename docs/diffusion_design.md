@@ -421,7 +421,54 @@ slowly (residuals 0.5 to 0.7 sigma, loss 0.258 after the same 300
 iterations): the minimisation has to build the large-scale
 non-Gaussianity that the STL coarse map brings for free.
 
-### 8.5 Conclusion of the prototype
+### 8.5 Hybrid ensemble: 8 independent members
+
+`diffusion/run_hybrid_ensemble.sh` then `diffusion/eval_hybrid_ensemble.sh`
+(garoupe, `/tmp/jmdeloui-diffusion/ens/b8`; `stl-synth` of commit c0ac285
+built with `--features gpu`, 3 thread ranks on the 3 T4s):
+
+1. STL ensemble of 8 at nside 64 on the target averaged to nside 64, from
+   white noise: `--ensemble 8 --scatter-weight 1 --level-power-weight 10`,
+   ergodic weights, 300 iterations (74 s).  An ergodic ensemble: every
+   member about 1 sigma from the target, scatter between the members 0.92
+   to 1.15 times the ergodic variance;
+2. diffusion levels 128 and 256 on every member (97 s for the 8);
+3. STL ensemble minimisation at nside 256 from the 8 hybrid maps
+   (`--ensemble 8 --scatter-weight 1 --init hybrid_m{m}.npy --init-noise 0`,
+   300 iterations, 15 minutes), and the control from the 8 coarse members
+   plus white noise (`--init coarse_m{m}_synthesis_nested.npy`, the same
+   minimisation).
+
+| 8 members | detail variance / target (256, 128, 64, 32, 16) | detail skew / kurt 256 | 128 | 64 | each member vs target, S1..S4 (sigma) | scatter / ergodic variance, S1..S4 | loss below 1 / 0.3 after | final loss |
+|---|---|---|---|---|---|---|---|---|
+| target | 1 | 0.23 / 0.37 | 0.12 / 0.27 | 0.03 / 0.22 | | | | |
+| hybrid before minimisation | 1.00, 0.95, 1.00, 1.00, 1.00 | 0.24 / 0.35 | 0.11 / 0.15 | -0.01 / 0.10 | | | | |
+| **hybrid, minimised** | **1.02, 0.97, 0.99, 1.01, 1.00** | **0.24 / 0.38** | **0.12 / 0.24** | 0.00 / 0.14 | **0.93 to 1.00** | **0.94 to 1.09** | **62 / 156** | **0.190** |
+| control, minimised | 0.89, 0.56, 1.46, 1.23, 1.06 | 0.06 / 0.07 | 0.13 / 0.14 | 0.04 / 0.07 | 0.93 to 1.00 | 0.93 to 1.10 | 116 / 213 | 0.211 |
+
+Figure: `docs/figures/diffusion_eval256_hybrid_ensemble.png`.
+
+- Both minimised ensembles are ergodic with respect to the STL statistics
+  (every member about 1 sigma from the target, scatter at the ergodic
+  variance), so the statistics cannot tell them apart; the pyramid can.
+  The control piles 1.46 times the target's variance into level 64 and
+  leaves 0.56 in level 128 (its `C_l` at nside 64 are 1.56 to 1.66 times
+  the target's for `l > 91`), with Gaussian-like finest details (kurtosis
+  0.07).  The minimised hybrid has every level within 3 %, and the
+  skewness and kurtosis of the target at levels 256 and 128.
+- The members are independent: the details of every level correlate at
+  the level of the pixel noise between members (0.001 at level 256, 0.018
+  at level 16, `1 / sqrt(npix)`) and with the target.
+- `C_l`: within 6 % of the target for `l >= 45`; the bands `l = 16` to 45
+  scatter by 9 to 11 %, the cosmic variance of the target's own sky in
+  these bands (gray band of the figure); the lowest multipoles (`l = 2, 3`)
+  come from the coarse STL ensemble, which does not constrain them.
+- Level 64 keeps the kurtosis of the coarse STL ensemble (0.10 to 0.14
+  against 0.22): the STL synthesis at nside 64 of the averaged target is
+  less non-Gaussian at its finest level than the nside 256 synthesis
+  averaged down (0.28).
+
+### 8.6 Conclusion of the prototype
 
 On one sky, the conditional diffusion model learns the two finest levels
 of nside 256 (40 000 and 160 000 training parent pixels) well: right
@@ -429,7 +476,13 @@ variance, non-Gaussianity and isotropy, where STL is weakest.  It does not
 learn the levels with fewer than ~10 000 parent pixels well enough: those
 are better taken from an STL synthesis (with the level-power term).  The
 best pipeline is: STL up to nside 64, diffusion for the finer levels, then
-the STL minimisation at full resolution from that map.
+the STL minimisation at full resolution from that map.  On an ensemble of
+8 independent members it gives an ergodic ensemble for the statistics
+(every member about 1 sigma from the target) with every pyramid level
+within 3 % of the target and the non-Gaussianity of the two finest levels,
+in about 20 minutes on garoupe's 3 T4s (coarse ensemble 1 min, diffusion
+1.5 min, minimisation 15 min), and it converges in about 2/3 of the
+evaluations of the same minimisation from white noise.
 
 ## 9. Next steps
 
@@ -443,8 +496,10 @@ the STL minimisation at full resolution from that map.
 - Non-Gaussianised kappa: train on the gaussianised map and invert the
   anamorphosis (`tools/gaussianize.py inverse`), or train on kappa itself
   with a per-level whitening (heavier tail, harder).
-- An STL ensemble as the coarse maps of the hybrid, for independent
-  members, each polished by the minimisation (`--ensemble` with `{m}` in
-  `--init`).
-- Check that the polished hybrid stays put over more iterations (300 here)
-  and with the level-power term, on several members.
+- Check that the minimised hybrid stays put over more iterations (300
+  here), and whether the level-power term in the final minimisation, or
+  the coarse ensemble synthesised at nside 128 and averaged down, recovers
+  the level-64 kurtosis (section 8.5).
+- The same pipeline at nside 2048 on hpc or garoupe: STL ensemble at
+  nside 256 (or 128), diffusion levels 512 to 2048 trained on the nside
+  2048 map, minimisation at nside 2048 from these maps.

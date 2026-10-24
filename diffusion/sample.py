@@ -7,7 +7,8 @@ the angular power of the target (`--coarse grf`: healpy synfast at 8 times
 that nside, then averaged down; monopole set to the target's mean), the
 target's own coarse map (`--coarse target`: conditional super-resolution),
 or any NESTED map averaged down (`--coarse FILE`, e.g. an STL synthesis:
-STL for the large scales, diffusion for the finest levels).  Every finer
+STL for the large scales, diffusion for the finest levels; a stack
+`[S, npix]` gives one sample per map, e.g. the members of an STL ensemble).  Every finer
 level `n` draws its Haar details with the model
 `MODEL_DIR/level{n}.pt` on the 12 face images with HEALPix padding (EDM
 Heun sampler), and rebuilds `x_n` from `x_{n/2}`.  OUT.npy is `[S, npix]`.
@@ -83,10 +84,11 @@ def main():
     if a.coarse == "grf":
         xs = np.array([coarse_grf(target, a.coarse_nside, rng) for _ in range(a.samples)])
     else:
-        x0 = target if a.coarse == "target" else np.load(a.coarse).astype(np.float64).reshape(-1)
-        while hf.nside_of(x0.size) > a.coarse_nside:
+        # One map (repeated --samples times) or a stack [S, npix] (one sample per map).
+        x0 = target if a.coarse == "target" else np.load(a.coarse).astype(np.float64)
+        while hf.nside_of(x0.shape[-1]) > a.coarse_nside:
             x0 = hf.down(x0)
-        xs = np.repeat(x0[None], a.samples, axis=0)
+        xs = x0 if x0.ndim == 2 else np.repeat(x0[None], a.samples, axis=0)
     levels = {a.coarse_nside: xs}
     n = a.coarse_nside
     while n < a.nside:
