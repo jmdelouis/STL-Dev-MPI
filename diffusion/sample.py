@@ -4,8 +4,11 @@
 
 The coarsest map (nside `--coarse-nside`) is a Gaussian random field with
 the angular power of the target (`--coarse grf`: healpy synfast at 8 times
-that nside, then averaged down; monopole set to the target's mean), or the
-target's own coarse map (`--coarse target`: conditional super-resolution).  Every finer level `n` draws its Haar details with the model
+that nside, then averaged down; monopole set to the target's mean), the
+target's own coarse map (`--coarse target`: conditional super-resolution),
+or any NESTED map averaged down (`--coarse FILE`, e.g. an STL synthesis:
+STL for the large scales, diffusion for the finest levels).  Every finer
+level `n` draws its Haar details with the model
 `MODEL_DIR/level{n}.pt` on the 12 face images with HEALPix padding (EDM
 Heun sampler), and rebuilds `x_n` from `x_{n/2}`.  OUT.npy is `[S, npix]`.
 """
@@ -65,7 +68,7 @@ def main():
     p.add_argument("nside", type=int)
     p.add_argument("out")
     p.add_argument("--coarse-nside", type=int, default=8)
-    p.add_argument("--coarse", choices=("grf", "target"), default="grf")
+    p.add_argument("--coarse", default="grf", help="grf, target, or a NESTED map file (e.g. an STL synthesis)")
     p.add_argument("--samples", type=int, default=4)
     p.add_argument("--steps", type=int, default=32)
     p.add_argument("--churn", type=float, default=0.0)
@@ -77,13 +80,13 @@ def main():
     rng = np.random.default_rng(a.seed)
     gen = torch.Generator(device=dev).manual_seed(a.seed)
     target = np.load(a.target).astype(np.float64)
-    if a.coarse == "target":
-        x0 = target
+    if a.coarse == "grf":
+        xs = np.array([coarse_grf(target, a.coarse_nside, rng) for _ in range(a.samples)])
+    else:
+        x0 = target if a.coarse == "target" else np.load(a.coarse).astype(np.float64).reshape(-1)
         while hf.nside_of(x0.size) > a.coarse_nside:
             x0 = hf.down(x0)
         xs = np.repeat(x0[None], a.samples, axis=0)
-    else:
-        xs = np.array([coarse_grf(target, a.coarse_nside, rng) for _ in range(a.samples)])
     levels = {a.coarse_nside: xs}
     n = a.coarse_nside
     while n < a.nside:

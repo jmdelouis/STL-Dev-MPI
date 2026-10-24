@@ -83,6 +83,7 @@ def main():
     p.add_argument("--crop", type=int, default=64, help="crop size in parent pixels")
     p.add_argument("--channels", default="64,128,128")
     p.add_argument("--nres", type=int, default=2)
+    p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--wd", type=float, default=0.0)
     p.add_argument("--ema", type=float, default=0.999)
@@ -103,7 +104,7 @@ def main():
     train_faces = range(12) if a.all_faces else [f for f in range(12) if f not in VAL_FACES]
     train = Crops(x, a.crop, train_faces, cond_std, det_std, dev)
     k = train.k
-    unet = dict(channels=tuple(int(c) for c in a.channels.split(",")), nres=a.nres)
+    unet = dict(channels=tuple(int(c) for c in a.channels.split(",")), nres=a.nres, dropout=a.dropout)
     assert k % 2 ** (len(unet["channels"]) - 1) == 0, f"crop {k} not divisible by the U-Net depth"
     model = Denoiser(**unet).to(dev)
     ema = copy.deepcopy(model).eval()

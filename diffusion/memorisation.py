@@ -39,6 +39,7 @@ def main():
     p.add_argument("levels", type=int, nargs="+")
     p.add_argument("--samples", type=int, default=4)
     p.add_argument("--steps", type=int, default=32)
+    p.add_argument("--churn", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--json")
     a = p.parse_args()
@@ -51,7 +52,7 @@ def main():
         parent, h_true = hf.haar(pyr[n])
         face = np.arange(parent.size) // (parent.size // 12)
         groups = {"train": np.isin(face, ck["train_faces"]), "held_out": ~np.isin(face, ck["train_faces"])}
-        draws = [sample_details(model, ck, parent, a.steps, gen) for _ in range(a.samples)]
+        draws = [sample_details(model, ck, parent, a.steps, gen, a.churn) for _ in range(a.samples)]
         rep = {}
         for g, sel in groups.items():
             if not sel.any():

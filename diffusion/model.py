@@ -80,12 +80,13 @@ class PixelNorm(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, pad, cin, cout, emb):
+    def __init__(self, pad, cin, cout, emb, dropout=0.0):
         super().__init__()
         self.norm1 = PixelNorm(cin)
         self.conv1 = Conv3(pad, cin, cout)
         self.film = nn.Linear(emb, 2 * cout)
         self.norm2 = PixelNorm(cout)
+        self.drop = nn.Dropout(dropout)
         self.conv2 = Conv3(pad, cout, cout)
         nn.init.zeros_(self.conv2.conv.weight)
         nn.init.zeros_(self.conv2.conv.bias)
@@ -95,12 +96,12 @@ class ResBlock(nn.Module):
         h = self.conv1(F.silu(self.norm1(x)))
         scale, shift = self.film(emb)[:, :, None, None].chunk(2, dim=1)
         h = self.norm2(h) * (1 + scale) + shift
-        h = self.conv2(F.silu(h))
+        h = self.conv2(self.drop(F.silu(h)))
         return (self.skip(x) + h) / math.sqrt(2)
 
 
 class UNet(nn.Module):
-    def __init__(self, channels=(64, 128, 128), nres=2, cin=4, cout=3, emb=128):
+    def __init__(self, channels=(64, 128, 128), nres=2, cin=4, cout=3, emb=128, dropout=0.0):
         super().__init__()
         self.pad = Padding()
         self.freqs = nn.Parameter(torch.exp(torch.linspace(0, math.log(1000), emb // 4)), requires_grad=False)
@@ -114,16 +115,16 @@ class UNet(nn.Module):
                 skips.append(c)  # pooled input of the level
             blocks = nn.ModuleList()
             for _ in range(nres):
-                blocks.append(ResBlock(self.pad, c, ck, emb))
+                blocks.append(ResBlock(self.pad, c, ck, emb, dropout))
                 c = ck
                 skips.append(c)
             self.down.append(blocks)
-        self.mid = nn.ModuleList([ResBlock(self.pad, c, c, emb), ResBlock(self.pad, c, c, emb)])
+        self.mid = nn.ModuleList([ResBlock(self.pad, c, c, emb, dropout), ResBlock(self.pad, c, c, emb, dropout)])
         self.up = nn.ModuleList()
         for k, ck in reversed(list(enumerate(channels))):
             blocks = nn.ModuleList()
             for _ in range(nres + 1):
-                blocks.append(ResBlock(self.pad, c + skips.pop(), ck, emb))
+                blocks.append(ResBlock(self.pad, c + skips.pop(), ck, emb, dropout))
                 c = ck
             self.up.append(blocks)
         self.out_norm = PixelNorm(c)
