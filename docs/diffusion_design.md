@@ -283,6 +283,18 @@ step 8 000 of 8 000; 0.768) and 0.905 (level 256, step 4 500 of 8 000;
 0.914).  With dropout the held-out loss of levels 32 to 128 still
 decreased at the end of the runs.
 
+Longer runs of the coarse levels (`runs/r3`: level 32, 12 000 steps, best
+held-out loss 0.743 at step 8 500; level 64, 16 000 steps, 0.686 at the
+end) lower the held-out loss but make the samples worse: with the chain
+started at nside 16, the detail variance of levels 32 and 64 drops to 0.54
+and 0.67 (0.62 and 0.70 with the r2 models), the `C_l` lose up to 48 %,
+and draws conditioned on the true parent become nearly deterministic (two
+draws correlate at 0.91 on the training faces, 0.66 on the held-out
+ones).  At these levels the held-out faces share their edges with the
+training crops, and the loss rewards learning the conditional mean of this
+one sky: more training is more memorisation, not a better conditional law.
+These levels lack data, not training.
+
 ### 8.2 Samples at nside 256 and 64
 
 Ensembles of 8 samples, Heun 32 steps, against the target and the STL
@@ -367,15 +379,57 @@ The held-out faces are not fully independent at the coarse levels: crops
 straddle face edges by up to half a face there, so the edges of faces 5
 and 10 are seen in training.
 
-### 8.4 Conclusion of the prototype
+### 8.4 Against the target statistics, and as the start of the STL minimisation
+
+The STL statistics of the samples themselves (`stl-synth --niter 0
+--init MAP --init-noise 0`, L = 4, ergodic weights, residual in ergodic
+sigma, rms per family):
+
+| map | var | S1 | S2 | S3 | S4 |
+|---|---|---|---|---|---|
+| STL `B_lp10` | 0.32 | 0.39 | 0.31 | 0.48 | 0.37 |
+| diffusion, GRF nside 16 (2 members) | 67 to 78 | 67 | 65 | 9 | 17 |
+| diffusion, GRF nside 64 (2 members) | 0.5 to 21 | 14 to 18 | 17 to 21 | 9 | 9 |
+| hybrid `B_lp10` at 64 + diffusion (2 members) | 10.5 | 13 | 15 | 2.8 | 5.6 |
+
+The full-sky ergodic sigmas are tiny (0.1 to 1 % of the coefficients), so
+the few-percent agreement of the diffusion samples is tens of sigma: a
+learned model does not reach the precision of the minimisation.  Used as
+the initial map of the minimisation (`stl-synth --gpu --weights ergodic
+--niter 300 --init SAMPLE --init-noise 0`, the garoupe build of 2026-10-20,
+one T4), it does better than either alone:
+
+| run (300 iterations) | residual S1 / S2 / S3 / S4 | detail variance 256 / 128 / 64 | detail skew / kurt 256 | max \|C_l ratio - 1\|, l >= 16 | loss below 0.3 / 0.15 after | final loss |
+|---|---|---|---|---|---|---|
+| target | | 1 / 1 / 1 | 0.23 / 0.37 | | | |
+| **hybrid init, then STL** | **0.35 / 0.27 / 0.45 / 0.34** | **1.01 / 0.96 / 1.02** | **0.24 / 0.36** | **0.068** | **32 / 108 evaluations** | **0.122** |
+| control: `B_lp10` at 64 + white noise, then STL | 0.35 / 0.29 / 0.46 / 0.35 | 0.87 / 0.53 / 1.55 | 0.07 / 0.07 | 0.081 | 70 / 167 | 0.127 |
+| diffusion GRF 64 init, then STL | 0.63 / 0.74 / 0.69 / 0.49 | 1.02 / 1.00 / 1.02 | 0.24 / 0.36 | 0.074 | 266 / - | 0.258 |
+| STL `B_lp10` (reference) | 0.39 / 0.31 / 0.48 / 0.37 | 1.00 / 1.00 / 1.00 | 0.05 / 0.13 | 0.076 | | |
+
+The minimisation brings the statistics below 0.5 sigma, as well as STL
+alone, and keeps the small scales that the diffusion model set: the
+variance, skewness and kurtosis of the finest details stay those of the
+target.  From white noise the same minimisation falls into the usual
+degeneracy (level 128 at 0.53 of the target's variance, finest-level
+kurtosis 0.07).  The statistics constrain what the diffusion model gets
+wrong (a few percent everywhere), the diffusion model sets what the
+statistics leave free (the finest level).  The diffusion start also
+converges about twice as fast.  Starting from the GRF-64 diffusion sample
+(large scales Gaussian) keeps the finest level as well but converges more
+slowly (residuals 0.5 to 0.7 sigma, loss 0.258 after the same 300
+iterations): the minimisation has to build the large-scale
+non-Gaussianity that the STL coarse map brings for free.
+
+### 8.5 Conclusion of the prototype
 
 On one sky, the conditional diffusion model learns the two finest levels
 of nside 256 (40 000 and 160 000 training parent pixels) well: right
-variance, non-Gaussianity and isotropy, where STL is weakest.  It cannot
-learn the levels with fewer than ~10 000 parent pixels: those are better
-taken from a GRF or, better, from an STL synthesis.  The working
-configuration is the hybrid: STL (with the level-power term) up to
-nside 64, diffusion above.
+variance, non-Gaussianity and isotropy, where STL is weakest.  It does not
+learn the levels with fewer than ~10 000 parent pixels well enough: those
+are better taken from an STL synthesis (with the level-power term).  The
+best pipeline is: STL up to nside 64, diffusion for the finer levels, then
+the STL minimisation at full resolution from that map.
 
 ## 9. Next steps
 
@@ -390,4 +444,7 @@ nside 64, diffusion above.
   anamorphosis (`tools/gaussianize.py inverse`), or train on kappa itself
   with a per-level whitening (heavier tail, harder).
 - An STL ensemble as the coarse maps of the hybrid, for independent
-  members; STL statistics of the hybrid samples as a check.
+  members, each polished by the minimisation (`--ensemble` with `{m}` in
+  `--init`).
+- Check that the polished hybrid stays put over more iterations (300 here)
+  and with the level-power term, on several members.
