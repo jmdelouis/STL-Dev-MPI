@@ -262,6 +262,7 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--ensemble B` | 1 | synthesise B maps whose mean statistics match the target (§5.4) |
 | `--groups G` | 1 | split the ranks into G groups, each holding B / G members (MPI; §5.4) |
 | `--scatter-weight X` | 0 | hold the scatter of the members at the ergodic variance (second moment, §5.4) |
+| `--level-power-weight X` | 0 | hold the variance of the pyramid details of every level at the target's (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
@@ -284,6 +285,18 @@ east-west and the high values clump into blobs. On the Takahashi
 convergence map at nside 256, the east-west / north-south small-scale power
 ratio is 0.89 +- 0.03 against 1.02 +- 0.05 for the target. L = 4 costs
 about 1.4 times L = 2.
+
+**Power per level.** The scattering statistics leave the finest scale loose:
+a synthesis at nside 256 of the gaussianised Takahashi map, every family at
+0.5 sigma or better, still holds only 0.58 of the target's variance in the
+details of the finest level of the 4-children pyramid (map minus the mean of
+each group of 4 children) and 1.36 one level up. `--level-power-weight X`
+adds `X / B sum_m sum_n (V_n / V_n(target) - 1)^2`, `V_n` the variance of the
+details of level n (finest level down to nside 8), at negligible cost. With
+X = 1 every level ends within 0.3 % of the target's (0.997 at the finest),
+S1-S4 unchanged (0.34 - 0.48 sigma), the C_l unchanged (0.94 - 1.07 for
+l >= 8); the missing power was at the pixel scale, above l = 3 nside, which
+the C_l do not see.
 
 ### 5.2 Outputs
 

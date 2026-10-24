@@ -16,6 +16,9 @@ use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
 use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
+mod level_power;
+use level_power::LevelPower;
+
 pub const USAGE: &str = "\
 stl-synth --target MAP [options]
 
@@ -47,6 +50,9 @@ stl-synth --target MAP [options]
   --scatter-weight X    with --ensemble B > 1, adds X / n sum_i (D_i / sigma_i^2 - 1)^2: the
                         scatter D_i of the members around their mean held at the ergodic
                         variance sigma_i^2 of a map (second moment of the ensemble); default 0
+  --level-power-weight X adds X / B sum_m sum_n (V_n / V_n(target) - 1)^2, V_n the variance of the
+                        details of level n of the 4-children pyramid of the map (finest level down
+                        to nside 8): holds the power of every level; default 0
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -94,6 +100,7 @@ pub struct Args {
     pub ensemble: usize,
     pub groups: usize,
     pub scatter_weight: f64,
+    pub level_power_weight: f64,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -123,6 +130,7 @@ impl Args {
             ensemble: 1,
             groups: 1,
             scatter_weight: 0.0,
+            level_power_weight: 0.0,
             niter: 50,
             history_size: 10,
             out: None,
@@ -177,6 +185,13 @@ impl Args {
                         return Err("--scatter-weight must be finite and >= 0".into());
                     }
                     a.scatter_weight = v;
+                }
+                "--level-power-weight" => {
+                    let v: f64 = it.next().ok_or("--level-power-weight needs a value")?.parse().map_err(|_| "--level-power-weight: not a number")?;
+                    if !(v.is_finite() && v >= 0.0) {
+                        return Err("--level-power-weight must be finite and >= 0".into());
+                    }
+                    a.level_power_weight = v;
                 }
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
@@ -405,6 +420,10 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         plan.iter().enumerate().map(|(i, c)| (target_var[i] / geo.pixels(c.native_dg) as f64).max(1e-300)).collect();
     let scatter = (args.scatter_weight > 0.0 && members > 1).then_some((args.scatter_weight, &sigma2[..]));
     let ens = Ensemble { obj: &obj, cross: cross.as_ref(), members, target: &target_stats, scatter };
+    let level_power = (args.level_power_weight > 0.0).then(|| {
+        let levels = LevelPower::levels(nside as usize, s, e, gcomm);
+        LevelPower::new(args.level_power_weight, &target, levels, npix, members, gcomm)
+    });
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -418,10 +437,19 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 {
+    } else if members == 1 && level_power.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
-        run_lbfgs_with(comm, &mut x, &opts, |p| ens.loss_and_grad(p), print)
+        let loss_and_grad = |p: &[f64]| {
+            let (mut loss, mut g) = if members == 1 { obj.loss_and_grad(p) } else { ens.loss_and_grad(p) };
+            if let Some(lp) = &level_power {
+                let (l2, g2) = lp.loss_and_grad(p, e - s, gcomm, cross.as_ref());
+                loss += l2;
+                g.iter_mut().zip(&g2).for_each(|(a, b)| *a += b);
+            }
+            (loss, g)
+        };
+        run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
     };
     let seconds = started.elapsed().as_secs_f64();
     let calls_after = obj.exchange_calls();
@@ -444,7 +472,11 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     } else {
         0.0
     };
-    let final_loss = loss_mean + loss_scatter;
+    let (loss_levels, level_ratios) = match &level_power {
+        Some(lp) => (lp.loss_and_grad(&x, e - s, gcomm, cross.as_ref()).0, lp.ratios(&x, e - s, gcomm, cross.as_ref())),
+        None => (0.0, Vec::new()),
+    };
+    let final_loss = loss_mean + loss_scatter + loss_levels;
     let sigma: Vec<f64> = sigma2.iter().map(|v| v.sqrt()).collect();
     // Residual of the mean per family, in units of its ergodic sigma
     // (sigma / sqrt(B): sigma itself for one map).
@@ -593,6 +625,12 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
         "init": init_info,
+        "level_power": {
+            "weight": args.level_power_weight,
+            "levels_nside": (0..level_ratios.len()).map(|n| nside >> n).collect::<Vec<_>>(),
+            "variance_over_target": level_ratios,
+            "loss_final_term": loss_levels,
+        },
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
         "memory_peak_bytes_per_rank": peaks,
