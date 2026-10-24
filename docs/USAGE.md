@@ -261,6 +261,7 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--family-weights F` | 1 | extra factors on whole families, e.g. `S1=10,S2=10` (families `mean`, `var`, `S1`..`S4`) |
 | `--ensemble B` | 1 | synthesise B maps whose mean statistics match the target (§5.4) |
 | `--groups G` | 1 | split the ranks into G groups, each holding B / G members (MPI; §5.4) |
+| `--scatter-weight X` | 0 | hold the scatter of the members at the ergodic variance (second moment, §5.4) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
@@ -324,6 +325,35 @@ starts from white noise with seed `--seed + m`, or from `--init` plus noise
 drawn with that seed; `--init-noise 0` is refused (identical members stay
 identical). Member 0 is the single-map synthesis, and `--ensemble 1` gives
 exactly the previous runs.
+
+The mean alone leaves the scatter of the members free: at nside 64 (4
+members, 300 iterations) every member ends about 3 sigma from the target,
+where an ergodic realisation sits about 1 sigma away. `--scatter-weight X`
+adds the second moment of the ensemble,
+
+    X / n sum_i (D_i / sigma_i^2 - 1)^2,   D_i = sum_m |S_i(map_m) - mean_i|^2 / (B - 1)
+
+which holds the scatter of the members around their mean at the ergodic
+variance of one map (`sigma_i^2`, the same as in the ergodic weights). The
+report gives, per family, `scatter_over_ergodic_variance` (the mean of
+`D_i / sigma_i^2`, 1 for an ergodic ensemble) and the two terms of the
+final loss. With few members `D_i` is a noisy estimate: hold it per
+coefficient only with B of about 8 or more, or keep X small.
+
+Measured at nside 64 (Takahashi kappa, L = 4, ergodic weights, 300
+iterations); residuals per family S1..S4, var:
+
+| Run | mean vs target (sigma / sqrt B) | each member vs target (sigma) | `scatter_over_ergodic_variance` |
+|---|---|---|---|
+| B = 4, X = 0 | 0.24 - 0.45 | 3.0 - 4.6 | free |
+| B = 4, X = 0.1 | 0.21 - 0.59 | 0.47 - 1.06 | 1.07 - 1.37 (var 0.29) |
+| B = 4, X = 1 | 0.02 - 0.72 | 0.89 - 0.96 | 0.94 - 1.12 |
+| B = 4, X = 10 | 0.81 - 3.0 | 0.97 - 1.73 | 1.00 - 1.03 |
+| B = 8, X = 1 | 0.45 - 0.80 | 0.95 - 1.03 | 0.95 - 1.15 |
+
+X = 1 gives an ergodic ensemble (members about 1 sigma from the target,
+scatter at the ergodic variance) with the mean still within one sigma of
+the mean; X = 10 holds the scatter exactly but loosens the mean.
 
 Placement: `--groups G` splits the ranks into G groups of consecutive ranks
 (G divides B and the number of ranks). The ranks of a group share the sky

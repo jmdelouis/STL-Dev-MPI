@@ -326,11 +326,18 @@ pub fn run_lbfgs_with<C: Comm>(
 /// share the sky), `cross` the ranks of the same position in every group
 /// (None with one group).  Every member gets the same cotangent
 /// `2 w_i ((1/B) sum_m S_{m,i} - T_i) / B`.
+///
+/// `scatter = Some((lambda, sigma2))` adds the second moment of the
+/// ensemble: with `D_i = sum_m |S_{m,i} - mean_i|^2 / (B - 1)` the scatter of
+/// the members (unbiased) and `sigma2_i` its ergodic expectation,
+/// `lambda / n sum_i (D_i / sigma2_i - 1)^2`; member k gets the extra
+/// cotangent `4 lambda / n (D_i / sigma2_i - 1) / sigma2_i (S_{k,i} - mean_i) / (B - 1)`.
 pub struct Ensemble<'o, 'a, C: Comm> {
     pub obj: &'o Objective<'a, C>,
     pub cross: Option<&'o C>,
     pub members: usize,
     pub target: &'o [Complex64],
+    pub scatter: Option<(f64, &'o [f64])>,
 }
 
 impl<C: Comm> Ensemble<'_, '_, C> {
@@ -352,9 +359,28 @@ impl<C: Comm> Ensemble<'_, '_, C> {
         (0..n).map(|i| Complex64::new(sum[2 * i] / b, sum[2 * i + 1] / b)).collect()
     }
 
+    /// Scatter of the members around `mean`, `D_i = sum_m |S_{m,i} - mean_i|^2 / (B - 1)`
+    /// (identical on every rank; zero for one member).
+    pub fn scatter(&self, values: &[Complex64], mean: &[Complex64]) -> Vec<f64> {
+        let n = self.obj.plan.len();
+        let mut d = vec![0.0; n];
+        for member in values.chunks(n) {
+            for (i, v) in member.iter().enumerate() {
+                d[i] += (v - mean[i]).norm_sqr();
+            }
+        }
+        if let Some(cross) = self.cross {
+            cross.allreduce_sum(&mut d);
+        }
+        let dof = self.members.saturating_sub(1).max(1) as f64;
+        d.iter_mut().for_each(|v| *v /= dof);
+        d
+    }
+
     /// Loss and owned slice of the gradient of this group's members.
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
         self.obj.loss_and_grad_with(x, |values| {
+            let n = self.obj.plan.len();
             let mean = self.mean(values);
             let b = self.members as f64;
             let mut loss = 0.0;
@@ -368,7 +394,24 @@ impl<C: Comm> Ensemble<'_, '_, C> {
                     2.0 * w * residual / b
                 })
                 .collect();
-            (loss, one.repeat(self.obj.batch))
+            let mut cotangent = one.repeat(self.obj.batch);
+            if let (Some((lambda, sigma2)), true) = (self.scatter, self.members > 1) {
+                let d = self.scatter(values, &mean);
+                let nf = n as f64;
+                let coef: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = d[i] / sigma2[i] - 1.0;
+                        loss += lambda / nf * r * r;
+                        4.0 * lambda / nf * r / sigma2[i] / (b - 1.0)
+                    })
+                    .collect();
+                for (member, cot) in values.chunks(n).zip(cotangent.chunks_mut(n)) {
+                    for i in 0..n {
+                        cot[i] += coef[i] * (member[i] - mean[i]);
+                    }
+                }
+            }
+            (loss, cotangent)
         })
     }
 }

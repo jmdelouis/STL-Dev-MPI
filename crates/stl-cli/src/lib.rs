@@ -42,6 +42,9 @@ stl-synth --target MAP [options]
                         mean over the members; member m starts from seed + m); default 1
   --groups G            split the ranks into G groups of consecutive ranks, each sharing the
                         sky of B / G members (MPI; G divides B and the number of ranks); default 1
+  --scatter-weight X    with --ensemble B > 1, adds X / n sum_i (D_i / sigma_i^2 - 1)^2: the
+                        scatter D_i of the members around their mean held at the ergodic
+                        variance sigma_i^2 of a map (second moment of the ensemble); default 0
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -88,6 +91,7 @@ pub struct Args {
     pub family_weights: Vec<(Family, f64)>,
     pub ensemble: usize,
     pub groups: usize,
+    pub scatter_weight: f64,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -116,6 +120,7 @@ impl Args {
             family_weights: Vec::new(),
             ensemble: 1,
             groups: 1,
+            scatter_weight: 0.0,
             niter: 50,
             history_size: 10,
             out: None,
@@ -164,6 +169,13 @@ impl Args {
                 }
                 "--ensemble" => a.ensemble = num(it.next(), k)?.max(1),
                 "--groups" => a.groups = num(it.next(), k)?.max(1),
+                "--scatter-weight" => {
+                    let v: f64 = it.next().ok_or("--scatter-weight needs a value")?.parse().map_err(|_| "--scatter-weight: not a number")?;
+                    if !(v.is_finite() && v >= 0.0) {
+                        return Err("--scatter-weight must be finite and >= 0".into());
+                    }
+                    a.scatter_weight = v;
+                }
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -373,7 +385,11 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             *w *= f;
         }
     }
-    let ens = Ensemble { obj: &obj, cross: cross.as_ref(), members, target: &target_stats };
+    // Ergodic variance of every coefficient for one map.
+    let sigma2: Vec<f64> =
+        plan.iter().enumerate().map(|(i, c)| (target_var[i] / geo.pixels(c.native_dg) as f64).max(1e-300)).collect();
+    let scatter = (args.scatter_weight > 0.0 && members > 1).then_some((args.scatter_weight, &sigma2[..]));
+    let ens = Ensemble { obj: &obj, cross: cross.as_ref(), members, target: &target_stats, scatter };
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -403,11 +419,18 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // Final statistics of this group's members and their mean over all members.
     let final_members = obj.statistics(&x);
     let final_mean = ens.mean(&final_members);
-    let final_loss: f64 =
+    let loss_mean: f64 =
         final_mean.iter().zip(&target_stats).zip(&obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
     let n = plan.len();
-    let sigma: Vec<f64> =
-        plan.iter().enumerate().map(|(i, c)| (target_var[i] / geo.pixels(c.native_dg) as f64).sqrt().max(1e-300)).collect();
+    // Scatter of the members over its ergodic expectation, per coefficient.
+    let scatter_ratio: Vec<f64> = ens.scatter(&final_members, &final_mean).iter().zip(&sigma2).map(|(d, s)| d / s).collect();
+    let loss_scatter = if scatter.is_some() {
+        args.scatter_weight / n as f64 * scatter_ratio.iter().map(|r| (r - 1.0) * (r - 1.0)).sum::<f64>()
+    } else {
+        0.0
+    };
+    let final_loss = loss_mean + loss_scatter;
+    let sigma: Vec<f64> = sigma2.iter().map(|v| v.sqrt()).collect();
     // Residual of the mean per family, in units of its ergodic sigma
     // (sigma / sqrt(B): sigma itself for one map).
     let rescale = (members as f64).sqrt();
@@ -438,9 +461,15 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         let count = plan.iter().filter(|c| c.family == *fam).count();
         if count > 0 {
             let k = (count * members) as f64;
+            // Mean over the family of D_i / sigma_i^2 (1 for an ergodic ensemble).
+            let ratio: f64 = (0..n).filter(|&i| plan[i].family == *fam).map(|i| scatter_ratio[i]).sum::<f64>() / count as f64;
             members_report.insert(
                 fam.name().into(),
-                serde_json::json!({"residual_rms_sigma": (member_sq[2 * f] / k).sqrt(), "scatter_rms_sigma": (member_sq[2 * f + 1] / k).sqrt()}),
+                serde_json::json!({
+                    "residual_rms_sigma": (member_sq[2 * f] / k).sqrt(),
+                    "scatter_rms_sigma": (member_sq[2 * f + 1] / k).sqrt(),
+                    "scatter_over_ergodic_variance": ratio,
+                }),
             );
         }
     }
@@ -528,7 +557,10 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             "members": members,
             "groups": groups,
             "ranks_per_group": per_group,
-            "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2",
+            "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+            "scatter_weight": args.scatter_weight,
+            "loss_final_mean_term": loss_mean,
+            "loss_final_scatter_term": loss_scatter,
             "member_files": synthesis_files,
             "per_member_in_ergodic_sigma": members_report,
         },

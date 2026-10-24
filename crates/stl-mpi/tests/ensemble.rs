@@ -35,7 +35,7 @@ fn identical_members_match_the_single_map() {
             let (loss1, g1) = single.loss_and_grad(&single.slice(&initial));
             let rows = target.repeat(2);
             let obj = Objective::new(&geo, &cfg, &plan, &rows, 2, 1, comm);
-            let ens = Ensemble { obj: &obj, cross: None, members: 2, target: &target };
+            let ens = Ensemble { obj: &obj, cross: None, members: 2, target: &target, scatter: None };
             let both = [initial.clone(), initial.clone()].concat();
             let (loss2, g2) = ens.loss_and_grad(&obj.slice(&both));
             assert!((loss2 - loss1).abs() <= 1e-13 * loss1, "P={ranks}: loss {loss2} vs {loss1}");
@@ -64,25 +64,32 @@ fn gradient_matches_finite_differences() {
         let target = probe.statistics(&probe.slice(&target_map));
         let rows = target.repeat(2);
         let obj = Objective::new(&geo, &cfg, &plan, &rows, 2, 1, comm);
-        let ens = Ensemble { obj: &obj, cross: None, members: 2, target: &target };
         let x = obj.slice(&both);
-        let (_, g) = ens.loss_and_grad(&x);
-        let len = x.len() / 2;
-        // Pixels of both members, perturbed on rank 0 only (the loss is collective).
-        for &k in &[0, 7, len / 2, len - 1, len + 3, 2 * len - 5] {
-            let h = 1e-5;
-            let mut xp = x.clone();
-            let mut xm = x.clone();
-            if comm.rank() == 0 {
-                xp[k] += h;
-                xm[k] -= h;
-            }
-            let (lp, _) = ens.loss_and_grad(&xp);
-            let (lm, _) = ens.loss_and_grad(&xm);
-            if comm.rank() == 0 {
-                let fd = (lp - lm) / (2.0 * h);
-                let rel = (fd - g[k]).abs() / g[k].abs().max(1e-8);
-                assert!(rel <= 1e-5, "pixel {k} of {n0}: gradient {} vs finite difference {fd} (rel {rel:.1e})", g[k]);
+        // Scatter term with an expectation half the members' scatter (D / sigma^2 - 1 = 1).
+        let plain = Ensemble { obj: &obj, cross: None, members: 2, target: &target, scatter: None };
+        let values = obj.statistics(&x);
+        let sigma2: Vec<f64> = plain.scatter(&values, &plain.mean(&values)).iter().map(|d| 0.5 * d + 1e-30).collect();
+        for scatter in [None, Some((0.7, &sigma2[..]))] {
+            let ens = Ensemble { obj: &obj, cross: None, members: 2, target: &target, scatter };
+            let (_, g) = ens.loss_and_grad(&x);
+            let len = x.len() / 2;
+            // Pixels of both members, perturbed on rank 0 only (the loss is collective).
+            for &k in &[0, 7, len / 2, len - 1, len + 3, 2 * len - 5] {
+                let h = 1e-5;
+                let mut xp = x.clone();
+                let mut xm = x.clone();
+                if comm.rank() == 0 {
+                    xp[k] += h;
+                    xm[k] -= h;
+                }
+                let (lp, _) = ens.loss_and_grad(&xp);
+                let (lm, _) = ens.loss_and_grad(&xm);
+                if comm.rank() == 0 {
+                    let fd = (lp - lm) / (2.0 * h);
+                    let rel = (fd - g[k]).abs() / g[k].abs().max(1e-8);
+                    let term = if scatter.is_some() { "with scatter" } else { "mean only" };
+                    assert!(rel <= 1e-5, "{term}, pixel {k} of {n0}: gradient {} vs finite difference {fd} (rel {rel:.1e})", g[k]);
+                }
             }
         }
     });
