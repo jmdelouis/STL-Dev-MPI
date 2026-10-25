@@ -621,10 +621,50 @@ garoupe (27 s), gaussianised there (`tools/gaussianize.py`).
   maps, which differ from the true pyramid at nside 256: their level-256
   details have a kurtosis of 0.31 against 0.61 for the target, and the
   conditional models answer that with more variance.
-- STL ensemble minimisation at nside 2048 from the 4 hybrid maps on the
-  hpc H200s (`diffusion/hpc_polish.slurm`, the c0ac285 build with MPI and
-  GPU): 35 to 45 s per evaluation of the 4 members on one H200 (the user's
-  QOS allows 2 GPUs, one was taken by another job).
+- STL ensemble minimisation at nside 2048 from the 4 hybrid maps on one
+  hpc H200 (`diffusion/hpc_polish.slurm` with `--gres=gpu:h200:1
+  --ntasks=1`, `NGROUPS=1`, the c0ac285 build with MPI and GPU; the
+  user's QOS allows 2 GPUs and the other one was in use): 51 to 58 s per
+  evaluation of the 4 members, 68 GB peak (LBFGS history 39 GB, stored
+  moduli 5.7 GB, maps 4.3 GB), 5 minutes of setup.  Two jobs, the second
+  restarted from the maps of the first (LBFGS history lost): 117
+  evaluations (100 iterations, 1 h 40), loss 10 991 -> 19.8, then 162
+  evaluations (150 iterations, 2 h 36), loss 19.8 -> 1.22, still falling
+  by about 1 % per evaluation.
+
+| 4 members, nside 2048 | detail variance / target 2048, 1024, 512, 256, 128, 64 | detail kurtosis 2048, 1024, 512, 256, 128 | `C_l` / target, `l` = 362, 512, 724 to 4096 | STL residual per member S1 / S2 / S3 / S4 / var (sigma) |
+|---|---|---|---|---|
+| target | 1 | 0.92, 0.52, 0.57, 0.61, 0.63 | 1 | |
+| hybrid before minimisation | 1.08, 1.13, 1.18, 0.98, 0.98, 0.99 | 0.80, 0.38, 0.46, 0.31, 0.50 | 1.22, 1.08, 1.07 to 1.26 | |
+| after 117 evaluations | | | | 13.9 / 10.8 / 2.9 / 2.1 / 16.6 |
+| **after 279 evaluations** | **1.02, 0.99, 1.02, 0.89, 0.98, 1.01** | **0.88, 0.51, 0.71, 0.43, 0.49** | **1.10, 0.90, 0.99 to 1.04** | **1.90 / 1.71 / 1.06 / 1.00 / 3.39** |
+
+Figure: `docs/figures/diffusion_eval2048_polished.png`.
+
+- The minimisation removes the over-dispersion of the diffused levels
+  (512 to 2048 within 2.5 % of the target, `C_l` within 4 % from `l = 724`
+  to 4096) and keeps their non-Gaussianity: finest-level kurtosis 0.88
+  (target 0.92, 0.80 before), level 1024 0.51 (0.52).  No seam at the face
+  edges (`seams.py`: variance of the edge rows within 2 % of the
+  interiors, kurtosis 0.85 to 0.93 against 0.87 to 0.89).
+- It is not converged: S3 and S4 are at the ergodic level (1 sigma per
+  member, scatter between members 1.03 to 1.06 times the ergodic variance)
+  but S1, S2 and the variance are 1.7 to 3.4 sigma off, and the mean of the
+  4 members is off by 3 to 6.5 sigma / sqrt(4) on these families: a bias
+  shared by the members, not scatter.  The power is still moving between
+  levels 256 and 512: level 256 dropped from 0.98 to 0.89 (`C_l` 1.10 and
+  0.90 in the bands at `l` = 362 and 512) while level 512 went from 1.18 to
+  1.02, the exchange between neighbouring levels that the statistics pin
+  only loosely (sections 8.4 and 8.5).
+- The large-scale non-Gaussianity comes from the coarse STL maps, which are
+  too non-Gaussian in the map itself (excess kurtosis of `x_n` 0.46 to 0.49
+  at nside 128 and 256 against 0.27 and 0.20 for the target) and not
+  enough in the details (level-256 kurtosis 0.31 against 0.61); the
+  minimisation at 2048 has moved this only a little (0.43 at level 256).
+- The fine scales of nside 2048 have many more independent patches, hence
+  much smaller ergodic sigmas, so the 8 to 18 % over-dispersion of the
+  diffused levels cost a loss of 10 991 at the start (264 at nside 256 for
+  mismatches of a few percent).
 
 ### 8.8 Conclusion of the prototype
 
@@ -642,22 +682,43 @@ in about 20 minutes on garoupe's 3 T4s (coarse ensemble 1 min, diffusion
 1.5 min, minimisation 15 min), and it converges in about 2/3 of the
 evaluations of the same minimisation from white noise.
 
+Face tiles with re-oriented halos are enough on the sphere: the
+sphere-native network with the STL stencils gives the same ensemble, a
+slightly smaller equatorial seam at nside 256, and costs 5 times more to
+sample (section 8.6).
+
+At nside 2048 the diffusion levels (512 to 2048) learn without
+memorising (0.8 to 12.6 M parent pixels) and are calibrated on the true
+pyramid; conditioned on STL coarse maps they are 8 to 18 % over-dispersed,
+and 279 evaluations of the ensemble minimisation on one H200 (4 h 15)
+bring the diffused levels within 2.5 % with their kurtosis, but leave S1,
+S2 and the variance 1.7 to 3.4 sigma off and level 256 at 0.89 of its
+variance (section 8.7): more iterations, and better coarse maps, are
+needed there.
+
 ## 9. Next steps
 
 - More realisations (section 5) before scaling up: they are what would let
   the coarse levels be learned too.
-- nside 2048: train levels 512, 1024, 2048 (and 256, 128) on the
-  Takahashi map at nside 2048 (12.6 M parent pixels at the finest level,
-  64 times more crops than at nside 256, so less over-fitting), condition
-  on STL syntheses at nside 128 to 256; sample face by face with a halo
-  (section 7).
+- nside 2048: continue the minimisation of the 4 members (another 150 to
+  300 evaluations, 2.5 to 5 h on one H200), with the level-power term to
+  hold level 256, when the hpc GPU quota is free; check that S1, S2 and
+  the variance reach 1 sigma per member and that the levels stay within
+  3 %.
+- Better coarse maps for nside 2048: the STL ensemble at nside 256 has the
+  right detail variances but too much kurtosis in the map and too little in
+  the level-256 details (section 8.7); the diffusion levels inherit the
+  mismatch.  Options: the coarse ensemble at nside 512 averaged down,
+  diffusion from nside 128 with a model of level 256 trained on the nside
+  2048 map (4 times more parent pixels than at nside 256), or a variance
+  correction of the diffused details by the measured over-dispersion.
 - Non-Gaussianised kappa: train on the gaussianised map and invert the
   anamorphosis (`tools/gaussianize.py inverse`), or train on kappa itself
   with a per-level whitening (heavier tail, harder).
-- Check that the minimised hybrid stays put over more iterations (300
-  here), and whether the level-power term in the final minimisation, or
-  the coarse ensemble synthesised at nside 128 and averaged down, recovers
-  the level-64 kurtosis (section 8.5).
-- The same pipeline at nside 2048 on hpc or garoupe: STL ensemble at
-  nside 256 (or 128), diffusion levels 512 to 2048 trained on the nside
-  2048 map, minimisation at nside 2048 from these maps.
+- Check whether the level-power term in the final minimisation, or the
+  coarse ensemble synthesised at nside 128 and averaged down, recovers the
+  level-64 kurtosis at nside 256 (section 8.5).
+- MPI version: the sphere-native denoiser (section 4.1) on the Rust
+  engine's blocks (NESTED cells with HEALPix-neighbour halos), so that the
+  sampling of nside 4096 shares the domain decomposition of the
+  minimisation.
