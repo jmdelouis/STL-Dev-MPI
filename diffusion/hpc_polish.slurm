@@ -6,12 +6,14 @@
 #          diffusion/hpc_polish.slurm
 # G: the stl-synth build with MPI and GPU (stl-cli --features mpi,gpu) of a
 # commit with --ensemble, --scatter-weight and {m} in --init (c0ac285 or later).
+# 3 cores per rank: the GPU does the work, and the user CPU quota (192 cores,
+# GPU jobs included) is mostly held by the ensemble production chain.
 #SBATCH --job-name=stl-hybrid-polish
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:h200:2
 #SBATCH --ntasks=2
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=600G
+#SBATCH --cpus-per-task=3
+#SBATCH --mem=400G
 #SBATCH --time=1-00:00:00
 #SBATCH --output=%x_%j.out
 

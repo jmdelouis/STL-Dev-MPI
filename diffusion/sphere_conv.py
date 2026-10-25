@@ -106,8 +106,9 @@ class Level:
     """Geometry of one resolution for a batch of regions (concatenated):
     the gather matrix `S` `[n p, n]` and its transpose."""
 
-    def __init__(self, parts, ids, ksz, device):
+    def __init__(self, parts, ids, ksz):
         """parts: per region (pos, w) from `bind`; ids: per region ids."""
+        device = parts[0][0].device
         self.p = ksz * ksz
         self.sizes = [len(i) for i in ids]
         self.n = sum(self.sizes)
@@ -132,7 +133,7 @@ class Pyramid:
         if not isinstance(regions[0], RegionGeometry):
             regions = [RegionGeometry(r, np.ones(len(r), bool), nside, depth, ksz, device) for r in regions]
         self.regions = regions
-        self.levels = [Level([r.levels[k] for r in regions], [r.ids[k] for r in regions], ksz, device)
+        self.levels = [Level([r.levels[k] for r in regions], [r.ids[k] for r in regions], ksz)
                        for k in range(len(regions[0].levels))]
         self.central = torch.cat([r.central for r in regions])
 

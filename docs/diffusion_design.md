@@ -534,7 +534,55 @@ Figure: `docs/figures/diffusion_eval256_hybrid_ensemble.png`.
   less non-Gaussian at its finest level than the nside 256 synthesis
   averaged down (0.28).
 
-### 8.6 Conclusion of the prototype
+Rerun with the face-tiled sampler (`ens/b8fix`, same coarse members and
+control): the same statistics (detail variance 1.02, 0.97, 0.99, 1.01,
+1.00; finest skewness / kurtosis 0.24 / 0.38; members 0.93 to 1.00 sigma
+from the target), and a smaller seam along the polar edges: kurtosis of
+the first row of details 0.34 (0.23 with the 12-face sampler; interior
+0.38), variance at the polar edge 1.00 (0.98).  The equatorial edge rows
+keep about 3 % less variance than the face interiors with both samplers.
+
+### 8.6 nside 2048
+
+Target: the Takahashi r000 zs1 map at nside 2048 copied from hpc to
+garoupe (27 s), gaussianised there (`tools/gaussianize.py`).
+
+- Levels 512, 1024 and 2048 (face-image models, 64-128-128, dropout 0.1,
+  20 000 steps, one T4 each, 1 h 45): best held-out losses 0.881 (level
+  512, step 9 000; training faces 0.885), 0.904 and 0.906 (levels 1024 and
+  2048, end of the run; training faces 0.908 and 0.922).  With 0.8 to 12.6
+  M parent pixels per level the held-out loss follows the training loss:
+  no memorisation at these levels.
+- Coarse STL ensemble (garoupe, 3 T4s): 8 members at nside 64 on the
+  target averaged to nside 64 (300 iterations, 3.5 minutes), then at
+  nside 256 from them (300 iterations, 43 minutes); `--scatter-weight 1
+  --level-power-weight 10`.  Every member about 1 sigma from the target,
+  scatter 0.96 to 1.16 times the ergodic variance.
+- Diffusion levels 512 to 2048 on 4 of the members (face tiles with
+  re-oriented halos): 1.1, 3.2 and 11 minutes per member for levels 512,
+  1024 and 2048 on one T4 (15.5 minutes per nside 2048 map).
+- The 4 hybrid maps before minimisation (`evaluate.py`, `seams.py` at
+  nside 2048): coarse levels from STL (detail variance 0.98 to 0.99 at
+  levels 16 to 256), diffused levels over-dispersed (1.18, 1.13 and 1.08
+  at levels 512, 1024 and 2048; `C_l` 7 to 26 % high from `l = 362` to
+  4096), non-Gaussian but a little less than the target (finest-level
+  kurtosis 0.80 against 0.92, level 1024 0.38 against 0.52); no seam at the
+  face edges (variance and kurtosis of the edge rows as in the interiors),
+  the few pixels of the 3-face vertices at 0.72 +- 0.13 of the variance;
+  members independent of each other and of the target.
+- The models themselves are calibrated: conditioned on the target's own
+  parent map (`memorisation.py`, 2 draws), levels 512 and 1024 give a
+  detail variance of 1.01, `r_truth = r_pair` (0.28 and 0.20) on training
+  and held-out faces alike.  The over-dispersion comes from the coarse STL
+  maps, which differ from the true pyramid at nside 256: their level-256
+  details have a kurtosis of 0.31 against 0.61 for the target, and the
+  conditional models answer that with more variance.
+- STL ensemble minimisation at nside 2048 from the 4 hybrid maps on the
+  hpc H200s (`diffusion/hpc_polish.slurm`, the c0ac285 build with MPI and
+  GPU): 35 to 45 s per evaluation of the 4 members on one H200 (the user's
+  QOS allows 2 GPUs, one was taken by another job).
+
+### 8.7 Conclusion of the prototype
 
 On one sky, the conditional diffusion model learns the two finest levels
 of nside 256 (40 000 and 160 000 training parent pixels) well: right
