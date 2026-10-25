@@ -118,12 +118,18 @@ weights are multiplied by B.
 | l 135-172 / 222-284 / 599-767 | 0.85 / 0.80 / 1.26 | 0.84 / 0.80 / 1.24 | 0.89 / 0.85 / 1.09 | 1.02 / 0.86 / 1.00 |
 | per member S1 S2 S3 S4 (sigma) | 1.09 0.99 1.08 1.02 | 0.98 0.91 1.00 0.93 | 0.97 0.88 1.02 0.94 | 0.98 0.90 1.03 0.95 |
 | scatter / ergodic variance, S1-S4 | 1.20 0.95 1.17 1.10 | 1.08 0.87 1.09 1.05 | 1.08 0.80 1.11 1.05 | 1.08 0.82 1.11 1.05 |
+| final maps (after matching), S1-S4 per member, g space | | 1.0-2.1, 1.3-2.8, 3.0-3.4, 1.5-1.9 | | 0.9-1.4, 0.7-1.3, 1.0-1.1, 0.9-1.0 |
+| final maps, S1-S4 per member, kappa space | | 5.3-7.2, 2.9-5.8, 3.1-5.9, 3.2-7.2 | | 0.9-1.5, 1.1-2.3, 1.9-2.8, 2.1-4.0 |
 | var of the levels in g, 8 ... 256 | 0.96-1.04 | 0.96-1.06 | 0.94-1.07 | 0.92-1.07 |
 | kappa S1, S2 of the mean (sigma) | | | 0.08 0.12 | 0.15 0.15 |
 | kurtosis of kappa, levels 32 / 64 (target 50 / 100) | 28 / 95 | 30 / 114 | 42 / 124 | 85 / 248 |
 | s / eval, ranks | 9.4, 170 | 14.6, 40 | 16.9, 72 | 16.6, 72 |
 
 ![ensembles](figures/kappa_cl_ensemble.png)
+
+With `--kappa-weight 0.3` (and the marginal term) the C_l improve a little
+(5.6 % rms, 13.1 % max).  The levels of `g` drift, though: 0.75 at the
+finest, 1.17 at 128.  0.1 is the setting.
 
 Without the marginal term the kappa term reaches its targets (S1, S2 of kappa
 at 0.1 sigma) but the C_l move little.  It gets there by moving values of
