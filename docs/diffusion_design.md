@@ -542,7 +542,51 @@ the first row of details 0.34 (0.23 with the 12-face sampler; interior
 0.38), variance at the polar edge 1.00 (0.98).  The equatorial edge rows
 keep about 3 % less variance than the face interiors with both samplers.
 
-### 8.6 nside 2048
+### 8.6 Sphere-native level 256 against face tiles
+
+The sphere-native denoiser of section 4.1 at level 256 (`runs/sphere256`,
+12 000 steps on garoupe, best held-out loss 0.899 at step 6 000, the face
+model 0.905) replaces the face-tiled level 256 in the same pipeline
+(`ens/b8sphere`): the same 8 coarse members, the same face-tiled level 128
+(the sphere model at level 128 over-fits: best held-out loss 0.918 at step
+1 500, 1.37 at the end), then the same STL ensemble minimisation.  The
+sampler denoises the sky region by region (192 central cells of 64 x 64
+pixels, each with its 2 rings, 2.25 times the sky per evaluation).
+
+| 8 members, level 256 from | detail variance 256 / 128 | finest skew / kurt | STL loss at start, end; below 1 / 0.3 after | equatorial edge rows 0, 1: variance / interior, kurt | polar edge row 0: variance / interior, kurt |
+|---|---|---|---|---|---|
+| target | 1 / 1 | 0.23 / 0.37 | | kurt 0.41, 0.42 | kurt 0.44 |
+| face tiles, before minimisation | 1.00 / 0.95 | 0.24 / 0.35 | 264.3 | 0.97, 0.96; 0.34, 0.27 | 0.95; 0.30 |
+| sphere-native, before minimisation | 1.02 / 0.95 | 0.24 / 0.35 | 186.9 | 0.98, 0.98; 0.39, 0.36 | 0.97; 0.33 |
+| face tiles, minimised | 1.02 / 0.97 | 0.24 / 0.38 | 0.1913; 61 / 155 | 0.97, 0.97; 0.37, 0.30 | 0.95; 0.34 |
+| sphere-native, minimised | 1.03 / 0.96 | 0.24 / 0.37 | 0.1897; 62 / 153 | 0.98, 0.99; 0.40, 0.39 | 0.96; 0.36 |
+
+(Edge rows from `seams.py`: detail variance of the first rows of pixels
+over that of the face interiors, more than 16 pixels from an edge; the
+member-to-member scatter of these ratios is 0.02 to 0.03, so 0.01 on the
+mean of 8.)
+
+- The global statistics are the same: detail variance and moments of every
+  level, `C_l` (within 3 % of each other in every band), STL residuals of
+  the minimised members (0.93 to 1.00 sigma for both) and convergence.
+- The sphere-native samples start closer to the target statistics (STL
+  loss 29 % lower before minimisation), and the equatorial edges are a
+  little better (variance 2 % instead of 3 to 4 % below the interiors,
+  kurtosis of the first two rows 0.36 to 0.39 instead of 0.27 to 0.34):
+  differences of 1 to 2 standard errors, and the level 128 under both runs
+  is still the face-tiled one.
+- Cost: sampling 1 767 s for the 8 members on one T4, against about 340 s
+  with face tiles (578 s measured on a T4 shared with another job) and 73 s
+  with the 12-face network; training 10 times the cost per loss pixel
+  (section 4.1).
+
+The face tiles are therefore kept for production: the remaining seam they
+leave is a few percent of the variance on one or two rows of pixels at
+nside 256 and was not seen at nside 2048 (section 8.7).  The sphere-native
+network is the version to port to the MPI engine, whose blocks are already
+NESTED cells with HEALPix-neighbour halos and the same stencils.
+
+### 8.7 nside 2048
 
 Target: the Takahashi r000 zs1 map at nside 2048 copied from hpc to
 garoupe (27 s), gaussianised there (`tools/gaussianize.py`).
@@ -582,7 +626,7 @@ garoupe (27 s), gaussianised there (`tools/gaussianize.py`).
   GPU): 35 to 45 s per evaluation of the 4 members on one H200 (the user's
   QOS allows 2 GPUs, one was taken by another job).
 
-### 8.7 Conclusion of the prototype
+### 8.8 Conclusion of the prototype
 
 On one sky, the conditional diffusion model learns the two finest levels
 of nside 256 (40 000 and 160 000 training parent pixels) well: right
