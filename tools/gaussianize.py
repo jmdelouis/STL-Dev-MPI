@@ -4,13 +4,17 @@ FOSCAT scat_cov.to_gaussian / from_gaussian).
     python3 tools/gaussianize.py forward IN.npy OUT_gauss.npy TABLE.npz
     python3 tools/gaussianize.py inverse TABLE.npz IN_gauss.npy OUT.npy
     python3 tools/gaussianize.py match TABLE.npz IN.npy OUT.npy
+    python3 tools/gaussianize.py knots TABLE.npz KNOTS.npy [K]
 
 forward: the pixel of rank r (0-based, N pixels) becomes
 norm.ppf((r + 0.5) / N); TABLE.npz keeps the sorted Gaussian values and
 the sorted original values.  inverse: values are clipped to the Gaussian
 range (shrunk by 1e-7 of its width, as FOSCAT) and mapped back with the
 cubic interpolation of (gaussian, original).  The synthesis is run on the
-Gaussian map, then inverted to get the non-Gaussian field.
+Gaussian map, then inverted to get the non-Gaussian field.  knots: K points
+(default 256) of the table, equally spaced in the Gaussian values from the
+first to the last, for `stl-synth --kappa-table` (the K knots then the K
+values, one 1-D array).
 """
 
 import sys
@@ -57,6 +61,15 @@ def match(table, src, dst):
     print(f"{src}: matched to the table histogram, std {y.std():.4e} max {y.max():.4e}")
 
 
+def knots(table, dst, k="256"):
+    t = np.load(table)
+    g_sorted, v_sorted = t["gaussian"], t["values"]
+    g = np.linspace(g_sorted[0], g_sorted[-1], int(k))
+    v = np.interp(g, g_sorted, v_sorted)
+    np.save(dst, np.concatenate([g, v]))
+    print(f"{table}: {g.size} knots in [{g[0]:.3f}, {g[-1]:.3f}], values [{v[0]:.4e}, {v[-1]:.4e}]")
+
+
 if __name__ == "__main__":
     mode, *a = sys.argv[1:]
-    {"forward": forward, "inverse": inverse, "match": match}[mode](*a)
+    {"forward": forward, "inverse": inverse, "match": match, "knots": knots}[mode](*a)

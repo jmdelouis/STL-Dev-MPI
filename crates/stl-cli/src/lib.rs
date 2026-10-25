@@ -16,8 +16,12 @@ use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
 use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
+mod kappa;
 mod level_power;
+mod marginal;
+use kappa::Transform;
 use level_power::LevelPower;
+use marginal::Marginal;
 
 pub const USAGE: &str = "\
 stl-synth --target MAP [options]
@@ -53,6 +57,16 @@ stl-synth --target MAP [options]
   --level-power-weight X adds X / B sum_m sum_n (V_n / V_n(target) - 1)^2, V_n the variance of the
                         details of level n of the 4-children pyramid of the map (finest level down
                         to nside 8): holds the power of every level; default 0
+  --kappa-table KNOTS   adds the statistics of kappa = f(g), f the monotone interpolation of the
+                        knots (g, kappa) of KNOTS.npy (tools/gaussianize.py knots): the term
+                        X sum_i w_i |mean over members of S_i(f(g)) - S_i(f(g_target))|^2, w_i the
+                        ergodic weights of f(g_target); g and kappa standardised by the target
+  --kappa-weight X      factor X of that term (default 0.1; 0 drops it)
+  --kappa-families F    families of that term (default 'mean,var,S1,S2': the power and the l1 norm
+                        of every scale and orientation)
+  --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
+                        distance between the sorted values of every member and of the target: holds
+                        the pixel histogram; default 0
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -101,6 +115,10 @@ pub struct Args {
     pub groups: usize,
     pub scatter_weight: f64,
     pub level_power_weight: f64,
+    pub kappa_table: Option<PathBuf>,
+    pub kappa_weight: f64,
+    pub kappa_families: Vec<Family>,
+    pub marginal_weight: f64,
     pub niter: usize,
     pub history_size: usize,
     pub out: Option<String>,
@@ -131,6 +149,10 @@ impl Args {
             groups: 1,
             scatter_weight: 0.0,
             level_power_weight: 0.0,
+            kappa_table: None,
+            kappa_weight: 0.1,
+            kappa_families: vec![Family::Mean, Family::Var, Family::S1, Family::S2],
+            marginal_weight: 0.0,
             niter: 50,
             history_size: 10,
             out: None,
@@ -192,6 +214,28 @@ impl Args {
                         return Err("--level-power-weight must be finite and >= 0".into());
                     }
                     a.level_power_weight = v;
+                }
+                "--kappa-table" => a.kappa_table = Some(it.next().ok_or("--kappa-table needs a path")?.into()),
+                "--kappa-weight" => {
+                    let v: f64 = it.next().ok_or("--kappa-weight needs a value")?.parse().map_err(|_| "--kappa-weight: not a number")?;
+                    if !(v.is_finite() && v >= 0.0) {
+                        return Err("--kappa-weight must be finite and >= 0".into());
+                    }
+                    a.kappa_weight = v;
+                }
+                "--kappa-families" => {
+                    let v = it.next().ok_or("--kappa-families needs a value")?;
+                    a.kappa_families = v
+                        .split(',')
+                        .map(|f| Family::parse(f.trim()).ok_or(format!("--kappa-families: unknown family '{f}'")))
+                        .collect::<Result<_, _>>()?;
+                }
+                "--marginal-weight" => {
+                    let v: f64 = it.next().ok_or("--marginal-weight needs a value")?.parse().map_err(|_| "--marginal-weight: not a number")?;
+                    if !(v.is_finite() && v >= 0.0) {
+                        return Err("--marginal-weight must be finite and >= 0".into());
+                    }
+                    a.marginal_weight = v;
                 }
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
@@ -424,6 +468,43 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         let levels = LevelPower::levels(nside as usize, s, e, gcomm);
         LevelPower::new(args.level_power_weight, &target, levels, npix, members, gcomm)
     });
+    // Statistics of kappa = f(g) (--kappa-table): own plan, target statistics
+    // (of the transformed target) and ergodic weights, loss on the mean of the members.
+    let kplan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &args.kappa_families);
+    let kdummy = vec![Complex64::new(0.0, 0.0); kplan.len()];
+    let kappa_tf = match &args.kappa_table {
+        Some(p) => Some(Transform::new(&read_map_range(p, 0, map_len(p)?)?, &target, mean, std, npix, gcomm)?),
+        None => None,
+    };
+    let kappa_stats = args.kappa_weight > 0.0;
+    let (kstats, kvar) = match &kappa_tf {
+        Some(tf) if kappa_stats => {
+            #[allow(unused_mut)]
+            let mut probe = Objective::with_partition(&geo, &cfg, &kplan, &kdummy, 1, 1, gcomm, obj.dec.clone(), obj.part.clone());
+            #[cfg(feature = "gpu")]
+            if args.gpu {
+                probe.set_evaluator(gpu::evaluator(args, &geo, &cfg, &kplan, &obj.part, comm.rank(), 1)?.0);
+            }
+            probe.statistics_moments(&tf.apply(&target).0)
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    let krows = kstats.repeat(local_members);
+    let kobj = match &kappa_tf {
+        Some(_) if kappa_stats => {
+            let mut k = Objective::with_partition(&geo, &cfg, &kplan, &krows, local_members, 1, gcomm, obj.dec.clone(), obj.part.clone());
+            #[cfg(feature = "gpu")]
+            if args.gpu {
+                k.set_evaluator(gpu::evaluator(args, &geo, &cfg, &kplan, &obj.part, comm.rank(), local_members)?.0);
+            }
+            k.weights = ergodic_weights(&geo, &kplan, &kvar);
+            k.weights.iter_mut().for_each(|w| *w *= members as f64 * args.kappa_weight);
+            Some(k)
+        }
+        _ => None,
+    };
+    let kens = kobj.as_ref().map(|k| Ensemble { obj: k, cross: cross.as_ref(), members, target: &kstats, scatter: None });
+    let marginal = (args.marginal_weight > 0.0).then(|| Marginal::new(args.marginal_weight, &target, s, npix, members, gcomm));
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -437,7 +518,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 && level_power.is_none() {
+    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
@@ -446,6 +527,18 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 let (l2, g2) = lp.loss_and_grad(p, e - s, gcomm, cross.as_ref());
                 loss += l2;
                 g.iter_mut().zip(&g2).for_each(|(a, b)| *a += b);
+            }
+            if let Some(mg) = &marginal {
+                let (lm, gm) = mg.loss_and_grad(p, e - s, s, gcomm, cross.as_ref());
+                loss += lm;
+                g.iter_mut().zip(&gm).for_each(|(a, b)| *a += b);
+            }
+            if let (Some(tf), Some(ke)) = (&kappa_tf, &kens) {
+                // Statistics of kappa = f(g): cotangent on kappa, chained by f'(g).
+                let (k, dk) = tf.apply(p);
+                let (lk, gk) = ke.loss_and_grad(&k);
+                loss += lk;
+                g.iter_mut().zip(gk.iter().zip(&dk)).for_each(|(a, (b, d))| *a += b * d);
             }
             (loss, g)
         };
@@ -476,7 +569,42 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         Some(lp) => (lp.loss_and_grad(&x, e - s, gcomm, cross.as_ref()).0, lp.ratios(&x, e - s, gcomm, cross.as_ref())),
         None => (0.0, Vec::new()),
     };
-    let final_loss = loss_mean + loss_scatter + loss_levels;
+    // Kappa term: final value and residual of the mean per family (sigma / sqrt(B)).
+    let (loss_kappa, kappa_report) = match (&kappa_tf, &kens) {
+        (Some(tf), Some(ke)) => {
+            let kmean = ke.mean(&ke.obj.statistics(&tf.apply(&x).0));
+            let kloss: f64 = kmean.iter().zip(&kstats).zip(&ke.obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
+            let mut fams = serde_json::Map::new();
+            for fam in &args.kappa_families {
+                let z: Vec<f64> = (0..kplan.len())
+                    .filter(|&i| kplan[i].family == *fam)
+                    .map(|i| {
+                        let sigma = (kvar[i] / geo.pixels(kplan[i].native_dg) as f64).max(1e-300).sqrt();
+                        (kmean[i] - kstats[i]).norm() / sigma * (members as f64).sqrt()
+                    })
+                    .collect();
+                if !z.is_empty() {
+                    let rms = (z.iter().map(|v| v * v).sum::<f64>() / z.len() as f64).sqrt();
+                    fams.insert(fam.name().into(), serde_json::json!({"count": z.len(), "rms_sigma": rms, "max_sigma": z.iter().cloned().fold(0.0, f64::max)}));
+                }
+            }
+            let (km, ks) = tf.kappa_moments();
+            let report = serde_json::json!({
+                "table": args.kappa_table,
+                "weight": args.kappa_weight,
+                "families": args.kappa_families.iter().map(|f| f.name()).collect::<Vec<_>>(),
+                "coefficients": kplan.len(),
+                "kappa_mean": km,
+                "kappa_std": ks,
+                "loss_final_term": kloss,
+                "final_residual_in_ergodic_sigma": fams,
+            });
+            (kloss, report)
+        }
+        _ => (0.0, serde_json::Value::Null),
+    };
+    let loss_marginal = marginal.as_ref().map_or(0.0, |mg| mg.loss_and_grad(&x, e - s, s, gcomm, cross.as_ref()).0);
+    let final_loss = loss_mean + loss_scatter + loss_levels + loss_kappa + loss_marginal;
     let sigma: Vec<f64> = sigma2.iter().map(|v| v.sqrt()).collect();
     // Residual of the mean per family, in units of its ergodic sigma
     // (sigma / sqrt(B): sigma itself for one map).
@@ -631,6 +759,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             "variance_over_target": level_ratios,
             "loss_final_term": loss_levels,
         },
+        "kappa": kappa_report,
+        "marginal": {"weight": args.marginal_weight, "loss_final_term": loss_marginal},
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
         "memory_peak_bytes_per_rank": peaks,

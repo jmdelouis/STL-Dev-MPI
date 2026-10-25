@@ -263,6 +263,10 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--groups G` | 1 | split the ranks into G groups, each holding B / G members (MPI; §5.4) |
 | `--scatter-weight X` | 0 | hold the scatter of the members at the ergodic variance (second moment, §5.4) |
 | `--level-power-weight X` | 0 | hold the variance of the pyramid details of every level at the target's (below) |
+| `--kappa-table KNOTS` | none | add the statistics of `kappa = f(g)`, `f` the monotone interpolation of the gaussianisation table (below) |
+| `--kappa-weight X` | 0.1 | factor on that term (0 drops it) |
+| `--kappa-families F` | `mean,var,S1,S2` | families of that term |
+| `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
@@ -297,6 +301,32 @@ X = 1 every level ends within 0.3 % of the target's (0.997 at the finest),
 S1-S4 unchanged (0.34 - 0.48 sigma), the C_l unchanged (0.94 - 1.07 for
 l >= 8); the missing power was at the pixel scale, above l = 3 nside, which
 the C_l do not see.
+
+**Statistics of kappa.**  With a gaussianised target, the halos are the
+extreme tail of `g`, and the gaussianised statistics barely weigh them.  The
+kappa C_l of the synthesis then come out like those of a Gaussian copula:
+15-20 % low at l 135-284 and 26 % high at l 600-767 for the Takahashi map at
+nside 256.  Two terms fix it:
+
+- `--kappa-table KNOTS` (with the defaults `--kappa-families mean,var,S1,S2
+  --kappa-weight 0.1`) adds the reduced chi^2 of the first-order statistics
+  of `kappa = f(g)`, a mean over its coefficients like the main term.
+  `f` is the monotone cubic interpolation of the gaussianisation table,
+  written by `python tools/gaussianize.py knots table.npz knots.npy` (256
+  knots).  It costs about 1.8 times the evaluation: one more wavelet
+  transform of every level.
+- `--marginal-weight X` adds `X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2`,
+  the squared 1-D Wasserstein distance between the sorted values of every
+  member and of the target.  It holds the pixel histogram of `g`, so that
+  `f(g)` is the map the histogram matching produces.  On its own it also
+  keeps the matching from moving the statistics (S3 of the final map 0.6
+  instead of 3.4 sigma).  X = 1000 per member (X = 1000 B for an ensemble);
+  one sample sort per evaluation.
+
+With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
+over l = 31-767, with every gaussianised family still at 1 sigma per member.
+Details, failed alternatives and open points are in
+[kappa_power_spectrum.md](kappa_power_spectrum.md).
 
 ### 5.2 Outputs
 
