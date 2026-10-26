@@ -2,8 +2,10 @@
 # STL ensemble minimisation at full nside on the hpc GPU nodes, from one
 # initial map per member (the STL + diffusion hybrid maps), one H200 per MPI
 # rank, the members split in groups (one group per rank by default).
-#   sbatch --export=ALL,TARGET=$HOME/diff2048/g2048.npy,INIT='$HOME/diff2048/hybrid_m{m}.npy',B=4,NITER=150,OUT=$HOME/diff2048/polish \
+#   sbatch --export=ALL,TARGET=$SCRATCH/diff2048/g2048.npy,INIT='$SCRATCH/diff2048/hybrid_m{m}.npy',B=4,NITER=150,OUT=$SCRATCH/diff2048/polish \
 #          diffusion/hpc_polish.slurm
+# Keep inputs and outputs on $SCRATCH: every member writes two 0.4 GB maps at
+# nside 2048, and the home (NFS) quota is too small for them.
 # G: the stl-synth build with MPI and GPU (stl-cli --features mpi,gpu) of a
 # commit with --ensemble, --scatter-weight and {m} in --init (c0ac285 or later).
 # 3 cores per rank: the GPU does the work, and the user CPU quota (192 cores,
