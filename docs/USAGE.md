@@ -266,6 +266,10 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--kappa-table KNOTS` | none | add the statistics of `kappa = f(g)`, `f` the monotone interpolation of the gaussianisation table (below) |
 | `--kappa-weight X` | 0.1 | factor on that term (0 drops it) |
 | `--kappa-families F` | `mean,var,S1,S2` | families of that term |
+| `--kappa-s3-weight X` | 0 | add the S3 of `kappa` as a separate reduced chi^2 of factor X |
+| `--kappa-s3-nside A-B` | all | keep only the S3 whose scale `j3` is at the levels of nside A to B |
+| `--kurtosis-weight X` | 0 | hold the kurtosis of the pyramid details of `kappa` (of the map without `--kappa-table`) at the selected levels (below) |
+| `--kurtosis-nside A-B` | all | levels of that term, by nside |
 | `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |

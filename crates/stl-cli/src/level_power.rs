@@ -10,7 +10,7 @@ use stl_mpi::Comm;
 
 /// Details and sum of their squares for `levels` levels of one row (its
 /// length a multiple of 4^levels).
-fn pyramid(row: &[f64], levels: usize) -> Vec<(Vec<f64>, f64)> {
+pub(crate) fn pyramid(row: &[f64], levels: usize) -> Vec<(Vec<f64>, f64)> {
     let mut cur = row.to_vec();
     let mut out = Vec::with_capacity(levels);
     for _ in 0..levels {

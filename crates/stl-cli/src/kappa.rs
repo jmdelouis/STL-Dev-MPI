@@ -159,6 +159,40 @@ mod tests {
         Fixture::open(root.join(index[0]["name"].as_str().unwrap()))
     }
 
+    /// A plan restricted to the S3 of one level (`--kappa-s3-nside`) gives the
+    /// values of those coefficients in the full plan, and the gradient of the
+    /// full plan's loss with zero weights elsewhere.
+    #[test]
+    fn s3_of_one_level_matches_the_full_plan() {
+        let fx = fixture();
+        let (geo, cfg, plan) = (fx.geometry(), fx.config(), fx.plan());
+        let (target_map, initial) = (fx.f64("target_map"), fx.f64("initial_map"));
+        let keep: Vec<usize> = (0..plan.len()).filter(|&i| plan[i].family == stl_core::plan::Family::S3 && plan[i].native_dg == 1).collect();
+        assert!(!keep.is_empty());
+        let sub: Vec<_> = keep.iter().map(|&i| plan[i].clone()).collect();
+        run_ranks(2, |comm| {
+            let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
+            let probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+            let stats = probe.statistics(&probe.slice(&target_map));
+            let mut full = Objective::new(&geo, &cfg, &plan, &stats, 1, 1, comm);
+            full.weights = (0..plan.len()).map(|i| if keep.contains(&i) { 1.0 + 0.1 * i as f64 } else { 0.0 }).collect();
+            let sub_stats: Vec<Complex64> = keep.iter().map(|&i| stats[i]).collect();
+            let mut part = Objective::new(&geo, &cfg, &sub, &sub_stats, 1, 1, comm);
+            part.weights = keep.iter().map(|&i| 1.0 + 0.1 * i as f64).collect();
+            let x = full.slice(&initial);
+            let (vf, vp) = (full.statistics(&x), part.statistics(&x));
+            for (k, &i) in keep.iter().enumerate() {
+                assert!((vf[i] - vp[k]).norm() <= 1e-13 * vf[i].norm().max(1e-300), "coefficient {i}");
+            }
+            let ((lf, gf), (lp, gp)) = (full.loss_and_grad(&x), part.loss_and_grad(&x));
+            assert!((lf - lp).abs() <= 1e-12 * lf.abs());
+            let scale = gf.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            for (a, b) in gf.iter().zip(&gp) {
+                assert!((a - b).abs() <= 1e-12 * scale);
+            }
+        });
+    }
+
     /// Gradient of the kappa term (statistics of two members with the ergodic
     /// weights of the transformed target, chain rule through the table)
     /// against central differences, on 2 ranks.
