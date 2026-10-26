@@ -121,12 +121,53 @@ the coefficient partial sums (chunked tree); block boundaries.
 
 ### 2.7 Memory per rank
 
-Level fields (`B C` rows, `L` orientations, `H_n` held cells of level `n`):
-`H_n (2 B C + 3 B C L + 2 n B C L + B C L)` doubles; decimation rows
-about 200 bytes per held cell; geometry cache within its budget; block
-transients (geometry of one block during its build, second wavelets and
-their cotangents) sized by the block. The device peak is in the report
-(`gpu.memory_peak_bytes_per_rank`, whole device, CUDA context included).
+**One engine per rank.** A `GpuEngine` evaluates any plan and batch on
+its decomposition, and `GpuEvaluator::share` makes evaluators of other
+plans and batches on the same engine. `stl-synth` builds one engine per
+rank, sized for the members of its group, and every objective evaluates
+on it: the target statistics (batch 1), the synthesis, and with
+`--kappa-table` the target statistics and the synthesis term of
+`kappa = f(g)`. They share the decimation rows, the blocks' convolution
+rows, the geometry cache and the level fields: an evaluation (forward
+then gradient) of one objective ends before the next starts, so the
+fields of one are free for the other (a change of batch reallocates
+them). The kappa term therefore costs no device memory, and its sweeps
+reuse the cached geometry.
+
+Level fields (`B` members, `C` channels, `L` orientations, `H_n` held
+cells of level `n`), doubles per held cell of level `n`:
+
+| Field | Doubles | Plans |
+|---|---|---|
+| maps and map cotangents | `2 B C` | all |
+| `z_n` (complex) | `2 B C L` | all |
+| `\|z_n\|`, and the chain of the reverse sweep (transient) | `2 B C L` | with S3 or S4 |
+| stored moduli `m[d][n]` and cotangents `gm[d][n]` | `2 n B C L` | with S3 or S4 |
+
+A plan without S3 or S4 (the default kappa families `mean,var,S1,S2`)
+reads neither `|z_n|` nor the stored moduli: its sweeps neither compute
+them (no modulus decimation chain, no reverse chain) nor allocate them.
+Over the pyramid (`H_n ~ 4^-n H_0`, `sum H_n = 4/3 H_0`, `sum n H_n =
+4/9 H_0`) the full plan needs `8 B C H_0 (8/3 + 56 L / 9)` bytes: 220
+bytes per pixel and member at `L = 4`, 2.8 GB per member at nside 1024,
+11.1 GB at nside 2048 (one rank). The decimation rows and block topology
+add about 200 bytes per held cell (independent of `B`), the transients of
+one block (its geometry while built, second wavelets and their
+cotangents) are sized by the block, which is sized from the free memory.
+The geometry cache then takes 4/5 of what is free after all that
+(`STL_GPU_CACHE_MB` overrides it): the device peak in the report
+(`gpu.memory_peak_bytes_per_rank`, whole device, CUDA context included)
+is mostly the cache, which grows to what is left, and
+`gpu.geometry_cache_used_bytes_per_rank` gives its final size. How many
+members fit is set by the fields and the decimation rows.
+
+Until c15e8ec `--kappa-table` built its own engines (one per objective
+and batch), each sized from the device memory free when it was built,
+before any sweep had allocated anything: the second engine duplicated
+the fields, rows and topology, and the two caches together claimed 8/5
+of the free memory. A 10-member ensemble at nside 1024 on one H200 ran
+out of device memory before its first evaluation unless
+`STL_GPU_CACHE_MB` capped both caches (§5.1).
 
 ## 3. Validation
 
@@ -139,6 +180,7 @@ All tests run on both devices above with identical results.
 | `stats`: device vs CPU engine, same inputs | statistics <= 6e-16, spatial variances <= 3e-15, level-0 gradient <= 9e-13 relative to its maximum |
 | `multirank`: 1, 2, 4 thread ranks sharing a device, small blocks, misaligned ranges (3, 5, 7 ranks), 52 ranks (some without coarse cells) | <= 2.2e-16 from one rank; vs CPU engine <= 4e-17 |
 | `stats`: geometry cache policies (`full`, `transposition`, `none`, small budgets), two evaluations | identical to the bit |
+| `stats`: one engine shared by the full plan and a mean / var / S1 / S2 plan at batches 1 and 2 (target statistics, then alternated evaluations, as `stl-synth --kappa-table`) vs one engine each; the plan without S3 / S4 vs the full plan restricted to it (laptop) | identical to the bit (values, variances, gradients) |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
 | `synthesis`: WebSky kappa nside 64, 20 L-BFGS iterations (25 evaluations), `STL_RANKS` 1, 2, 3 | 25 / 25 loss values identical to STL-Dev at the printed precision, max relative difference 1.5e-12 to 1.8e-11 |
@@ -235,6 +277,33 @@ not an error of the 3-rank path: `mpirun -n 3` and 3 thread ranks give
 the same losses to the bit, and the objective's gradient with 3 ranks
 differs from the CPU by no more than with one (nside 256, three maps:
 loss <= 1e-13, gradient <= 2.1e-12 relative, `objective_gradient_rank_counts`).
+
+### 5.1 Ensembles with the kappa term (`--kappa-table`)
+
+One engine per rank for all the objectives (§2.7) against c15e8ec (one
+engine per objective). Laptop (RTX A1000, 6 GB): nside 128 test map,
+`L = 4`, `J = 5`, 2 members, `--weights ergodic --scatter-weight 1
+--level-power-weight 10 --marginal-weight 100 --kappa-table` (41 knots,
+`kappa = exp(0.9 g) - 1 + 0.05 g`), `--gpu-block-rows 30000`, 4 L-BFGS
+iterations (5 evaluations). With two ranks on the one device both builds
+cap the cache (each rank would size it from the same free memory); the
+peak is then the whole device's.
+
+| Build | Ranks | `STL_GPU_CACHE_MB` | s / evaluation | setup s | peak MB | cache |
+|---|---|---|---|---|---|---|
+| c15e8ec | 1 | unset | out of device memory | | | |
+| c15e8ec | 1 | 500 (per engine) | 1.92 | 8.4 | 2810 | transposition |
+| shared engine | 1 | unset | 0.73 | 3.7 | 4090 | full, 3.0 GB |
+| c15e8ec | 2 | 500 | 1.80 | 7.8 | 2426 | transposition |
+| shared engine | 2 | 500 | 1.63 | 3.5 | 1914 | transposition |
+| c15e8ec | 2, `--groups 2` | 500 | 2.88 | 8.5 | 2682 | transposition |
+| shared engine | 2, `--groups 2` | 500 | 2.72 | 4.4 | 2042 | transposition |
+
+The loss histories, the kappa residuals of the report and the output maps
+of the shared engine are those of c15e8ec to the bit in the three
+configurations (fixed device blocks; with blocks sized from the device
+memory the block boundaries, hence the last bits, depend on the memory
+free at start-up in both builds).
 
 ## 6. Limitations and next steps
 
