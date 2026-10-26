@@ -18,13 +18,23 @@
 //! coefficient partial sums by chunks of `CHUNK` pixels in a fixed tree,
 //! chunks, blocks and levels in increasing order; cotangents of one target
 //! accumulated in plan order.
+//!
+//! An engine evaluates any plan and batch on its decomposition: several
+//! [`GpuEvaluator`]s (the target statistics, the synthesis, the statistics
+//! of a transformed map) share one engine, hence its topology, decimation
+//! rows, geometry cache and level fields.  A plan without S3 or S4 reads
+//! neither `|z_n|` nor the stored moduli: they are neither computed nor
+//! allocated for it.
 
 use crate::device::{Arg, Gpu, NULL};
 use crate::geometry::{DeviceGeometry, Grid, Spec};
 use crate::topology::{HostCsr, Topology};
 use cudarc::driver::{CudaSlice, DeviceRepr};
 use num_complex::Complex64;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use stl_core::engine::{EngineConfig, Evaluator, Exchange, Partition};
@@ -213,16 +223,19 @@ pub struct GpuEngine<'a> {
     dmap: CudaSlice<i32>,
     /// `maps[n]` `[B C, |layout n|]`.
     pub maps: Vec<CudaSlice<f64>>,
-    /// `m[d][n]` `[B C L, |layout n|]`.
+    /// `m[d][n]` `[B C L, |layout n|]` (allocated by the first plan with S3 or S4).
     pub m: BTreeMap<(usize, usize), CudaSlice<f64>>,
-    /// `|z_n|` `[B C L, |layout n|]` and `z_n` `[B C L, 2, |layout n|]` on the
-    /// blocks' convolution rows (and halo for `|z_n|`).
+    /// `|z_n|` `[B C L, |layout n|]` (plans with S3 or S4) and `z_n`
+    /// `[B C L, 2, |layout n|]` on the blocks' convolution rows (and halo
+    /// for `|z_n|`).
     absz: Vec<CudaSlice<f64>>,
     z: Vec<CudaSlice<f64>>,
     pub timers: BTreeMap<&'static str, f64>,
     block_rows: usize,
     /// Largest device memory in use seen at the phase ends (whole device).
     peak_used: usize,
+    /// The evaluator whose forward sweep the fields hold (`GpuEvaluator::id`).
+    holder: usize,
 }
 
 impl<'a> GpuEngine<'a> {
@@ -317,6 +330,21 @@ impl<'a> GpuEngine<'a> {
             timers,
             block_rows,
             peak_used: 0,
+            holder: 0,
+        }
+    }
+
+    /// Evaluates `batch` maps from now on: the level fields are reallocated
+    /// at the next sweep if the batch changes.  The block size and the
+    /// cache budget stay those of the batch given to [`new`](Self::new),
+    /// which should be the largest.
+    pub fn set_batch(&mut self, batch: usize) {
+        if batch != self.batch {
+            self.batch = batch;
+            self.maps.clear();
+            self.z.clear();
+            self.absz.clear();
+            self.m.clear();
         }
     }
 
@@ -476,6 +504,11 @@ impl<'a> GpuEngine<'a> {
         g
     }
 
+    /// Whether the plan reads `|z_n|` or the stored moduli (S3, S4).
+    fn needs_moduli(plan: &[Coefficient]) -> bool {
+        plan.iter().any(|c| matches!(c.family, Family::S3 | Family::S4))
+    }
+
     /// Levels `d` of the second wavelets read by the coefficients `idx`.
     fn branch_levels(&self, plan: &[Coefficient], idx: &[usize]) -> BTreeSet<usize> {
         let dg = &self.cfg.j_to_dg;
@@ -578,18 +611,22 @@ impl<'a> GpuEngine<'a> {
 
     /// Coefficient values `[B, len(plan)]` (summed over the processes) and,
     /// with `moments`, the spatial variance of their terms; requires
-    /// [`load`](Self::load).  Fills `z`, `|z|` and the stored moduli.
+    /// [`load`](Self::load).  Fills `z` and, for a plan with S3 or S4, `|z|`
+    /// and the stored moduli.
     pub fn forward(&mut self, ex: &dyn Exchange, plan: &[Coefficient], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
         let started = Instant::now();
         let levels = self.levels();
         let (bc, l) = (self.batch * self.channels, self.geo.l);
         let rows = bc * l;
         let groups = Self::groups(plan);
+        let moduli = Self::needs_moduli(plan);
         let mut values = vec![Complex64::new(0.0, 0.0); self.batch * plan.len()];
         let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
         // Level fields.
         if self.z.len() != levels {
             self.z = (0..levels).map(|n| self.gpu.zeros::<f64>(rows * 2 * self.held(n))).collect();
+        }
+        if moduli && self.absz.len() != levels {
             self.absz = (0..levels).map(|n| self.gpu.zeros::<f64>(rows * self.held(n))).collect();
             for d in 0..levels {
                 for n in d + 1..levels {
@@ -619,19 +656,21 @@ impl<'a> GpuEngine<'a> {
                     self.gpu.a(&self.z[n]),
                     ln,
                 );
-                self.gpu.launch1(
-                    "modulus_at",
-                    na1 * rows,
-                    &[
-                        self.gpu.a(&self.z[n]),
-                        ln.into(),
-                        self.gpu.a(&self.a1_pos[n][b]),
-                        na1.into(),
-                        (rows as i32).into(),
-                        self.gpu.a(&self.absz[n]),
-                        ln.into(),
-                    ],
-                );
+                if moduli {
+                    self.gpu.launch1(
+                        "modulus_at",
+                        na1 * rows,
+                        &[
+                            self.gpu.a(&self.z[n]),
+                            ln.into(),
+                            self.gpu.a(&self.a1_pos[n][b]),
+                            na1.into(),
+                            (rows as i32).into(),
+                            self.gpu.a(&self.absz[n]),
+                            ln.into(),
+                        ],
+                    );
+                }
                 let branch = self.branches(n, b, &geom, &which);
                 self.tick("gpu_forward_conv", t);
                 let t = Instant::now();
@@ -669,6 +708,9 @@ impl<'a> GpuEngine<'a> {
             }
             // The moduli of level n are complete: halo, then the decimation
             // chain to every coarser level.
+            if !moduli {
+                continue;
+            }
             let t = Instant::now();
             let mut a = std::mem::replace(&mut self.absz[n], self.gpu.zeros::<f64>(0));
             self.halo(ex, n, &mut a, rows);
@@ -745,11 +787,13 @@ impl<'a> GpuEngine<'a> {
         let zero = Complex64::new(0.0, 0.0);
         let active: Vec<bool> = (0..plan.len()).map(|i| (0..self.batch).any(|b| gradient[b * plan.len() + i] != zero)).collect();
         let groups = Self::groups(plan);
+        let moduli = Self::needs_moduli(plan);
         let levels = self.levels();
         let (bc, l) = (self.batch * self.channels, self.geo.l);
         let rows = bc * l;
+        // Stored-moduli cotangents (none without S3 / S4: the chain is zero).
         let mut gm: BTreeMap<(usize, usize), CudaSlice<f64>> = BTreeMap::new();
-        for d in 0..levels {
+        for d in 0..if moduli { levels } else { 0 } {
             for n in d + 1..levels {
                 gm.insert((d, n), self.gpu.zeros::<f64>(rows * self.held(n)));
             }
@@ -758,7 +802,7 @@ impl<'a> GpuEngine<'a> {
         for n in (0..levels).rev() {
             let ln = self.held(n);
             let t = Instant::now();
-            let chain = self.chain(ex, n, &gm);
+            let chain = if moduli { self.chain(ex, n, &gm) } else { None };
             self.tick("gpu_reverse_chain", t);
             let idx: Vec<usize> = groups.get(&n).map(|v| v.iter().copied().filter(|&i| active[i]).collect()).unwrap_or_default();
             let which = self.branch_levels(plan, &idx);
@@ -961,7 +1005,7 @@ impl<'a> GpuEngine<'a> {
                 self.put_geometry(n, b, geom);
             }
             let t = Instant::now();
-            for d in 0..n {
+            for d in 0..if moduli { n } else { 0 } {
                 let mut f = gm.remove(&(d, n)).unwrap();
                 self.reduce_ghosts(ex, n, &mut f, rows);
                 self.halo(ex, n, &mut f, rows);
@@ -1063,39 +1107,68 @@ impl<'a> GpuEngine<'a> {
     }
 }
 
-/// [`Evaluator`] on a device: the same objective as the CPU sweeps.
+/// Identifiers of the evaluators (0: none).
+static EVALUATORS: AtomicUsize = AtomicUsize::new(1);
+
+/// [`Evaluator`] on a device: the same objective as the CPU sweeps, for one
+/// plan and batch.  Evaluators made by [`share`](Self::share) use the same
+/// engine: an evaluation (forward then gradient) of one must not be
+/// interleaved with a forward of another, which the objectives never do.
 pub struct GpuEvaluator<'a> {
-    pub engine: GpuEngine<'a>,
+    engine: Rc<RefCell<GpuEngine<'a>>>,
     plan: Vec<Coefficient>,
+    batch: usize,
+    id: usize,
     reported: BTreeMap<&'static str, f64>,
 }
 
 impl<'a> GpuEvaluator<'a> {
+    /// `plan` on `engine` at the engine's batch.
     pub fn new(engine: GpuEngine<'a>, plan: &[Coefficient]) -> Self {
-        GpuEvaluator { engine, plan: plan.to_vec(), reported: BTreeMap::new() }
+        let batch = engine.batch;
+        Self::on(Rc::new(RefCell::new(engine)), plan, batch)
+    }
+
+    fn on(engine: Rc<RefCell<GpuEngine<'a>>>, plan: &[Coefficient], batch: usize) -> Self {
+        let id = EVALUATORS.fetch_add(1, Ordering::Relaxed);
+        GpuEvaluator { engine, plan: plan.to_vec(), batch, id, reported: BTreeMap::new() }
+    }
+
+    /// `plan` at `batch` maps on the same engine (its topology, geometry
+    /// cache, decimation rows and level fields): no device memory beyond
+    /// the fields of the larger batch and the moduli of a plan with S3 or
+    /// S4.
+    pub fn share(&self, plan: &[Coefficient], batch: usize) -> Self {
+        Self::on(self.engine.clone(), plan, batch)
+    }
+
+    /// The engine (shared with the other evaluators made by [`share`](Self::share)).
+    pub fn engine(&self) -> std::cell::Ref<'_, GpuEngine<'a>> {
+        self.engine.borrow()
     }
 }
 
 impl Evaluator for GpuEvaluator<'_> {
     fn forward(&mut self, ex: &dyn Exchange, x: &[f64], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
-        self.engine.load(ex, x);
-        let plan = std::mem::take(&mut self.plan);
-        let out = self.engine.forward(ex, &plan, moments);
-        self.plan = plan;
-        out
+        let mut e = self.engine.borrow_mut();
+        e.set_batch(self.batch);
+        e.holder = self.id;
+        e.load(ex, x);
+        e.forward(ex, &self.plan, moments)
     }
 
     fn gradient(&mut self, ex: &dyn Exchange, cotangent: &[Complex64]) -> Vec<f64> {
-        let plan = std::mem::take(&mut self.plan);
-        let mg = self.engine.reverse(ex, &plan, cotangent);
-        self.plan = plan;
-        let g0 = self.engine.analysis_vjp(ex, mg);
-        self.engine.gpu.download(&g0)
+        let mut e = self.engine.borrow_mut();
+        assert_eq!(e.holder, self.id, "gradient without the forward sweep of this evaluator");
+        let mg = e.reverse(ex, &self.plan, cotangent);
+        let g0 = e.analysis_vjp(ex, mg);
+        e.gpu.download(&g0)
     }
 
+    /// The engine's phases (of every evaluator sharing it).
     fn take_timers(&mut self) -> Vec<(&'static str, f64)> {
         let mut out = Vec::new();
-        for (&k, &v) in &self.engine.timers {
+        for (&k, &v) in &self.engine.borrow().timers {
             let before = self.reported.insert(k, v).unwrap_or(0.0);
             out.push((k, v - before));
         }
@@ -1103,6 +1176,6 @@ impl Evaluator for GpuEvaluator<'_> {
     }
 
     fn device_memory(&self) -> Option<(usize, usize)> {
-        Some(self.engine.device_memory())
+        Some(self.engine.borrow().device_memory())
     }
 }

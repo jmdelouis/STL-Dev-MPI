@@ -176,3 +176,85 @@ fn device_matches_cpu_engine() {
         assert!(ev <= 1e-13 && evar <= 1e-12 && eg <= 1e-12, "{}", case.name());
     }
 }
+
+/// One engine shared by several plans and batches (target statistics at
+/// batch 1, the synthesis at batch 2, the mean / var / S1 / S2 statistics of
+/// a transformed map, as `stl-synth --kappa-table`) gives, to the bit, what
+/// separate engines give; the plan without S3 / S4 (no moduli computed)
+/// gives the values and gradient of the full plan restricted to it.
+#[test]
+fn shared_engine_matches_separate_engines() {
+    use stl_core::engine::Evaluator;
+    use stl_gpu::GpuEvaluator;
+    let Some(gpu) = gpu() else { return };
+    let case = cases("stats", "stats").into_iter().find(|c| c.name().contains("n32_J4_L4_k5_C1")).unwrap();
+    let s = setup(&case);
+    let kplan = build_plan(case.int("J") as usize, s.geo.l, &s.cfg.j_to_dg, s.channels, None, &Family::ALL[..4]);
+    let n0 = s.channels * s.geo.pixels(0);
+    let single = case.f64("map0")[..n0].to_vec();
+    let kappa = |x: &[f64]| x.iter().map(|v| (1.5 * v).exp() - 1.0).collect::<Vec<f64>>();
+    let pair = |a: &[f64], b: &[f64]| [a, b].concat();
+    let maps = [pair(&single, &single.iter().map(|v| v.tanh()).collect::<Vec<_>>()), pair(&single.iter().map(|v| -0.5 * v).collect::<Vec<_>>(), &single)];
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut cotangent = |n: usize| -> Vec<Complex64> {
+        (0..n)
+            .map(|_| {
+                let mut u = || {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+                };
+                Complex64::new(u(), u())
+            })
+            .collect()
+    };
+    let (g_full, g_kappa) = (cotangent(2 * s.plan.len()), cotangent(2 * kplan.len()));
+    let opts = GpuOptions { block_rows: 1500, ..Default::default() };
+    let engine = |batch: usize| {
+        let part = Partition::serial(&s.geo, s.cfg.levels());
+        GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, batch, s.channels, &opts)
+    };
+    type Out = (Vec<Complex64>, Vec<f64>, Vec<f64>);
+    let eval = |ev: &mut GpuEvaluator, x: &[f64], g: &[Complex64]| -> Out {
+        let (v, var) = ev.forward(&Serial, x, true);
+        (v, var, ev.gradient(&Serial, g))
+    };
+    let probes = |p: &mut GpuEvaluator, k: &mut GpuEvaluator| (p.forward(&Serial, &single, true), k.forward(&Serial, &kappa(&single), true));
+    let run = |main: &mut GpuEvaluator, k: &mut GpuEvaluator| -> Vec<Out> {
+        let mut out = Vec::new();
+        for x in &maps {
+            out.push(eval(main, x, &g_full));
+            out.push(eval(k, &kappa(x), &g_kappa));
+        }
+        out
+    };
+    let separate = {
+        let probe = probes(&mut GpuEvaluator::new(engine(1), &s.plan), &mut GpuEvaluator::new(engine(1), &kplan));
+        (probe, run(&mut GpuEvaluator::new(engine(2), &s.plan), &mut GpuEvaluator::new(engine(2), &kplan)))
+    };
+    let shared = {
+        let main = GpuEvaluator::new(engine(2), &s.plan);
+        let probe = probes(&mut main.share(&s.plan, 1), &mut main.share(&kplan, 1));
+        (probe, run(&mut main.share(&s.plan, 2), &mut main.share(&kplan, 2)))
+    };
+    assert!(shared == separate, "shared engine differs from separate engines");
+    // The kappa plan against the full plan restricted to it (cotangent zero elsewhere).
+    let at: Vec<usize> = kplan.iter().map(|c| s.plan.iter().position(|p| p == c).unwrap()).collect();
+    let mut g_embedded = vec![Complex64::new(0.0, 0.0); 2 * s.plan.len()];
+    for b in 0..2 {
+        for (k, &i) in at.iter().enumerate() {
+            g_embedded[b * s.plan.len() + i] = g_kappa[b * kplan.len() + k];
+        }
+    }
+    let x = kappa(&maps[0]);
+    let (vf, varf, gf) = eval(&mut GpuEvaluator::new(engine(2), &s.plan), &x, &g_embedded);
+    let (vk, vark, gk) = &separate.1[1];
+    for b in 0..2 {
+        for (k, &i) in at.iter().enumerate() {
+            assert!(vk[b * kplan.len() + k] == vf[b * s.plan.len() + i], "value of {:?}", kplan[k]);
+            assert!(vark[b * kplan.len() + k] == varf[b * s.plan.len() + i], "variance of {:?}", kplan[k]);
+        }
+    }
+    assert!(*gk == gf, "gradient of the plan without moduli differs from the full plan's");
+}
