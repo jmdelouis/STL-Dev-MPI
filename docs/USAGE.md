@@ -329,6 +329,21 @@ nside 256.  Two terms fix it:
 
 With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
 over l = 31-767, with every gaussianised family still at 1 sigma per member.
+
+Those two terms leave the tails of the kappa details too heavy at
+intermediate scales: in that ensemble the excess kurtosis of the pyramid
+details is 3 times the target's at nside 64 and 2.3 times at 32.
+
+- `--kurtosis-weight X --kurtosis-nside A-B` adds
+  `X / B sum_m sum_n (K_n / K_n(target) - 1)^2`, where `K_n` is the
+  kurtosis of the details of level n of `kappa = f(g)` (of the map itself
+  without `--kappa-table`), for the levels of nside A to B.  Use X = 0.1 per
+  member (0.1 B) on `32-NSIDE`.  Every level then ends within 8 % of the
+  target's, the statistics do not move, and the cost is +3 %.
+- `--kappa-s3-weight X --kappa-s3-nside A-B` adds the S3 of kappa (at the
+  levels of `j3` in the range) as a separate reduced chi^2.  It does not
+  hold the kurtosis.
+
 Details, failed alternatives and open points are in
 [kappa_power_spectrum.md](kappa_power_spectrum.md).
 
