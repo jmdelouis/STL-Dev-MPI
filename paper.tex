@@ -205,7 +205,7 @@ An alternative decomposition, on the branch \texttt{m8-overlap}, trades computat
 
 \subsection{Performance}
 
-Table~\ref{tab:cpu} and Fig.~\ref{fig:scaling} give the time of one evaluation (statistics and gradient) on three clusters: Datarmor (Ifremer; $2\times$ Xeon E5-2680 v4 per node, Intel MPI), the hpc cluster ($2\times$ AMD EPYC 9655 per node, OpenMPI 5) and Ir\`ene Rome (TGCC; AMD EPYC 7H12, OpenMPI 4.1). At $\nside=64$ the time drops by 10 at 28 ranks on Datarmor and by 11.5 at 128 ranks on hpc, where it saturates (a rank owns 384 pixels of level 0 at 128 ranks). At $\nside=1024$ the efficiency is 75\% from 24 to 192 ranks on one hpc node, and spreading the 192 ranks over 4 nodes costs 5\%; on Ir\`ene it is 85\% from 128 to 512 ranks. $L=4$ costs 1.3 to 1.5 times $L=2$ (12.8\,s per evaluation on 512 Ir\`ene ranks at $\nside=1024$). The state per rank (maps, stored moduli, cotangents, L-BFGS history) shrinks as $1/P$: 123\,MB at 24 ranks, 17\,MB at 192 for $\nside=1024$, $L=2$. What remains is the transients of one block (80--160\,MB for blocks of 16\,384 pixels, halved with blocks of 4096) and the MPI runtime (20--30\,MB per rank for Intel MPI, 200--350\,MB for OpenMPI~5). For comparison (on another machine), STL-Dev on the $\nside=64$ case takes 12.6 to 18\,s per evaluation on 4 CPU threads with a peak of 1.9\,GB, against 8.1\,s and 103\,MB for one STL-Dev-MPI rank on Datarmor.
+Table~\ref{tab:cpu} and Fig.~\ref{fig:scaling} give the time of one evaluation (statistics and gradient) on three clusters: Datarmor (Ifremer; $2\times$ Xeon E5-2680 v4 per node, Intel MPI), the hpc cluster ($2\times$ AMD EPYC 9655 per node, OpenMPI 5) and Ir\`ene Rome (TGCC; AMD EPYC 7H12, OpenMPI 4.1). At $\nside=64$ the time drops by 10 at 28 ranks on Datarmor and by 11.5 at 128 ranks on hpc, where it saturates (a rank owns 384 pixels of level 0 at 128 ranks). At $\nside=1024$ the efficiency is 75\% from 24 to 192 ranks on one hpc node, and spreading the 192 ranks over 4 nodes costs 5\%; on Ir\`ene it is 85\% from 128 to 512 ranks. $L=4$ costs 1.3 to 1.5 times $L=2$ (12.8\,s per evaluation on 512 Ir\`ene ranks at $\nside=1024$, 33.1\,s on 160 ranks). Ensembles add the members' work and one exchange of partial sums between groups: a production ensemble of 10 maps at $\nside=1024$, $L=4$, with all the terms of Sect.~\ref{sec:kappa}, runs at 128.4\,s per evaluation (all members) on 640 Ir\`ene cores in 10 groups of 64; the same ensemble without the $\kappa$ terms ran at 149\,s on 160 hpc cores in 10 groups of 16. The state per rank (maps, stored moduli, cotangents, L-BFGS history) shrinks as $1/P$: 123\,MB at 24 ranks, 17\,MB at 192 for $\nside=1024$, $L=2$. What remains is the transients of one block (80--160\,MB for blocks of 16\,384 pixels, halved with blocks of 4096) and the MPI runtime (20--30\,MB per rank for Intel MPI, 200--350\,MB for OpenMPI~5). For comparison (on another machine), STL-Dev on the $\nside=64$ case takes 12.6 to 18\,s per evaluation on 4 CPU threads with a peak of 1.9\,GB, against 8.1\,s and 103\,MB for one STL-Dev-MPI rank on Datarmor.
 
 \begin{figure*}
 \centering
@@ -232,6 +232,7 @@ $\nside$ & $L$ & Ranks & Machine & s / eval. \\
 1024 & 2 & 128 & Ir\`ene Rome & 30.2 \\
 1024 & 2 & 512 & Ir\`ene Rome & 8.9 \\
 1024 & 4 & 512 & Ir\`ene Rome & 12.8 \\
+1024 & 4 & 160 & \todo{machine} & 33.1 \\
 \hline
 \end{tabular}
 \end{table}
@@ -248,7 +249,7 @@ The GPU engine runs the same sweeps on one CUDA device per MPI rank, with the CP
 
 \emph{One engine per rank.} A synthesis evaluates several objectives on the same decomposition: the target statistics, the synthesis itself and, for weak lensing (Sect.~\ref{sec:kappa}), the statistics of $\kappa=f(g)$. One engine per rank is shared by all of them (topology, decimation rows, geometry cache and level fields), since an evaluation of one objective ends before the next starts. A plan without $S_3$ or $S_4$ neither computes nor allocates the moduli, the stored moduli and their chains. The level fields of the full plan then take $8BCH_0(8/3 + 56L/9)$ bytes for $H_0$ cells held at level 0 and $B$ members, and the geometry cache takes most of what remains. Before this change, a 10-member ensemble at $\nside=1024$ with the $\kappa$ term did not fit on one 141\,GB H200 without capping the geometry caches; on a 6\,GB laptop GPU, a 2-member ensemble at $\nside=128$ with the $\kappa$ term, which needed such a cap, now runs 2.6 times faster per evaluation, with identical losses.
 
-\emph{Performance} (Table~\ref{tab:gpu}). On the Tesla T4, whose double-precision throughput is 1/32 of its single precision, three devices take 13.3\,s per evaluation at $\nside=1024$, $L=4$, and 114\,s at 2048, where the geometry no longer fits and is rebuilt at each sweep; three T4s are twice as fast as a 192-core EPYC node at $\nside=1024$, $L=2$. The scaling from 1 to 3 T4s is superlinear while the geometry cache covers more of each rank's rows. On H200 GPUs, an ensemble of 10 syntheses at $\nside=1024$ runs on a single device, and a single map at $\nside=4096$ ($2\times10^8$ pixels, $J=11$) on two.
+\emph{Performance} (Table~\ref{tab:gpu}). On the Tesla T4, whose double-precision throughput is 1/32 of its single precision, three devices take 13.3\,s per evaluation at $\nside=1024$, $L=4$, and 114\,s at 2048, where the geometry no longer fits and is rebuilt at each sweep; three T4s are twice as fast as a 192-core EPYC node at $\nside=1024$, $L=2$. The scaling from 1 to 3 T4s is superlinear while the geometry cache covers more of each rank's rows. On H200 GPUs, an ensemble of 10 syntheses at $\nside=1024$ runs on a single device, and a single map at $\nside=4096$ ($2\times10^8$ pixels, $J=11$) takes about 325\,s per evaluation on one device and 67.9\,s on two, a superlinear gain as on the T4s, where it comes from the geometry cache covering more of each rank's rows. The same $\nside=4096$ synthesis runs on 16 V100s with 16\,GB each (25.2\,s per evaluation, 13.9\,GB per device): small devices are usable as long as there are enough of them. On Ir\`ene, a node of 4 V100s is worth about 1024 AMD Rome cores (23.4 against 28.8\,s per evaluation for the same synthesis at $\nside=2048$).
 
 \begin{table}
 \caption{Seconds per evaluation on GPUs ($L=4$, kernel 5, double precision). $B$: maps synthesised together; ``mem.'': device memory peak per GPU, cache included.}
@@ -267,11 +268,12 @@ $\nside$ & $B$ & GPUs & s / eval. & mem.\ (GB) \\
 512 & 10$^a$ & 2 T4 & 50.6 & 13.3 \\
 1024 & 10$^a$ & 1 H200 & 54.3 & 98 \\
 2048 & 5$^a$ & 1 H200 & 157 & 139 \\
-4096$^b$ & 1 & 2 H200 & 68--69 & 61 \\
-2048 & \todo{} & V100 & \todo{} & \todo{} \\
+4096$^b$ & 1 & 1 H200 & $\sim$325 & -- \\
+4096$^b$ & 1 & 2 H200 & 67.9 & 124 \\
+4096$^b$ & 1 & 16 V100 & 25.2 & 13.9 \\
 \hline
 \end{tabular}
-\tablefoot{$^a$ Ensembles with the $\kappa$ terms of Sect.~\ref{sec:kappa}. $^b$ Synthesis of the $\nside=2048$ convergence map at twice its resolution (57\,GiB per GPU).}
+\tablefoot{$^a$ Ensembles with the $\kappa$ terms of Sect.~\ref{sec:kappa}. $^b$ Synthesis of the $\nside=2048$ convergence map at twice its resolution ($J=11$, 19\,450 coefficients); the H200 memory is mostly geometry cache, which fills the device. T4: garoupe; H200: hpc cluster; V100: Ir\`ene (4 nodes of 4 V100 16\,GB, job 6048940).}
 \end{table}
 
 %======================================================================
@@ -384,6 +386,7 @@ Figure~\ref{fig:maps} shows the target, another realisation and two members; Fig
 \emph{Peaks and PDF} (Fig.~\ref{fig:peaks}). The counts of peaks above 3, 5 and $10\sigma$ are within $1\sigma$ with the $\kappa$ terms, against $+4\sigma$ (above $3\sigma$) without. The histograms of peak heights at $\nside/4$ show the $\kappa$-term ensemble with 20--30\% too many peaks between 3 and 10$\sigma$ at that resolution. % NUM2048
 
 \emph{Minkowski functionals} (Fig.~\ref{fig:minkowski}, Appendix~\ref{app:minkowski}) are the most demanding test: none of the terms of the loss constrains them directly. The members deviate from r000 by 2.1--2.5$\sigma$ rms over the thresholds $-2\le\nu\le5$ for the map smoothed over 4 pixels (13.7\,arcmin), and by 1.1--2.5$\sigma$ for a 30\,arcmin smoothing, with the largest deviations at $\nu\simeq1$--3 for $V_1$ and $V_2$, i.e. in the connectivity of the moderately high excursion sets. % NUM2048
+Per pyramid level (Table~\ref{tab:mf_levels_n\nsidefig} and Fig.~\ref{fig:mf_levels}: maps degraded by 4-children means, no smoothing), the reference is the deviation of the realizations r001--r009 from r000, a median $|z|$ of 0.8 to 2.0 and a maximum of 3.2 to 3.8 (r000 itself sits 1.5--2$\sigma$ from the mean of the realizations in $V_0$ at the levels 128 to 512). At level 64 the members' median $|z|$ (0.9--1.5) is that of the realizations, apart from a few thresholds in the low tail. At the levels 256 and 512 it is 3.0--3.9, with systematic offsets of 3--7$\sigma$ in $V_1$ and $V_2$ for $0\lesssim\nu\lesssim3$, the largest deviations being at $\nu\lesssim0$ (the troughs). At the native level the members are tens to hundreds of $\sigma$ off, the trace of the deficit of the finest gaussianised level. % NUM2048
 
 \begin{figure*}
 \centering
@@ -422,6 +425,15 @@ Figure~\ref{fig:maps} shows the target, another realisation and two members; Fig
 \end{figure*}
 
 \tabfile{figures/table_zscores_n\nsidefig.tex}
+
+\begin{figure*}
+\centering
+\figfile{figures/mf_levels_n\nsidefig.pdf}{0.8\textwidth}
+\caption{Minkowski functionals of $\kappa$ degraded to each level of the pyramid (means of 4 children, no smoothing): deviation from r000 in units of the standard deviation of the 10 realizations. Grey: r001--r009; colours: median and range of the members.}
+\label{fig:mf_levels}
+\end{figure*}
+
+\tabfile{figures/mf_levels_n\nsidefig.tex}
 
 %======================================================================
 \section{Discussion and outlook}
