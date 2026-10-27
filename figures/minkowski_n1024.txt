@@ -1,0 +1,13 @@
+nside 1024: Minkowski functionals, members' median deviation from r000 in sigma of the realizations, rms over -2 <= nu <= 5
+fwhm 13.74' V0 no kappa terms: rms 1.68, max |median| 2.94
+fwhm 13.74' V0 kappa terms: rms 2.09, max |median| 3.22
+fwhm 13.74' V1 no kappa terms: rms 1.17, max |median| 2.43
+fwhm 13.74' V1 kappa terms: rms 2.23, max |median| 3.50
+fwhm 13.74' V2 no kappa terms: rms 3.51, max |median| 6.71
+fwhm 13.74' V2 kappa terms: rms 2.53, max |median| 6.67
+fwhm 30' V0 no kappa terms: rms 2.00, max |median| 2.99
+fwhm 30' V0 kappa terms: rms 2.50, max |median| 4.70
+fwhm 30' V1 no kappa terms: rms 1.35, max |median| 2.29
+fwhm 30' V1 kappa terms: rms 1.72, max |median| 2.85
+fwhm 30' V2 no kappa terms: rms 1.35, max |median| 3.42
+fwhm 30' V2 kappa terms: rms 1.10, max |median| 2.03
