@@ -397,6 +397,42 @@ Cost / evaluation & 1 & 1.8 & 1.85 \\
 \label{fig:kurtosis256}
 \end{figure}
 
+\subsection{A term on the Minkowski functionals of the levels (preliminary)}
+\label{sec:mink_term}
+
+None of the terms above constrains the topology of the excursion sets, and the Minkowski functionals of the ensembles deviate from the target at the intermediate levels (Sect.~\ref{sec:experiment}). A further term holds them level by level:
+\begin{equation}
+\mathcal{L}_M = \frac{w_M}{B}\sum_m \left\langle \left(\frac{V_{k,i}(\kappa_{m,n}) - V_{k,i}(\kappa_{t,n})}{\sigma_{k,n,i}}\right)^2\right\rangle_{n,k,i},
+\end{equation}
+where $\kappa_{m,n}$ is $f(g_m)$ averaged over the $4^{n}$ children of each pixel of level $n$ and standardised by its own mean and standard deviation, $V_{k,i}$ ($k=0,1,2$) are its Minkowski functionals at the thresholds $\nu_i=-2,\dots,5$, and $\sigma_{k,n,i}$ is the standard deviation of the same estimator over the ten realisations r000--r009 (thresholds where it is below 5\% of its maximum are left out). The estimator is made differentiable: the step $\Theta(x-\nu)$ is replaced by a logistic function of width 0.2 and $\delta(x-\nu)$ by its derivative, and the gradient and Hessian of the level map are those of the least-squares quadratic through each pixel and its eight neighbours, fitted in the gnomonic coordinates of the tangent plane. Its gradient, through the stencil, the standardisation and $f'(g)$, is exact (checked against finite differences), and 1 and 4 ranks agree to $10^{-12}$. The stencil derivatives see only part of the gradient of a level map: $V_1$ and $V_2$ are 0.33--0.49 times the harmonic values of Appendix~\ref{app:minkowski}, and the deviations of the realisations measured by the two estimators correlate at 0.83--0.92 for $V_0$ but only 0.15--0.56 for $V_1$ and $V_2$. The term therefore cannot be expected to hold every threshold of the harmonic measure.
+
+First tests, judged with the harmonic estimator of Sect.~\ref{sec:experiment}, are encouraging. At $\nside=256$ (4 members, levels 64 and 128, $w_M=0.025$ per member), the largest deviations from r000 drop from $8.4\sigma$ ($V_1$, level 128) and $6.9\sigma$ ($V_2$, level 256) to $3.7$ and $5.1\sigma$, the median deviations come back to those of the realisations, and $S_1$, $S_2$ of $\kappa$ improve (from 1.50 and 1.84 to 1.07 and 1.26$\sigma$ per member) for 10\% more time; at 0.1 per member the term starts to pull the gaussianised variance of level 128, and at 1 per member it degrades every statistic. At $\nside=512$, continuing the 10-member ensemble with the kurtosis term for 150 iterations with and without the term (0.1 per member, levels 64 to 256; Table~\ref{tab:mink512}), the median $|z|$ of $V_0$ falls to 0.4--0.7, below that of the realisations, and the medians of $V_1$, $V_2$ fall at level 128 and at the native level 512, which the term does not see; at level 256 they stay at 1.9, and the largest deviations stay at 5--7$\sigma$, above the 3.5--3.8 of the realisations. The power spectrum does not move and the per-level variance of $\kappa$ stays within $1.3\sigma$; the kurtosis of the finest level rises from $+1.1$ to $+3.8\sigma$ and the count of peaks above $3\sigma$ falls from $-0.1$ to $-1.2\sigma$. A test at 0.025 per member at $\nside=512$ is running; the term is not used in the ensembles of Sect.~\ref{sec:experiment}.
+
+\begin{table}
+\caption{Minkowski functionals of the levels of $\kappa$ at $\nside=512$ (harmonic estimator), with and without the Minkowski term: median / maximum $|z|$ over the members and the thresholds, $z$ the deviation from r000 in units of the standard deviation of the realisations. Preliminary.}
+\label{tab:mink512}
+\centering\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccc}
+\hline\hline
+Level & & r001--r009 & control & $+\mathcal{L}_M$ \\
+\hline
+64 & $V_0$ & 0.9 / 2.9 & 0.9 / 2.9 & 0.4 / 3.2 \\
+   & $V_1$ & 1.1 / 3.5 & 1.3 / 5.3 & 1.2 / 5.2 \\
+   & $V_2$ & 1.1 / 3.5 & 0.9 / 4.6 & 1.1 / 5.3 \\
+128 & $V_0$ & 1.5 / 3.6 & 1.7 / 3.5 & 0.7 / 2.8 \\
+    & $V_1$ & 1.1 / 3.6 & 1.9 / 6.2 & 1.2 / 5.1 \\
+    & $V_2$ & 0.9 / 3.6 & 1.7 / 5.4 & 1.3 / 5.2 \\
+256 & $V_0$ & 1.9 / 3.6 & 3.1 / 3.9 & 0.7 / 2.0 \\
+    & $V_1$ & 1.2 / 3.8 & 1.6 / 5.3 & 1.9 / 4.9 \\
+    & $V_2$ & 1.1 / 3.7 & 2.1 / 5.4 & 1.9 / 7.2 \\
+512 & $V_0$ & 2.1 / 3.6 & 0.5 / 0.9 & 0.4 / 0.8 \\
+    & $V_1$ & 1.2 / 3.7 & 1.3 / 3.1 & 0.6 / 2.6 \\
+    & $V_2$ & 0.9 / 3.5 & 1.5 / 6.7 & 0.8 / 5.3 \\
+\hline
+\end{tabular}
+\tablefoot{Control: the ensemble with the kurtosis term of Table~\ref{tab:runs} continued for 150 iterations; $+\mathcal{L}_M$: the same with the Minkowski term ($w_M=0.1$ per member, levels 64 to 256). At level 512 the members have r000's histogram, so $V_0$ tests only the reconstruction.}
+\end{table}
+
 %======================================================================
 \section{Ensembles of syntheses of the Takahashi convergence}
 \label{sec:experiment}
@@ -442,6 +478,7 @@ Figures~\ref{fig:maps} and \ref{fig:zooms} show the target, another realisation,
 
 \emph{Minkowski functionals} (Fig.~\ref{fig:minkowski}, Appendix~\ref{app:minkowski}) are the most demanding test: none of the terms of the loss constrains them directly. The members deviate from r000 by 2.1--2.5$\sigma$ rms over the thresholds $-2\le\nu\le5$ for the map smoothed over 4 pixels (13.7\,arcmin), and by 1.1--2.5$\sigma$ for a 30\,arcmin smoothing, with the largest deviations at $\nu\simeq1$--3 for $V_1$ and $V_2$, i.e. in the connectivity of the moderately high excursion sets. % NUM2048
 Per pyramid level (Table~\ref{tab:mf_levels_n\nsidefig} and Fig.~\ref{fig:mf_levels}: maps degraded by 4-children means, no smoothing), the reference is the deviation of the realizations r001--r009 from r000, a median $|z|$ of 0.8 to 2.0 and a maximum of 3.2 to 3.8 (r000 itself sits 1.5--2$\sigma$ from the mean of the realizations in $V_0$ at the levels 128 to 512). At level 64 the members' median $|z|$ (0.9--1.5) is that of the realizations, apart from a few thresholds in the low tail. At the levels 256 and 512 it is 3.0--3.9, with systematic offsets of 3--7$\sigma$ in $V_1$ and $V_2$ for $0\lesssim\nu\lesssim3$, the largest deviations being at $\nu\lesssim0$ (the troughs). At the native level the members are tens to hundreds of $\sigma$ off, the trace of the deficit of the finest gaussianised level. % NUM2048
+A loss term on these functionals (Sect.~\ref{sec:mink_term}) brings $V_0$ and most medians of $V_1$, $V_2$ back to the realisations' range at $\nside=512$, but not yet the largest deviations (preliminary).
 
 \begin{figure*}
 \centering
@@ -507,7 +544,7 @@ The explicit, block-wise gradient turns the memory of a scattering-covariance sy
 
 \subsection{Limits of the present syntheses}
 
-The weak-lensing ensembles show where the statistical model, rather than the optimiser, is the limit. The gaussianised level variances are 10--30\% off at a few levels, far outside a cosmic variance of 1--4\%; the spectrum of $g$ oscillates from one octave to the next by about 10\%, because dyadic wavelet bands fix the power of each octave but not its shape within it; and the Minkowski functionals, which probe the topology of the excursion sets, deviate by 2--3$\sigma$. The per-level kurtosis, held exactly by the kurtosis term, keeps no scatter between the members. These point to statistics to add (finer frequency sampling, cross-level terms on $\kappa$) rather than to more iterations. \todo{update with the 2048 ensembles.} % NUM2048
+The weak-lensing ensembles show where the statistical model, rather than the optimiser, is the limit. The gaussianised level variances are 10--30\% off at a few levels, far outside a cosmic variance of 1--4\%; the spectrum of $g$ oscillates from one octave to the next by about 10\%, because dyadic wavelet bands fix the power of each octave but not its shape within it; and the Minkowski functionals, which probe the topology of the excursion sets, deviate by 2--3$\sigma$; a first loss term on them reduces most median deviations at $\nside=512$ (those of $V_0$ by a factor 2 to 4) but leaves maxima of 5--7$\sigma$, because its stencil derivatives see only part of what the harmonic measure sees (Sect.~\ref{sec:mink_term}). The per-level kurtosis, held exactly by the kurtosis term, keeps no scatter between the members. These point to statistics to add (finer frequency sampling, cross-level terms on $\kappa$) rather than to more iterations. \todo{update with the 2048 ensembles.} % NUM2048
 
 \subsection{Towards climate and ocean data}
 
