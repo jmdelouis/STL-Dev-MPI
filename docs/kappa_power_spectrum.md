@@ -327,3 +327,142 @@ Caveats:
   keep it, if that matters.
 - Tested at nside 256 only.  At 512 the finest level is 1.6 times too high
   as well (1378 against 855), which 32-NSIDE covers.
+
+## 8. Minkowski functionals per level
+
+The paper's measure (`text/scripts/mf_levels.py` on branch
+`claude/distracted-bohr-952341`) takes kappa at each level of the
+4-children pyramid, standardises it, and computes V0, V1, V2 at
+nu = -2 ... 5 with harmonic derivatives.  Deviations are in units of the
+std of the 10 Takahashi realizations r000-r009.  r001-r009 against r000
+give a median |z| of 0.9-2.0 and a maximum of 3.5-3.8.  The nside-512
+ensemble with the setting of §6 and §7 (`n512_garoupe_kurt_c`) is outside
+that range: median/max |z| about 2/14 at the levels 128-256 and 1.3/12 at
+64, with the largest deviations in the low tail (nu below 0).
+
+### 8.1 The term
+
+`--minkowski-weight X` adds
+
+    X / B sum_m mean_{n, k, i} ((V_k,i(m) - V_k,i(target)) / sigma_k,i)^2
+
+over the members m, the levels n of `--minkowski-nside` (default 64 to
+nside / 2), the functionals k and the thresholds i.  It acts on
+`kappa = f(g)` with `--kappa-table`, like the kurtosis term.  The
+estimator (`crates/stl-cli/src/minkowski.rs`):
+
+- the level map is the mean of the 4^n children (as in `mf_levels.py`);
+  with `--minkowski-standardise` it is standardised by its own mean and
+  std, so that the thresholds are nu_i for every map, and the gradient goes
+  through the mean and the std;
+- V0, V1, V2 follow Schmalzing & Gorski (1998), with the step replaced by
+  a logistic function of width h = 0.2 (in units of the level's std) and
+  `delta(x - nu)` by its derivative;
+- the gradient and Hessian are those of the least-squares quadratic through
+  the cell and its 8 (or 7) neighbours.  The fit is done in gnomonic
+  coordinates of the tangent plane, where the Christoffel symbols vanish,
+  so V1 and V2 do not depend on the frame.  `|grad x|^2 + eps` in V2 has
+  eps = 0.01 times the target's mean squared gradient;
+- sigma is the std over r000-r009 of the same estimator.  It is written by
+  `stl-minkowski r000.npy r001.npy ... --nside 32-NSIDE --standardise
+  --sigma-out sigma.json` and read with `--minkowski-sigma sigma.json`.
+  The file fixes the thresholds, h, eps and the standardisation.  As in
+  `mf_levels.py`, thresholds where sigma is below 5 % of its maximum are
+  left out.
+
+The ranks of a group gather each level (6 MB at nside 256 for one map) and
+work on their own cells plus one ring of neighbours.  The (member, level)
+pairs run on host threads (`STL_MINKOWSKI_THREADS`).  The work is on the
+CPU, also in GPU runs.
+
+Tests: exact caps of a linear field (V0 = (1 - t) / 2,
+V1 = sqrt(1 - t^2) / 8, V2 = t / (4 pi), convolved with the logistic kernel,
+within 1e-3); gradient against finite differences on 2 ranks for both
+settings; equality of 1 and 4 ranks to 1e-12.
+
+### 8.2 The estimator against `mf_levels.py`
+
+On r000 degraded to 64, 128 and 256 (`stl-minkowski --json` against
+`tools/minkowski.py`):
+
+- V0 agrees: the ratio is 1.000 for hard thresholds (h = 0.02), 0.997-0.999
+  for h = 0.2.
+- V1 and V2 do not: the stencil gives 0.33-0.49 times the harmonic values.
+  The least-squares quadratic over 3 x 3 cells smooths the pixel scale,
+  which carries most of the gradient of a level map.  The harmonic
+  derivatives of `alm2map_der1` keep everything up to l = 3 nside - 1.
+- The z of r001-r009 against r000 correlate with `mf_levels.py`'s at 0.83 to
+  0.92 for V0 with `--minkowski-standardise`, and 0.15 to 0.56 for V1, V2
+  (largest at 256).  With fixed thresholds in kappa units (mean + nu std
+  of the target) the correlation is 0.3 for V0 and about 0 for V1, V2.
+  There V0 is dominated by the 13 % cosmic scatter of the level variance,
+  which `--level-power-weight` already holds.
+
+So the term uses `--minkowski-standardise`.  On the members of
+`n512_garoupe_kurt_c` this estimator sees what `mf_levels.py` sees:
+max |z| 7.5 for V1 and 23 for V2 at 256, and 6.5 / 11 at 128.  With the
+same estimator, r001-r009 against r000 give a median |z| of 1.0-2.3 and a
+maximum below 3.9.
+
+### 8.3 Ensembles at nside 256
+
+Protocol of §7: 4 members from the nside-128 maps, 200 iterations, the §6
+setting with `--kurtosis-weight 0.4 --kurtosis-nside 32-256`.  The control
+reproduces the §7 column bit for bit.  The term is added with
+`--minkowski-sigma sig256s.json --minkowski-standardise` on the default
+levels 64 and 128; "+ 256" adds the native level (`--minkowski-nside
+64-256`).  Weights are given per member (`--minkowski-weight` = weight x B).
+The judge is `mf_levels.py` (harmonic derivatives), median / max |z| over
+members x thresholds:
+
+| level, functional | r001-r009 | control | 0.025 | 0.025, + 256 | 0.1 | 1 |
+|---|---|---|---|---|---|---|
+| 64 V0 | 0.91 / 2.93 | 0.99 / 2.61 | 0.39 / 2.24 | 0.43 / 2.07 | 0.36 / 2.00 | 0.46 / 2.06 |
+| 64 V1 | 1.05 / 3.45 | 1.32 / 4.99 | 0.99 / 5.22 | 1.01 / 5.27 | 1.04 / 3.84 | 1.06 / 4.07 |
+| 64 V2 | 1.06 / 3.52 | 1.04 / 4.72 | 1.05 / 4.00 | 0.92 / 3.72 | 0.98 / 4.08 | 0.91 / 6.01 |
+| 128 V0 | 1.49 / 3.61 | 1.92 / 4.14 | 0.50 / 2.51 | 0.64 / 2.39 | 0.79 / 2.11 | 0.98 / 2.77 |
+| 128 V1 | 1.14 / 3.63 | 1.99 / **8.41** | 1.07 / 3.65 | 1.09 / 3.66 | 0.98 / 3.62 | 1.36 / 4.61 |
+| 128 V2 | 0.94 / 3.55 | 1.58 / 5.74 | 0.93 / 4.58 | 1.17 / 4.10 | 1.07 / 4.96 | 1.53 / 4.83 |
+| 256 V0 | 1.93 / 3.63 | 0.90 / 1.83 | 0.56 / 1.29 | 0.22 / 0.71 | 0.67 / 1.31 | 1.52 / 2.70 |
+| 256 V1 | 1.20 / 3.76 | 1.23 / 3.92 | 0.73 / 3.57 | 0.80 / 3.77 | 0.93 / 3.19 | 1.78 / 4.94 |
+| 256 V2 | 1.10 / 3.69 | 1.35 / **6.91** | 0.89 / 5.12 | 0.81 / 4.44 | 1.00 / 5.48 | 1.76 / 9.56 |
+
+The other statistics (as in §7; cosmic sigma from `cv10.py`):
+
+| | control | 0.025 | 0.025, + 256 | 0.1 | 1 |
+|---|---|---|---|---|---|
+| per member S1 S2 S3 S4 (sigma) | 0.97 0.88 1.04 0.95 | 0.97 0.88 1.04 0.95 | 0.96 0.87 1.04 0.95 | 0.97 0.87 1.04 0.96 | 1.74 1.54 1.11 1.01 |
+| final maps, S1-S4, g space | 1.02 0.94 1.04 0.95 | 0.96 0.85 1.04 0.95 | 1.02 0.95 1.04 0.95 | 0.96 0.86 1.04 0.96 | 2.49 2.30 1.12 1.10 |
+| final maps, S1-S4, kappa space | 1.50 1.84 2.53 3.01 | 1.07 1.26 2.15 2.70 | 1.04 1.24 2.13 2.67 | 1.15 1.28 2.16 2.63 | 3.06 1.69 2.40 2.57 |
+| C_l kappa, l >= 31: rms / max | 0.065 / 0.137 | 0.064 / 0.134 | 0.060 / 0.128 | 0.066 / 0.135 | 0.095 / 0.170 |
+| kurtosis / target, 32 64 128 256 | 1.03 1.01 1.00 1.08 | 1.02 1.01 0.99 1.13 | 1.03 1.02 1.06 1.08 | 1.01 1.03 1.05 1.17 | 1.04 1.05 1.13 1.21 |
+| var of the levels in g against r000, cosmic sigma, 64 / 128 / 256 | +5.7 / +3.2 / -6.3 | +5.6 / +3.0 / -6.2 | +5.6 / +3.1 / -6.3 | +6.3 / +5.2 / -7.7 | +8.9 / +18.3 / -13.2 |
+| peaks at 128 over target, nu 2 / 8 | 1.20 / 0.70 | 1.06 / 0.86 | 1.06 / 0.87 | 1.06 / 0.81 | - |
+| s / eval (4 members, one T4) | 5.85 | 6.43 | 8.08 | 6.90 | 6.97 |
+
+The s / eval with the term are upper bounds: those runs shared the host
+cores with other runs, and the runs at 0.025, 0.1 and 1 used the
+single-threaded term.
+
+- **The term is met on its levels.**  With its own estimator the members
+  at 0.025 are within |z| 1.9 at 64 and 128 (V0 at 128: 3.1), against 6.1
+  for V1 and 12.8 for V2 at 128 in the control.
+- **In the harmonic measure, V0 and the medians go back to cosmic
+  variance.**  V0 is below the reference everywhere.  The medians of V1, V2
+  go from 1.3-2.0 to 0.7-1.2, the reference's.  The worst maxima go from
+  8.4 (V1, 128) and 6.9 (V2, 256) to 3.7 and 4.4-5.1.
+- **Some maxima of V1, V2 stay at 4-5**, above the reference's 3.5-3.8,
+  on the low-threshold side.  The stencil derivatives see only part of
+  what the harmonic ones see (§8.2), so the term cannot hold those.
+- **The native level helps at 256** (V0 0.22 / 0.71, V2 max 4.4 instead of
+  5.1), for 25 % more time.  Without it, the soft V2 at 256 rises to a
+  maximum of 9 (control 5.3), while the harmonic one drops from 6.9 to
+  5.1.
+- **The kappa statistics improve too**: S1, S2 of kappa of the final maps
+  from 1.50 / 1.84 to 1.07 / 1.26 sigma per member, and the excess of low
+  peaks at 128 (1.20) drops to 1.06.  Nothing else moves at 0.025.
+- **Weight 0.1 per member starts to pull the levels of g** (+5.2 cosmic
+  sigma at 128 instead of +3.2), and 1 per member degrades every
+  statistic.  The deviations of the levels of g from r000 (+6, -6 cosmic
+  sigma at 64 and 256) are those of the control: the level variances of a
+  gaussianised map hardly vary between realizations.

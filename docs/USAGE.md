@@ -270,6 +270,10 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--kappa-s3-nside A-B` | all | keep only the S3 whose scale `j3` is at the levels of nside A to B |
 | `--kurtosis-weight X` | 0 | hold the kurtosis of the pyramid details of `kappa` (of the map without `--kappa-table`) at the selected levels (below) |
 | `--kurtosis-nside A-B` | all | levels of that term, by nside |
+| `--minkowski-weight X` | 0 | hold the Minkowski functionals V0, V1, V2 of the pyramid levels of `kappa` (of the map without `--kappa-table`) at the target's, in units of their std over realizations (below) |
+| `--minkowski-nside A-B` | 64 to nside / 2 | levels of that term, by nside |
+| `--minkowski-standardise` | off | standardise every level map by its own mean and std first (as `mf_levels.py`); the sigma file decides when given |
+| `--minkowski-sigma F` | 1 % of the target's maximum | std of the functionals over realizations, from `stl-minkowski --sigma-out` |
 | `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
