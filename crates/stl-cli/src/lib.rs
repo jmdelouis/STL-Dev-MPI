@@ -92,6 +92,8 @@ stl-synth --target MAP [options]
   --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
                         distance between the sorted values of every member and of the target: holds
                         the pixel histogram; default 0
+  --freeze-nside M      hold the means of the map over the pixels of nside M at those of the
+                        initial map: only the scales finer than M move (coarse-to-fine steps)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -148,6 +150,7 @@ pub struct Args {
     pub ensemble: usize,
     pub groups: usize,
     pub scatter_weight: f64,
+    pub freeze_nside: Option<usize>,
     pub level_power_weight: f64,
     pub kappa_table: Option<PathBuf>,
     pub kappa_weight: f64,
@@ -190,6 +193,7 @@ impl Args {
             ensemble: 1,
             groups: 1,
             scatter_weight: 0.0,
+            freeze_nside: None,
             level_power_weight: 0.0,
             kappa_table: None,
             kappa_weight: 0.1,
@@ -303,6 +307,7 @@ impl Args {
                     }
                     a.marginal_weight = v;
                 }
+                "--freeze-nside" => a.freeze_nside = Some(num(it.next(), k)?),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -628,6 +633,33 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
+    // --freeze-nside M: the means of the map over the pixels of nside M (groups
+    // of `freeze` consecutive NESTED pixels) stay those of the initial map; the
+    // gradient is projected on the zero-mean details, so L-BFGS (directions
+    // built from projected gradients and steps) only moves the scales finer than M.
+    let freeze = match args.freeze_nside {
+        None => None,
+        Some(m) => {
+            let n = nside as usize;
+            if m == 0 || m > n || n % m != 0 || !m.is_power_of_two() {
+                return Err(format!("--freeze-nside {m}: a power of 2 dividing the target nside {nside}"));
+            }
+            let group = (n / m) * (n / m);
+            if s % group != 0 || e % group != 0 {
+                return Err(format!("--freeze-nside {m}: rank ranges are not aligned on its pixels (use fewer ranks)"));
+            }
+            Some(group)
+        }
+    };
+    let project = |g: &mut [f64]| {
+        if let Some(group) = freeze {
+            for c in g.chunks_mut(group) {
+                let mean = c.iter().sum::<f64>() / group as f64;
+                c.iter_mut().for_each(|v| *v -= mean);
+            }
+        }
+    };
+
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
     let calls_before = obj.exchange_calls();
     let started = Instant::now();
@@ -638,7 +670,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() {
+    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() && freeze.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
@@ -679,6 +711,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                     None => g.iter_mut().zip(&g5).for_each(|(a, b)| *a += b),
                 }
             }
+            project(&mut g);
             (loss, g)
         };
         run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
@@ -942,6 +975,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
         "init": init_info,
+        "freeze_nside": args.freeze_nside,
         "level_power": {
             "weight": args.level_power_weight,
             "levels_nside": (0..level_ratios.len()).map(|n| nside >> n).collect::<Vec<_>>(),
