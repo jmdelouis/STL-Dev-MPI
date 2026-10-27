@@ -1,0 +1,15 @@
+nside 512: Minkowski functionals of kappa degraded to each level (4-children means, no smoothing), nu = -2 ... 5; deviation from r000 in units of the std of r000-r009
+columns: median |z| and max |z| over members x thresholds; rms over nu of the members' median z
+reference: r001-r009 against r000 (what an ensemble within cosmic variance gives)
+  level    64 V0 | r001--r009: 1.04  3.35 1.07 | kurtosis: 1.30 12.68 2.49 | no kurtosis: 1.61 13.31 3.04
+  level    64 V1 | r001--r009: 1.05  3.45 1.12 | kurtosis: 1.36  6.34 1.59 | no kurtosis: 1.27 14.14 1.76
+  level    64 V2 | r001--r009: 1.06  3.52 1.11 | kurtosis: 1.03 12.27 1.32 | no kurtosis: 0.94 11.71 1.33
+  level   128 V0 | r001--r009: 1.63  3.61 1.68 | kurtosis: 2.18 17.37 3.00 | no kurtosis: 2.19 13.12 2.86
+  level   128 V1 | r001--r009: 1.16  3.63 1.19 | kurtosis: 2.04 10.49 2.56 | no kurtosis: 1.75  9.40 2.26
+  level   128 V2 | r001--r009: 0.97  3.55 1.14 | kurtosis: 1.69 10.28 2.04 | no kurtosis: 1.59 11.93 2.18
+  level   256 V0 | r001--r009: 2.01  3.63 2.01 | kurtosis: 1.99 14.34 2.32 | no kurtosis: 1.92  8.22 2.42
+  level   256 V1 | r001--r009: 1.19  3.76 1.31 | kurtosis: 2.02 14.52 2.68 | no kurtosis: 1.27 12.01 1.96
+  level   256 V2 | r001--r009: 1.16  3.69 1.24 | kurtosis: 2.30  8.33 2.43 | no kurtosis: 1.63  7.49 2.10
+  level   512 V0 | r001--r009: 1.99  3.57 1.95 | kurtosis: 0.47 113.60 20.61 | no kurtosis: 0.35 142.00 27.88
+  level   512 V1 | r001--r009: 1.12  3.70 1.18 | kurtosis: 1.77 58.07 8.78 | no kurtosis: 1.17 62.10 10.18
+  level   512 V2 | r001--r009: 0.92  3.45 0.91 | kurtosis: 1.92 47.07 8.27 | no kurtosis: 1.56 43.32 9.20
