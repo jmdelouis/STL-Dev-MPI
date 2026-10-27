@@ -28,6 +28,14 @@ intermediate scales (3 times the target's at nside 64).  A third term,
 `--kurtosis-weight 0.1 B --kurtosis-nside 32-NSIDE`, holds it on every
 member at 3 % of the cost, with the statistics unchanged (§7).
 
+The Minkowski functionals of the kappa levels stay outside cosmic variance
+with these three terms (V1, V2 maxima of 4-8 cosmic sigma at levels
+64-256).  A fourth term, `--minkowski-weight 0.025 B --minkowski-standardise`,
+brings V0 and the medians of V1, V2 back at nside 256 at no cost.  The
+largest V1, V2 deviations stay at 4-5 there, and at 4-7 at nside 512,
+where, added to a converged ensemble, the term also costs the tail of kappa
+(§8).
+
 ## 1. Diagnosis: a Gaussian copula at small scales
 
 ![diagnosis](figures/kappa_cl_diagnosis.png)
@@ -202,6 +210,12 @@ python tools/gaussianize.py match table.npz ens_m000_synthesis_nested.npy ens_m0
 - `--kurtosis-weight` is multiplied by B too (0.1 per member): the term is
   `w / B sum_m sum_n (K_n / K_n(target) - 1)^2`.  `--kurtosis-nside 32-NSIDE`
   takes every level from the details of nside 32 to the finest (§7).
+- Optional, tested at nside 256 only: `--minkowski-weight 0.025 B
+  --minkowski-standardise --minkowski-sigma sig.json --minkowski-nside
+  64-NSIDE`, with `sig.json` from `stl-minkowski r000.npy r001.npy ...
+  --nside 32-NSIDE --standardise --sigma-out sig.json`.  It holds the
+  Minkowski functionals of the kappa levels (§8.3).  Not on a converged
+  ensemble: at nside 512 it then costs the tail of kappa (§8.4).
 
 Open points:
 
@@ -210,6 +224,9 @@ Open points:
   statistics are dyadic too.
 - The kurtosis of the kappa details at levels 32-64 overshoots (85 / 248
   against 50 / 100) without the kurtosis term: §7.
+- The V1, V2 of the kappa levels keep maxima of 4-7 cosmic sigma with or
+  without the Minkowski term; its 3 x 3 stencil does not see the pixel
+  scale of each level (§8.2, §8.4).
 - Not yet tested at nside 1024 and 2048.  The table of knots has 256 points,
   for tails beyond 5 sigma at 2048.
 
@@ -337,8 +354,11 @@ nu = -2 ... 5 with harmonic derivatives.  Deviations are in units of the
 std of the 10 Takahashi realizations r000-r009.  r001-r009 against r000
 give a median |z| of 0.9-2.0 and a maximum of 3.5-3.8.  The nside-512
 ensemble with the setting of §6 and §7 (`n512_garoupe_kurt_c`) is outside
-that range: median/max |z| about 2/14 at the levels 128-256 and 1.3/12 at
-64, with the largest deviations in the low tail (nu below 0).
+that range for V1 and V2: maxima of 4.4-6.4 at 64-256, and systematic
+offsets at 128 and 256 (rms over nu of the members' median z 2.0-2.5,
+against 1.1-1.3).  Thresholds where the std of the realizations is below
+5 % of its maximum are left out; an earlier version of the script kept
+them and gave maxima of 12-18 there.
 
 ### 8.1 The term
 
@@ -399,8 +419,9 @@ On r000 degraded to 64, 128 and 256 (`stl-minkowski --json` against
   which `--level-power-weight` already holds.
 
 So the term uses `--minkowski-standardise`.  On the members of
-`n512_garoupe_kurt_c` this estimator sees what `mf_levels.py` sees:
-max |z| 7.5 for V1 and 23 for V2 at 256, and 6.5 / 11 at 128.  With the
+`n512_garoupe_kurt_c` this estimator finds them outside cosmic variance
+too: max |z| 7.5 for V1 and 23 for V2 at 256, and 6.5 / 11 at 128
+(`mf_levels.py`: 5.4 / 6.4 and 6.1 / 5.8).  With the
 same estimator, r001-r009 against r000 give a median |z| of 1.0-2.3 and a
 maximum below 3.9.
 
@@ -466,3 +487,80 @@ single-threaded term.
   statistic.  The deviations of the levels of g from r000 (+6, -6 cosmic
   sigma at 64 and 256) are those of the control: the level variances of a
   gaussianised map hardly vary between realizations.
+
+### 8.4 Continuation at nside 512
+
+`n512_garoupe_kurt_c` (10 members, the setting of §6 and §7, B = 10) is
+continued by 150 iterations on two T4, without the term and with
+`--minkowski-sigma sig512s.json` on the default levels 64-256, at 0.1 and
+0.025 per member (`--minkowski-weight 1` and `0.25`).  `mf_levels.py`,
+median / max |z| / rms over nu of the members' median z:
+
+| level, functional | r001-r009 | start | +150 it | +150 it, 0.1 | +150 it, 0.025 |
+|---|---|---|---|---|---|
+| 64 V0 | 0.91 / 2.93 / 0.90 | 0.81 / 3.07 / 1.11 | 0.85 / 2.94 / 1.10 | 0.41 / 3.19 / 0.80 | 0.49 / 3.02 / 0.86 |
+| 64 V1 | 1.05 / 3.45 / 1.09 | 1.36 / 5.20 / 1.55 | 1.27 / 5.26 / 1.53 | 1.17 / 5.18 / 1.38 | 1.28 / 4.99 / 1.42 |
+| 64 V2 | 1.06 / 3.52 / 1.11 | 1.03 / 4.41 / 1.28 | 0.93 / 4.56 / 1.31 | 1.06 / 5.29 / 1.36 | 1.02 / 4.24 / 1.29 |
+| 128 V0 | 1.49 / 3.61 / 1.63 | 1.52 / 3.32 / 1.83 | 1.67 / 3.53 / 1.97 | 0.68 / 2.78 / 0.90 | 0.74 / 2.90 / 1.12 |
+| 128 V1 | 1.14 / 3.63 / 1.17 | 1.96 / 6.11 / 2.39 | 1.88 / 6.16 / 2.29 | 1.16 / 5.07 / 1.58 | 1.32 / 5.43 / 1.72 |
+| 128 V2 | 0.94 / 3.55 / 1.11 | 1.70 / 5.75 / 2.03 | 1.73 / 5.41 / 1.97 | 1.32 / 5.22 / 1.57 | 1.26 / 5.39 / 1.63 |
+| 256 V0 | 1.93 / 3.63 / 2.00 | 2.78 / 3.62 / 2.69 | 3.08 / 3.91 / 2.90 | 0.65 / 2.02 / 1.00 | 1.23 / 2.34 / 1.33 |
+| 256 V1 | 1.20 / 3.76 / 1.31 | 2.01 / 5.40 / 2.52 | 1.55 / 5.29 / 2.21 | 1.91 / 4.88 / 1.97 | 1.92 / 4.93 / 1.91 |
+| 256 V2 | 1.10 / 3.69 / 1.18 | 2.38 / 6.37 / 2.51 | 2.13 / 5.38 / 2.31 | 1.85 / 7.18 / 2.22 | 1.76 / 6.74 / 2.10 |
+| 512 V1 | 1.15 / 3.70 / 1.18 | 1.53 / 3.45 / 1.60 | 1.33 / 3.08 / 1.41 | 0.60 / 2.58 / 0.74 | 0.72 / 2.02 / 0.85 |
+| 512 V2 | 0.94 / 3.45 / 0.96 | 1.61 / 7.48 / 2.24 | 1.52 / 6.70 / 2.25 | 0.79 / 5.33 / 1.83 | 0.76 / 5.13 / 1.81 |
+
+V0 at 512 is fixed by the histogram matching (median |z| below 0.5 for
+every run).  The other statistics: the report of `stl-synth` (ensemble
+mean, in ergodic sigma), `cv10.py` (members against r000, in cosmic sigma
+of the realizations, median over the members) and the term's own
+estimator:
+
+| | start | +150 it | +150 it, 0.1 | +150 it, 0.025 |
+|---|---|---|---|---|
+| loss without the Minkowski term | 1.718 | 1.157 | 1.273 | 1.256 |
+| mean, var of g | 2.54, 12.97 | 0.73, 1.01 | 2.94, 6.00 | 2.38, 6.03 |
+| S1 S2 S3 S4, rms | 3.22 3.19 1.39 0.80 | 2.08 2.06 1.15 0.71 | 2.54 2.72 1.13 0.69 | 2.50 2.63 1.11 0.68 |
+| kappa term; mean of kappa | 0.0195; 3.12 | 0.0029; 0.43 | 0.0107; 1.97 | 0.0058; 1.30 |
+| marginal term | 0.040 | 0.0067 | 0.0134 | 0.0120 |
+| level power term; finest level variance / target | 0.769; 0.78 | 0.496; 0.82 | 0.611; 0.80 | 0.610; 0.80 |
+| var of the levels of g, 128 / 256 / 512 (cv10) | +6.0 / +4.8 / -7.8 | +4.7 / +2.6 / -6.4 | +5.2 / +3.8 / -7.1 | +5.2 / +3.7 / -7.1 |
+| var of kappa, 256 / 512 (cv10) | -1.0 / +0.4 | -1.3 / +0.8 | +0.3 / -1.3 | +0.2 / -1.0 |
+| kurtosis of kappa at 512 (cv10) | +2.3 | +1.1 | +3.8 | +4.0 |
+| peaks above 3 / 5 / 10 sigma (cv10) | +0.1 / +0.1 / -1.1 | -0.1 / 0.0 / -0.9 | -1.2 / -0.7 / -1.2 | -0.9 / -1.0 / -1.2 |
+| C_l, l >= 31: median / max abs z (cv10) | 0.3 / 0.6 | 0.3 / 0.6 | 0.2 / 0.6 | 0.2 / 0.5 |
+| term's estimator, max abs z of V1 / V2 at 256 | 7.5 / 22.8 | 6.6 / 19.8 | 1.6 / 0.5 | 2.4 / 0.8 |
+| s / eval (2 T4) | 41.3 | 40.8 | 43.2 | 42.8 |
+
+- **The term is met on its levels at both weights.**  Its own estimator
+  gives a maximum |z| of 1.7 (0.1) and 2.4 (0.025) at 64-256, against 4.0
+  to 19.8 for the control.
+- **In the harmonic measure V0 goes back to cosmic variance** at 64-256
+  (rms of the members' median z 0.8-1.3, control 1.1-2.9).  The systematic
+  offsets of V1, V2 drop at 128 (rms 2.3 / 2.0 to 1.6-1.7), and those of V1
+  at 512, a level the term does not include (1.41 to 0.74-0.85).
+- **V1, V2 at 256 and the maxima do not move**: rms 1.9-2.2 at 256
+  (control 2.2-2.3), maxima 4.2-7.2 at 64-256 (control 4.6-6.2, reference
+  3.5-3.8).  The term's estimator is within 2.4 there.  What is left is at
+  the pixel scale of each level, which the 3 x 3 stencil smooths (§8.2).
+- **The tail of kappa pays for it.**  The kurtosis of kappa at 512 goes from
+  +1.1 to +3.8-4.0 cosmic sigma (start +2.3) and the peaks above 3 sigma
+  from -0.1 to between -0.9 and -1.2.  In the report the mean and variance of g stop
+  at 2.4-2.9 and 6.0 ergodic sigma (control 0.7 and 1.0, start 2.5 and 13),
+  S1, S2 at 2.5-2.7 (control 2.1) and the mean of kappa at 1.3-2.0 (0.4).
+  In cosmic sigma the level variances of g move by 1.2 at most, and the C_l
+  do not move.
+- **The weight does not set the cost.**  0.025 per member costs the same as
+  0.1.  On a converged ensemble the term starts at 1.6 times the rest of
+  the loss at 0.025 per member (6.3 times at 0.1) and ends 40 (100) times
+  lower: LBFGS spends the 150 iterations on it in both cases.
+
+So, added to a converged nside-512 ensemble, the term trades the tail of
+kappa for V0 and the bulk of V1, V2, and leaves the largest V1, V2
+deviations where they were.  It is not part of the §6 command.  Untested:
+the term from the start of the ensemble (members initialised from nside-256
+members synthesised with it), where it would not have to undo a converged
+state; the native level at 512 (`--minkowski-nside 64-512`), which helped
+V2 at 256 in §8.3; and derivatives that keep the pixel scale (a wider
+stencil or harmonic derivatives), so that the term sees what the judge
+sees.
