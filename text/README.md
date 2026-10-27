@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 15 pages with no warning (abstract
+comes from TeX Live. The draft builds to 18 pages with no warning (abstract
 under the 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
 editorial system, not printed), no ORCID, `[longauth]` only for long author
@@ -108,7 +108,9 @@ until they are redrawn in the paper's style.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
-  `/scratch/jmdeloui/mfterm` (job 2144055).
+  `/scratch/jmdeloui/mfterm` (jobs 2144055 and 2150122);
+  the runs and the other statistics: `docs/kappa_power_spectrum.md` section 8.4
+  (branch `claude/kappa-minkowski`, commit 88514d9).
 - Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
   garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
   (preliminary: loss still decreasing; continuation 6090002 queued).
