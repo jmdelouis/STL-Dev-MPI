@@ -105,8 +105,13 @@ until they are redrawn in the paper's style.
 - GPU: `docs/gpu.md`; H200 numbers from the run reports on hpc
   (`~/stl-mpi/ens/runs/*/syn.json`) and from
   `notebooks/takahashi_nside2048_results.ipynb` (nside 4096 on 2 H200).
-- Kappa terms: `docs/kappa_power_spectrum.md` (branch
-  `claude/kappa-kurtosis` for section 7 and the kurtosis term).
+- Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
+  section 8: Minkowski term and its nside-256 tests). The nside-512 test of
+  the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
+  `/scratch/jmdeloui/mfterm` (job 2144055).
+- Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
+  garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
+  (preliminary: loss still decreasing; continuation 6090002 queued).
 - Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
 - Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
   `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).
