@@ -83,6 +83,6 @@ until they are redrawn in the paper's style.
   `notebooks/takahashi_nside2048_results.ipynb` (nside 4096 on 2 H200).
 - Kappa terms: `docs/kappa_power_spectrum.md` (branch
   `claude/kappa-kurtosis` for section 7 and the kurtosis term).
-- Overlap mode: branch `m8-overlap`, commit f6bbf01.
+- Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
 - Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
   `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).

@@ -188,7 +188,7 @@ The ranks are split into $G$ groups of consecutive ranks (\texttt{MPI\_Comm\_spl
 
 \subsection{Overlap mode}
 
-An alternative decomposition, on the branch \texttt{m8-overlap}, trades computation for communication. Every rank evaluates, for the fine levels ($d < n_c$), its owned blocks and the halo blocks they depend on, on extended regions, so that the sweeps need no exchange; the coarse levels ($d\geq n_c$), small, are held whole and evaluated by rank 0. An evaluation then needs only the level-0 map halo, one global sum of the coarse stored moduli and of the map of level $n_c$, the coefficient sum, one broadcast of the coarse cotangents and the level-0 ghost reduction of the map cotangent. It agrees with the standard mode to $7\times10^{-16}$ on every fixture with 1, 2 and 4 ranks. \todo{timings of the overlap mode at scale.}
+An alternative decomposition (option \texttt{-{}-overlap}, CPU engine) trades computation for communication. Every rank evaluates, for the fine levels ($d < n_c$), its owned blocks and the halo blocks they depend on, on extended regions, so that the sweeps need no exchange; the coarse levels ($d\geq n_c$), small, are held whole and evaluated by rank 0. An evaluation then needs only the level-0 map halo, one global sum of the coarse stored moduli and of the map of level $n_c$, the coefficient sum, one broadcast of the coarse cotangents and the level-0 ghost reduction of the map cotangent. It agrees with the standard mode to $7\times10^{-16}$ on every fixture with 1, 2 and 4 ranks. \todo{timings of the overlap mode at scale.}
 
 \subsection{Performance}
 
