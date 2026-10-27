@@ -20,10 +20,12 @@ mod kappa;
 mod kurtosis;
 mod level_power;
 mod marginal;
+pub mod minkowski;
 use kappa::Transform;
 use kurtosis::Kurtosis;
 use level_power::LevelPower;
 use marginal::Marginal;
+use minkowski::{Minkowski, SigmaFile};
 
 pub const USAGE: &str = "\
 stl-synth --target MAP [options]
@@ -75,6 +77,15 @@ stl-synth --target MAP [options]
                         (of the map without --kappa-table); default 0
   --kurtosis-nside A-B  levels of that term by nside (e.g. 64-128); default every level of
                         --level-power-weight (finest to nside 8)
+  --minkowski-weight X  adds X / B sum_m mean_{n,k,i} ((V_k(t_i) - V_k(t_i; target)) / sigma_k,i)^2, the
+                        Minkowski functionals V0, V1, V2 of level n of the 4-children pyramid of
+                        kappa = f(g) (of the map without --kappa-table) at the thresholds
+                        t_i = mu_n + nu_i sigma_n of the target (nu = -2 ... 5 by 0.2), soft (logistic of
+                        width 0.2 sigma_n) with least-squares derivatives on the 3x3 cells; default 0
+  --minkowski-nside A-B levels of that term by nside; default 64 to nside / 2 (at the map's own nside
+                        the functionals of kappa are those of g: the level power holds them)
+  --minkowski-sigma F   JSON of stl-minkowski --sigma-out: std of the functionals over realizations
+                        (and the thresholds and width used); default 1 % of the target's maximum
   --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
                         distance between the sorted values of every member and of the target: holds
                         the pixel histogram; default 0
@@ -142,6 +153,9 @@ pub struct Args {
     pub kappa_s3_nside: Option<(usize, usize)>,
     pub kurtosis_weight: f64,
     pub kurtosis_nside: Option<(usize, usize)>,
+    pub minkowski_weight: f64,
+    pub minkowski_nside: Option<(usize, usize)>,
+    pub minkowski_sigma: Option<PathBuf>,
     pub marginal_weight: f64,
     pub niter: usize,
     pub history_size: usize,
@@ -180,6 +194,9 @@ impl Args {
             kappa_s3_nside: None,
             kurtosis_weight: 0.0,
             kurtosis_nside: None,
+            minkowski_weight: 0.0,
+            minkowski_nside: None,
+            minkowski_sigma: None,
             marginal_weight: 0.0,
             niter: 50,
             history_size: 10,
@@ -258,19 +275,21 @@ impl Args {
                         .map(|f| Family::parse(f.trim()).ok_or(format!("--kappa-families: unknown family '{f}'")))
                         .collect::<Result<_, _>>()?;
                 }
-                "--kappa-s3-weight" | "--kurtosis-weight" => {
+                "--kappa-s3-weight" | "--kurtosis-weight" | "--minkowski-weight" => {
                     let v: f64 = it.next().ok_or(format!("{k} needs a value"))?.parse().map_err(|_| format!("{k}: not a number"))?;
                     if !(v.is_finite() && v >= 0.0) {
                         return Err(format!("{k} must be finite and >= 0"));
                     }
-                    if k == "--kappa-s3-weight" {
-                        a.kappa_s3_weight = v;
-                    } else {
-                        a.kurtosis_weight = v;
+                    match k.as_str() {
+                        "--kappa-s3-weight" => a.kappa_s3_weight = v,
+                        "--kurtosis-weight" => a.kurtosis_weight = v,
+                        _ => a.minkowski_weight = v,
                     }
                 }
                 "--kappa-s3-nside" => a.kappa_s3_nside = Some(parse_nside_range(k, it.next())?),
                 "--kurtosis-nside" => a.kurtosis_nside = Some(parse_nside_range(k, it.next())?),
+                "--minkowski-nside" => a.minkowski_nside = Some(parse_nside_range(k, it.next())?),
+                "--minkowski-sigma" => a.minkowski_sigma = Some(it.next().ok_or("--minkowski-sigma needs a path")?.into()),
                 "--marginal-weight" => {
                     let v: f64 = it.next().ok_or("--marginal-weight needs a value")?.parse().map_err(|_| "--marginal-weight: not a number")?;
                     if !(v.is_finite() && v >= 0.0) {
@@ -574,6 +593,28 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         .then(|| Kurtosis::new(args.kurtosis_weight, kurtosis_source, kurtosis_levels.clone(), npix, members, gcomm));
     let kurtosis_all = (args.kurtosis_weight > 0.0 || kappa_tf.is_some())
         .then(|| Kurtosis::new(0.0, kurtosis_source, (0..pyramid_levels).collect(), npix, members, gcomm));
+    // Minkowski functionals per level (--minkowski-weight), of the same field
+    // as the kurtosis; levels of means aligned on the ranks (0 ..= pyramid_levels).
+    let minkowski = if args.minkowski_weight > 0.0 {
+        let half = nside as usize / 2;
+        let levels: Vec<usize> = (0..=pyramid_levels)
+            .filter(|&n| match args.minkowski_nside {
+                Some((a, b)) => (a..=b).contains(&(nside as usize >> n)),
+                None => n >= 1 && (64..=half).contains(&(nside as usize >> n)),
+            })
+            .collect();
+        if levels.is_empty() {
+            return Err("--minkowski-nside: no level of the pyramid in this range".into());
+        }
+        let file = match &args.minkowski_sigma {
+            Some(p) => Some(SigmaFile::read(p)?),
+            None => None,
+        };
+        let path = args.minkowski_sigma.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        Some(Minkowski::new(args.minkowski_weight, kurtosis_source, s, npix, members, &levels, file.as_ref().map(|f| (f, path.as_str())), gcomm)?)
+    } else {
+        None
+    };
     let marginal = (args.marginal_weight > 0.0).then(|| Marginal::new(args.marginal_weight, &target, s, npix, members, gcomm));
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
@@ -588,7 +629,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() {
+    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
@@ -605,7 +646,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             }
             // Terms on kappa = f(g): cotangent on kappa, chained by f'(g).
             let kd = match &kappa_tf {
-                Some(tf) if kens.is_some() || kurtosis.is_some() => Some(tf.apply(p)),
+                Some(tf) if kens.is_some() || kurtosis.is_some() || minkowski.is_some() => Some(tf.apply(p)),
                 _ => None,
             };
             if let (Some((k, dk)), Some(ke)) = (&kd, &kens) {
@@ -619,6 +660,14 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 match &kd {
                     Some((_, dk)) => g.iter_mut().zip(g4.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
                     None => g.iter_mut().zip(&g4).for_each(|(a, b)| *a += b),
+                }
+            }
+            if let Some(mk) = &minkowski {
+                let (l5, g5) = mk.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
+                loss += l5;
+                match &kd {
+                    Some((_, dk)) => g.iter_mut().zip(g5.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
+                    None => g.iter_mut().zip(&g5).for_each(|(a, b)| *a += b),
                 }
             }
             (loss, g)
@@ -707,7 +756,25 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         }
         None => serde_json::Value::Null,
     };
-    let final_loss = loss_mean + loss_scatter + loss_levels + loss_kappa + loss_marginal + loss_kurtosis;
+    let (loss_minkowski, minkowski_report) = match &minkowski {
+        Some(mk) => {
+            let l = mk.loss_and_grad(kurtosis_x, e - s, gcomm, cross.as_ref()).0;
+            let report = serde_json::json!({
+                "weight": args.minkowski_weight,
+                "of": if kappa_tf.is_some() { "kappa" } else { "map" },
+                "levels_nside": mk.levels_nside(),
+                "nu": mk.nu,
+                "h_over_level_std": mk.h,
+                "eps_over_mean_squared_gradient": mk.eps,
+                "sigma": mk.sigma_source,
+                "loss_final_term": l,
+                "final_z_over_members": mk.report(kurtosis_x, e - s, first_member, gcomm, cross.as_ref()),
+            });
+            (l, report)
+        }
+        None => (0.0, serde_json::Value::Null),
+    };
+    let final_loss = loss_mean + loss_scatter + loss_levels + loss_kappa + loss_marginal + loss_kurtosis + loss_minkowski;
     let sigma: Vec<f64> = sigma2.iter().map(|v| v.sqrt()).collect();
     // Residual of the mean per family, in units of its ergodic sigma
     // (sigma / sqrt(B): sigma itself for one map).
@@ -873,6 +940,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         },
         "kappa": kappa_report,
         "kurtosis": kurtosis_report,
+        "minkowski": minkowski_report,
         "marginal": {"weight": args.marginal_weight, "loss_final_term": loss_marginal},
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
