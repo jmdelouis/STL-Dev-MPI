@@ -20,12 +20,16 @@ Target journal: A&A.
 latexmk -pdf paper.tex
 ```
 
-The A&A class is not on CTAN. Download the A&A LaTeX macro package from
-aanda.org (author instructions) and put `aa.cls` and `aa.bst` in this
-directory: `paper.tex` then uses them. Without them it builds with the
-`article` class and `plainnat` (same text, rough layout), which is how the
-draft was checked (14 pages, no undefined reference). Build products are
-ignored by git.
+The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
+from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
+aanda.org, author instructions) and are kept in this directory; `lineno`
+comes from TeX Live. The draft builds to 15 pages with no warning (abstract
+under the 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
+for the corresponding author, `\email{...}` after each co-author (read by the
+editorial system, not printed), no ORCID, `[longauth]` only for long author
+lists. The float parameters and the `\FloatBarrier` before Sect. 7 keep the
+experiment's figures ahead of the discussion; the A&A production redoes the
+layout. Build products are ignored by git.
 
 ## Figures
 
