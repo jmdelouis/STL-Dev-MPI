@@ -13,6 +13,7 @@
 \usepackage{url}
 \usepackage{txfonts}
 \usepackage{placeins}
+\usepackage{tikz}
 % Let the many full-width floats of Sect. 6 share pages (draft layout).
 \renewcommand{\topfraction}{0.9}
 \renewcommand{\dbltopfraction}{0.9}
@@ -77,6 +78,8 @@ This paper presents STL-Dev-MPI, a port of that engine to distributed-memory mac
 \section{Method: a pyramidal, block-wise explicit gradient}
 \label{sec:method}
 
+A synthesis evaluates the statistics of a map and their gradient with respect to every pixel, hundreds of times. Two properties of the scattering covariance make this possible at any resolution. First, the gradient can be written by hand, family by family, and the intermediate fields it needs can be recomputed when they are needed instead of being stored: the memory of an evaluation is then that of the maps and of a few decimated fields, about 50 bytes per pixel at $L=4$, instead of the kilobytes per pixel that automatic differentiation keeps (Sects.~\ref{sec:ad} and \ref{sec:explicit}). Second, every operation of the statistics is local, except the final pixel means and the decimations that carry the fine moduli to the coarse levels, and both are sums: the statistics and their gradient are sums of contributions of blocks of pixels, each of which needs only the block and a thin halo around it (Sects.~\ref{sec:blocks} to \ref{sec:parallel}). The sky can then be split between processes like the grid of a finite-difference solver, and each process needs the memory of its share of the sky only.
+
 \subsection{Scattering covariance on a HEALPix pyramid}
 \label{sec:stats}
 
@@ -100,17 +103,69 @@ The synthesis minimises over the map $x$
 \end{equation}
 with $t$ the target, $f_i$ the field whose mean is $S_i$, and $N_{n}$ the number of pixels of level $n$: $\sigma_i^2$ is the variance of a mean of $N_n$ independent pixels, estimated on the target (ergodic hypothesis), and $\mathcal{L}_S$ is a reduced $\chi^2$. Without these weights the loss is dominated by the low-order coefficients and $S_3$, $S_4$ stay at 1--3$\sigma$ after 400 iterations; with them every family converges below $1\sigma$.
 
-\subsection{Block decomposition of the cross-scale terms}
+\subsection{What automatic differentiation stores}
+\label{sec:ad}
+
+The earlier syntheses on the sphere \citep{delouis2022,mousset2024} obtain the gradient from the automatic differentiation of a machine-learning framework. In reverse mode, every operation of the forward computation records the inputs that its derivative needs, and the record is kept until the backward pass has used it. For the statistics of Sect.~\ref{sec:stats} the record holds at least, for every level $n$: the wavelet fields $z_n$ and their moduli ($\frac{4}{3}LN$ complex and $\frac{4}{3}LN$ real values over the pyramid, for a map of $N$ pixels and one channel); the decimation chains of the moduli; and the second wavelet fields $\psi\star|z_n|$ and $\psi\star m_{d,n}$ for every finer level $d<n$ and every pair of orientations, $(n+1)L^2$ complex fields of $N_n = N/4^n$ pixels at level $n$, $\frac{16}{9}L^2N$ complex values in all, which alone is 455 bytes per pixel of the map at $L=4$. Actual implementations record more (normalised fields, gathered convolution taps, intermediate products), and the convolution geometry (the rotated stencil of every pixel and its interpolation weights) is usually precomputed for the whole sky and kept. In STL-Dev, the automatic-differentiation version of the same statistics holds 371\,MB of graph for a map of 49\,152 pixels ($\nside=64$, $J=5$, $L=2$, $K=5$), 7.5\,kB per pixel, on top of a stored geometry of 3.2\,kB per pixel \citep{stldev}. Both grow in proportion to the number of pixels: at $\nside=2048$ ($5\times10^7$ pixels) the graph would take about 380\,GB at $L=2$, more at $L=4$, and the geometry 160\,GB. This, and not the arithmetic, is what has limited the syntheses to one device and to moderate resolutions.
+
+\subsection{An explicit gradient}
+\label{sec:explicit}
+
+Every coefficient is the pixel mean, at its native level, of a product of two fields, $S=\langle a\,b^*\rangle_n$, or of a modulus. Its derivative is known in closed form: a cotangent on $S$ gives, pixel by pixel, a cotangent on $a$ proportional to $b$ and a cotangent on $b$ proportional to $a$, both divided by $N_n$. The chain then runs backwards through operations whose adjoints are explicit and sparse: the second wavelet convolution (its adjoint scatters every interpolated tap back to the four pixels it came from), the decimations ($D^\top$), the modulus ($\bar z = \overline{|z|}\,z/|z|$), the first wavelet convolution, and finally the decimations that made $x_n$ from $x$. Each adjoint costs about as much as the operation itself; the gradient is checked against finite differences, and the explicit gradient of the reference against its automatic differentiation (Table~\ref{tab:validation}).
+
+The fields that the backward pass needs are not kept: they are recomputed from the maps when the backward pass reaches them, block by block (Sect.~\ref{sec:sweeps}). This is the checkpointing strategy of automatic differentiation pushed to its limit, and it costs one extra evaluation of the forward fields. Only two kinds of quantities must survive from the forward to the backward pass, because they cannot be recomputed locally: the maps of all levels, $x_d=D^dx$ ($\frac{4}{3}N$ values per channel), and the stored moduli $m_{d,n}$ of Eq.~(\ref{eq:moduli}). The stored moduli are the only carriers of information across scales: $S_3$ and $S_4$ at level $n$ read the moduli of all the finer levels, but only after their decimation to level $n$, which divides their size by $4^{n-d}$. Summed over the pairs $d<n$, they hold $\frac{4}{9}LN$ values per channel, less than the moduli of the finest level alone. With the cotangents of both, the state of an evaluation is $2(\frac{4}{3}+\frac{4}{9}L)NC$ real values, 50 bytes per pixel and map at $L=4$, against the 7.5\,kB per pixel of graph and 3.2\,kB per pixel of geometry above. The convolution geometry is recomputed for each block and never stored (Sect.~\ref{sec:memory}).
+
+\subsection{Locality and blocks}
 \label{sec:blocks}
 
-The memory of a gradient computed by automatic differentiation is set by the cross-scale terms: $S_3$ and $S_4$ at level $n$ read the moduli of every finer level $d<n$, so the graph keeps $|z_d|$ for every $d$ and every orientation until the coarsest level is done. The pyramid makes the cost of the stored moduli themselves small: summed over the pairs $d<n$, Eq.~(\ref{eq:moduli}) holds about $\frac{4}{9}N$ values per channel and orientation for a map of $N$ pixels. The point is to compute them without ever holding the full-resolution fields. Since $D$ is linear,
+Every operation of the chain is local. A wavelet convolution reads the $K\times K$ stencil of a pixel, each tap interpolated from its four nearest pixels; a decimation step reads the fine pixels within $r=3\,\theta_{\rm fine}$ of a coarse centre; moduli and products act pixel by pixel. A field on a set $F$ of pixels of level $n$ therefore needs its inputs only on $F$ plus a \emph{halo} of a few pixels of that level, whatever the size of the map. Only two operations are not local, and both are sums. The coefficients are pixel means: they are sums of partial sums over any partition of the native level into blocks. The stored moduli carry $|z_d|$ across $n-d$ levels; since $D$ is linear,
 \begin{equation}
 m_{d,n} = \sum_k D^{\,n-d}\left(|z_d|\,\mathbf{1}_{F_k}\right),
 \label{eq:pieces}
 \end{equation}
-where $\{F_k\}$ is a partition of level $d$ into blocks of $b$ pixels. Each \emph{piece} needs $z_d$ on $F_k$ only, which needs $x_d$ on $F_k$ plus a convolution halo, and its decimation chain is supported on a cone that grows by a decimation halo per level. The gradient goes back through the transposed pieces, the derivative of the modulus and the adjoint of the wavelet convolution.
+where $\{F_k\}$ is a partition of level $d$ into blocks of $b$ pixels. Each \emph{piece} needs $z_d$ on $F_k$ only, which needs $x_d$ on $F_k$ plus a convolution halo, and its decimation chain is supported on a cone that grows by a decimation halo per level (Fig.~\ref{fig:blocks}). The gradient goes back through the transposed pieces, the derivative of the modulus and the adjoint of the wavelet convolution, on the same supports.
 
 Halos are counted in pixels of their level: $(K-1)/2 + 2$ for a convolution, $\lceil r/\theta\rceil + 1$ for a decimation, doubled for the pieces and their transposes so that every coarse row touched by a block sees its whole cone. Fine-level dilations are computed at the parent level ($k$ coarse rings cover at least $2k$ fine pixels). The blocks are NESTED ranges, compact on the sphere, so a halo is a thin ring around a patch.
+
+The statistics are thus a sum over blocks of partial sums, each computed from the block and its halo, and the gradient, which runs the same chain backwards, is a sum over blocks of contributions, each written into the block and its halo. Between two blocks nothing is kept but the maps, the stored moduli and their cotangents: the fields of a block, $z_n$, its modulus and the second wavelets on $F$ plus a halo, have a size set by $b$, not by $N$. The result does not depend on the blocks: any $b$, from 64 pixels to whole levels, gives the full-sky statistics and gradient to rounding (Sect.~\ref{sec:validation}).
+
+\begin{figure*}
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[font=\small]
+\def\H{1.25}
+\fill[blue!12] (2.625,0) rectangle (3.375,0.5);
+\fill[blue!12] (5.625,0) rectangle (6.375,0.5);
+\fill[blue!45] (3.375,0) rectangle (5.625,0.5);
+\fill[orange!50] (2.25,{\H}) rectangle (6,{\H+0.5});
+\fill[orange!15] (6,{\H}) rectangle (6.75,{\H+0.5});
+\fill[orange!50] (1.5,{2*\H}) rectangle (6,{2*\H+0.5});
+\fill[orange!15] (6,{2*\H}) rectangle (7.5,{2*\H+0.5});
+\fill[orange!50] (0,{3*\H}) rectangle (6,{3*\H+0.5});
+\fill[orange!15] (6,{3*\H}) rectangle (9,{3*\H+0.5});
+\foreach \d/\n in {0/31,1/15,2/7,3/3}{
+  \pgfmathsetmacro{\w}{0.375*2^\d}
+  \foreach \i in {0,...,\n}{\draw[gray!70] ({\i*\w},{\d*\H}) rectangle ++(\w,0.5);}
+  \node[anchor=east] at (-0.15,{\d*\H+0.25}) {level \d};
+}
+\draw[dashed,orange!70!black] (3.375,0.5) -- (2.25,{\H}) (2.25,{\H+0.5}) -- (1.5,{2*\H}) (1.5,{2*\H+0.5}) -- (0,{3*\H});
+\draw[dashed,orange!70!black] (5.625,0.5) -- (6.75,{\H}) (6.75,{\H+0.5}) -- (7.5,{2*\H}) (7.5,{2*\H+0.5}) -- (9,{3*\H});
+\foreach \d in {0,1,2}{\draw[->,thick,orange!70!black] (4.1,{\d*\H+0.55}) -- node[right,font=\footnotesize]{$D$} (4.1,{(\d+1)*\H-0.05});}
+\draw[very thick,dashed] (6,-0.8) -- (6,{3*\H+1.0});
+\node[below,font=\footnotesize] at (4.5,0) {block $F$};
+\node at (2.6,-0.65) {rank 0};
+\node at (9.5,-0.65) {rank 1};
+\foreach \c/\t [count=\k] in {blue!45/{block $F$ of level 0: wavelet field $z_0$, second wavelets, partial sums of the coefficients},
+  blue!12/{convolution halo: map values owned by the block's neighbours (by rank 1 across the boundary: halo exchange)},
+  orange!50/{piece $D^{n}(|z_0|\,\mathbf{1}_F)$, added to the stored moduli $m_{0,n}$},
+  orange!15/{ghost cells: values of the piece on cells owned by rank 1, sent to rank 1 and added there}}
+{\fill[\c] (12.4,{4.6-1.2*\k}) rectangle ++(0.5,0.4);
+ \draw[gray!70] (12.4,{4.6-1.2*\k}) rectangle ++(0.5,0.4);
+ \node[anchor=west,text width=5.6cm,font=\footnotesize] at (13.0,{4.8-1.2*\k}) {\t};}
+\end{tikzpicture}}
+\caption{Locality of the statistics, in one dimension (a cartoon of the sphere, where each level has four times fewer pixels than the level below). The wavelet field of a block $F$ of level 0 needs the map on $F$ and a convolution halo. Its modulus restricted to $F$ is decimated level by level (the piece of Eq.~\ref{eq:pieces}), on a support that grows by a decimation halo per level (dashed), and is added to the stored moduli. With the sky split between processes, a halo cell owned by another process is filled by a halo exchange, and a piece's values on cells owned by another process are sent to it and added (ghost reduction). The gradient runs the same supports backwards: transposed pieces, modulus derivative, convolution adjoint.}
+\label{fig:blocks}
+\end{figure*}
 
 \subsection{Sweeps}
 \label{sec:sweeps}
@@ -122,6 +177,13 @@ One evaluation of the loss and of its gradient is two sweeps over the levels.
 \emph{Downward sweep}, $n = J-1, \dots, 0$: for every block of level $n$, the fields of the upward sweep are recomputed; the coefficient cotangents $2(S_i - S_i(t))/(N_c\sigma_i^2)$ (real and imaginary parts for complex coefficients) are applied; the cotangents $g_{d,n}$ of the stored moduli of the finer levels are accumulated (they are complete once the coarser levels are done); the block's own chain is reversed from $g_{n,n'}$, $n'>n$, through the transposed pieces; then the modulus derivative and the wavelet adjoint give the cotangent of $x_n$ on the block.
 
 Finally the map cotangents of all levels are brought back to level 0 by Horner's scheme through the transposed decimations, $\nabla_x\mathcal{L} = \sum_d (D^\top)^d\,g_{x_d}$. Everything is in double precision and every summation order is fixed.
+
+\subsection{Why the gradient parallelises}
+\label{sec:parallel}
+
+Locality turns the gradient into a domain-decomposition problem, like the solution of a partial differential equation on a grid. Let the pixels of level 0 be split between $P$ processes as compact patches, each process owning the parents of its pixels at every level. A process can compute the contributions of all its blocks, in both sweeps, if it holds at every level its own pixels plus a ring of halo pixels, and if it knows the cotangents of the $N_c$ coefficients, which are global. Three kinds of communication are enough (Sect.~\ref{sec:mpi}): halo exchanges, which copy into the ring the values owned by the neighbouring processes (maps, stored moduli, cotangents); ghost reductions, which send the contributions that a process wrote into its ring (the edges of its pieces and of its transposed convolutions) to their owners, where they are added; and one global sum of the $N_c$ partial sums per evaluation, after which every process knows the statistics, the loss and the cotangents of the coefficients. Nothing else couples distant pixels.
+
+Three consequences follow. (i) The memory of a process is its share of the state of Sect.~\ref{sec:explicit}, $(50 + 192)\,N/P$ bytes at $L=4$ with the L-BFGS history, plus its halo ring and the transients of one block. The ring scales as the perimeter of the patch: at $\nside=1024$ on 64 processes a process owns 196\,608 pixels of level 0 and holds 13\% more with its halos (Sect.~\ref{sec:performance}). (ii) The communication of a process also scales as its perimeter, $\propto(N/P)^{1/2}$ at fixed level, plus a vector of $N_c$ coefficients, independent of $N$. (iii) There is no limit on the size of the map other than the number of processes: multiplying $N$ by four (one more level of $\nside$) with four times as many processes leaves the memory and the work of each process unchanged. A synthesis that does not fit one device runs on several, with the same result to rounding: $\nside=2048$ at $L=4$ does not fit one 16\,GB GPU but runs on two, and $\nside=4096$ runs on 16 GPUs of 16\,GB (Sect.~\ref{sec:gpu}). The coarsest levels hold fewer pixels than there are processes, so their halos may cover them entirely; they are small ($N/4^d$ pixels), and holding them in full costs little. Since the global sums are made in a fixed rank order, the result does not depend on $P$.
 
 \subsection{Memory}
 \label{sec:memory}
@@ -196,6 +258,7 @@ The ranks are split into $G$ groups of consecutive ranks (\texttt{MPI\_Comm\_spl
 An alternative decomposition (option \texttt{-{}-overlap}, CPU engine) trades computation for communication. Every rank evaluates, for the fine levels ($d < n_c$), its owned blocks and the halo blocks they depend on, on extended regions, so that the sweeps need no exchange; the coarse levels ($d\geq n_c$), small, are held whole and evaluated by rank 0. An evaluation then needs only the level-0 map halo, one global sum of the coarse stored moduli and of the map of level $n_c$, the coefficient sum, one broadcast of the coarse cotangents and the level-0 ghost reduction of the map cotangent. It agrees with the standard mode to $7\times10^{-16}$ on every fixture with 1, 2 and 4 ranks. \todo{timings of the overlap mode at scale.}
 
 \subsection{Performance}
+\label{sec:performance}
 
 Table~\ref{tab:cpu} and Fig.~\ref{fig:scaling} give the time of one evaluation (statistics and gradient) on three clusters: Datarmor (Ifremer; $2\times$ Xeon E5-2680 v4 per node, Intel MPI), the hpc cluster ($2\times$ AMD EPYC 9655 per node, OpenMPI 5) and Ir\`ene Rome (TGCC; AMD EPYC 7H12, OpenMPI 4.1). At $\nside=64$ the time drops by 10 at 28 ranks on Datarmor and by 11.5 at 128 ranks on hpc, where it saturates (a rank owns 384 pixels of level 0 at 128 ranks). At $\nside=1024$ the efficiency is 75\% from 24 to 192 ranks on one hpc node, and spreading the 192 ranks over 4 nodes costs 5\%; on Ir\`ene it is 85\% from 128 to 512 ranks. $L=4$ costs 1.3 to 1.5 times $L=2$ (12.8\,s per evaluation on 512 Ir\`ene ranks at $\nside=1024$, 33.1\,s on 160 ranks). Ensembles add the members' work and one exchange of partial sums between groups: a production ensemble of 10 maps at $\nside=1024$, $L=4$, with all the terms of Sect.~\ref{sec:kappa}, runs at 128.4\,s per evaluation (all members) on 640 Ir\`ene cores in 10 groups of 64 (316 evaluations in 11.3\,h, the loss going from $5.7\times10^4$ to 2.46); the same ensemble without the $\kappa$ terms ran at 149\,s on 160 hpc cores in 10 groups of 16. The state per rank (maps, stored moduli, cotangents, L-BFGS history) shrinks as $1/P$: 123\,MB at 24 ranks, 17\,MB at 192 for $\nside=1024$, $L=2$. In the Ir\`ene ensemble a rank owns 196\,608 cells of level 0 and holds 221\,760 with its halos; its state is 52.5\,MB, of which 37.7\,MB of L-BFGS history, 9.7\,MB of stored moduli and cotangents and 5.1\,MB of maps and cotangents (the halos weigh most on the stored moduli, which live on the coarse levels). What remains is the transients of one block (80--160\,MB for blocks of 16\,384 pixels, halved with blocks of 4096) and the MPI runtime (20--30\,MB per rank for Intel MPI, 200--350\,MB for OpenMPI~5). For comparison (on another machine), STL-Dev on the $\nside=64$ case takes 12.6 to 18\,s per evaluation on 4 CPU threads with a peak of 1.9\,GB, against 8.1\,s and 103\,MB for one STL-Dev-MPI rank on Datarmor.
 
@@ -369,7 +432,7 @@ Over the ten realisations, the relative standard deviation is 8--18\% for the va
 
 \subsection{Results}
 
-Figures~\ref{fig:maps} and \ref{fig:zooms} show the target, another realisation and two members; Figs.~\ref{fig:cl}--\ref{fig:minkowski} and Table~\ref{tab:zscores_n\nsidefig} compare the statistics. We quote the $\nside=1024$ ensembles below. % NUM2048
+Figures~\ref{fig:maps} and \ref{fig:zooms} show the target, another realisation, a Gaussian field with the same power spectrum and members of the ensemble; Figs.~\ref{fig:cl}--\ref{fig:minkowski} and Table~\ref{tab:zscores_n\nsidefig} compare the statistics. We quote the $\nside=1024$ ensembles below. % NUM2048
 
 \emph{Power spectrum.} Without the $\kappa$ terms the members' spectrum is 24\% rms off r000 over $\ell\geq31$, up to $8\sigma$ in the last band. With them, it is within 5.9\% rms and within $1\sigma$ of r000 in every band (median $|z|=0.24$; Fig.~\ref{fig:cl}). At $\nside=512$ both ensembles, which carry the $\kappa$ terms, are within 3.4--4.4\% rms and $0.6\sigma$. % NUM2048
 
@@ -382,15 +445,15 @@ Per pyramid level (Table~\ref{tab:mf_levels_n\nsidefig} and Fig.~\ref{fig:mf_lev
 
 \begin{figure*}
 \centering
-\figfile{figures/maps_mollweide_n\nsidefig.png}{0.8\textwidth}
-\caption{Convergence maps at $\nside=\nsidefig$ (Mollweide): the target r000, an independent realisation r001 of the same simulation suite, and two members of the ensemble with the $\kappa$ terms. Colour: $\kappa/\sigma({\rm r000})$, same range in every panel.}
+\figfile{figures/maps_mollweide_n\nsidefig.png}{0.9\textwidth}
+\caption{Convergence maps at $\nside=\nsidefig$ (Mollweide). Top: the target r000, an independent realisation r001 of the same simulation suite, and a Gaussian field with the angular power spectrum and the mean of r000; bottom: three members of the ensemble with the $\kappa$ terms. As in \citet{mousset2024}, the colour is logarithmic so that the texture shows: $u=\kappa/\sigma_{\rm r000}$ is displayed as $\log_{10}(u-u_{\rm min}+0.1)$, with $u_{\rm min}=-0.41$ the minimum of r000, on the same scale in every panel (the colour bar is labelled in $u$). The Gaussian field takes values below $u_{\rm min}$, which $\kappa$ cannot, shown at the bottom of the scale.}
 \label{fig:maps}
 \end{figure*}
 
 \begin{figure}
 \centering
 \figfile{figures/maps_gnomonic_n\nsidefig.png}{\columnwidth}
-\caption{Gnomonic zooms of 20, 6 and 2 degrees on the same centre in the maps of Fig.~\ref{fig:maps} (rows: r000, r001, two members), same colour scale.}
+\caption{Gnomonic zooms of 20, 6 and 2 degrees on the same centre in the maps of Fig.~\ref{fig:maps} (rows: r000, r001, the Gaussian field, two members), with the same logarithmic colour scale.}
 \label{fig:zooms}
 \end{figure}
 
