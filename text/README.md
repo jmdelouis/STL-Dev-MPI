@@ -13,6 +13,7 @@ Target journal: A&A.
 | `figures/` | figures and generated tables (`*_n512.*`, `*_n1024.*`, then `*_n2048.*`), with the `.txt` summaries the text quotes |
 | `scripts/` | the scripts of every data figure and table (below) |
 | `TODO_2048.md` | what to run and edit when the nside 2048 ensembles are available |
+| `paper.pdf` | the compiled draft, committed so that it can be shared: rebuild and commit it with every change of the text |
 
 ## Building
 
@@ -29,7 +30,30 @@ for the corresponding author, `\email{...}` after each co-author (read by the
 editorial system, not printed), no ORCID, `[longauth]` only for long author
 lists. The float parameters and the `\FloatBarrier` before Sect. 7 keep the
 experiment's figures ahead of the discussion; the A&A production redoes the
-layout. Build products are ignored by git.
+layout. Build products are ignored by git, except `paper.pdf`.
+
+## Overleaf
+
+This directory is also the Overleaf project
+https://www.overleaf.com/project/6ae0c881be7354f25bfc0005, through the
+Overleaf git bridge (a premium feature of the project owner's account) and
+`git subtree`. GitHub stays the reference; the Overleaf project holds the
+history of `text/` only. In the repository root, with the remote
+`overleaf` = `https://git.overleaf.com/6ae0c881be7354f25bfc0005` (user name
+`git`, password: a git token from Overleaf's Account Settings):
+
+```bash
+# Overleaf -> GitHub (first, before any push)
+git subtree pull --prefix text overleaf main -m "Paper: changes from Overleaf"
+git push origin main
+# GitHub -> Overleaf
+git subtree push --prefix text overleaf main
+```
+
+Pull before pushing and avoid editing on both sides at once. Pushes from git
+can drop or move Overleaf's comments and tracked changes; Overleaf has no
+branches or tags. Overleaf compiles its own PDF (main document: `paper.tex`,
+pdfLaTeX); `paper.pdf` here is rebuilt with `latexmk` and committed.
 
 ## Figures
 
