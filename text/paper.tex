@@ -1,42 +1,26 @@
 % STL-Dev-MPI paper, first draft (A&A).
 %
-% Builds with the A&A class when aa.cls and aa.bst are in this directory
-% (they are not on CTAN: download the A&A macro package from aanda.org and
-% unpack it here), and with the article class otherwise (same text, rough
-% layout).  See README.md.
+% Built with the A&A class 9.4 (aa.cls, aa.bst, from the A&A macro package
+% of aanda.org, kept in this directory).  See README.md.
 %
 % Figures of the experiment are drawn at nside \nsidefig; switch it to 2048
 % when the 2048 ensembles are measured (TODO_2048.md).  Lines whose numbers
 % come from the nside 512 / 1024 ensembles carry the comment "% NUM2048".
-\IfFileExists{aa.cls}{%
-  \documentclass[longauth]{aa}%
-  \def\aamode{1}%
-}{%
-  \documentclass[twocolumn,10pt,a4paper]{article}%
-}
-\ifdefined\aamode\else
-  \usepackage[margin=1.8cm]{geometry}
-  \usepackage[authoryear,round]{natbib}
-  \makeatletter
-  \newcommand{\institute}[1]{\gdef\@institute{#1}}
-  \newcommand{\inst}[1]{\textsuperscript{#1}}
-  \newcommand{\offprints}[1]{}
-  \newcommand{\titlerunning}[1]{}
-  \newcommand{\authorrunning}[1]{}
-  \newcommand{\email}[1]{\texttt{#1}}
-  \newcommand{\keywords}[1]{\gdef\@aakeywords{#1}}
-  \renewcommand{\abstract}[5]{\gdef\@aaabstract{\textit{Context.} #1 \textit{Aims.} #2 \textit{Methods.} #3 \textit{Results.} #4 \textit{Conclusions.} #5}}
-  \renewcommand{\maketitle}{\twocolumn[{\centering{\Large\bfseries\@title\par}\vspace{1em}{\begin{tabular}[t]{c}\@author\end{tabular}\par}\vspace{0.5em}{\small\@institute\par}\vspace{0.5em}{\small\@date\par}\vspace{1em}\begin{minipage}{0.9\textwidth}\small\@aaabstract\par\vspace{0.5em}\textbf{Key words.} \@aakeywords\end{minipage}\vspace{1.5em}}]}
-  \newenvironment{acknowledgements}{\section*{Acknowledgements}}{}
-  \newcommand{\subtitle}[1]{}
-  \newcommand{\tablefoot}[1]{\par\vspace{2pt}{\footnotesize #1\par}}
-  \makeatother
-\fi
+\documentclass{aa}
 \usepackage{graphicx}
 \usepackage{amsmath}
 \usepackage{xcolor}
 \usepackage{url}
 \usepackage{txfonts}
+\usepackage{placeins}
+% Let the many full-width floats of Sect. 6 share pages (draft layout).
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\dbltopfraction}{0.9}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.75}
+\renewcommand{\dblfloatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{dbltopnumber}{3}
 
 \newcommand{\nsidefig}{1024}
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
@@ -52,19 +36,21 @@
 \titlerunning{Scattering-covariance synthesis on distributed-memory machines}
 
 % TODO: author list and affiliations to be decided (verify the affiliation).
-\author{J.-M. Delouis\inst{1} \and \todo{co-authors}}
+% A&A 9.4: \corrauth for the corresponding author (footnote), \email{...}
+% after each co-author (extracted by the editorial system, not printed),
+% no ORCID; [longauth] only for long author lists.
+\author{J.-M. Delouis\inst{1}\corrauth{jean.marc.delouis@ifremer.fr} \and \todo{co-authors}}
 \authorrunning{J.-M. Delouis et al.}
-\institute{Laboratoire d'Oc\'eanographie Physique et Spatiale (LOPS), Univ. Brest, CNRS, Ifremer, IRD, Brest, France\\
-\email{jean.marc.delouis@ifremer.fr}}
+\institute{Laboratoire d'Oc\'eanographie Physique et Spatiale (LOPS), Univ. Brest, CNRS, Ifremer, IRD, Brest, France}
 \date{Received ...; accepted ...}
 
 \abstract
-{Generative models built on scattering-covariance statistics produce new realisations of a non-Gaussian field from one or a few examples, with a small, interpretable set of constraints. On the sphere they have been limited by the memory of automatic differentiation: a full-sky gradient at $\nside=2048$ ($5\times10^7$ pixels) fills a large GPU, and larger maps, several channels or time sequences do not fit on one device.}
-{We make the synthesis scale with the number of nodes of a distributed-memory machine, with a memory per process bounded by its share of the sky, and we test the syntheses of a strongly non-Gaussian field against the scatter of independent realisations.}
-{The statistics and their exact gradient are computed explicitly, without a computational graph, on a pyramid of anti-aliased HEALPix decimations, block by block: the cross-scale terms are carried by decimated moduli stored once per pair of levels, and every block needs its neighbours only through fixed halos. We implement the scheme in Rust with MPI (contiguous NESTED ranges, point-to-point halo exchanges, additive ghost cells, a distributed L-BFGS) and with one CUDA device per rank, and validate it against the reference Python implementation to $10^{-15}$. For weak-lensing convergence we add to the loss, in a gaussianised space, the first-order statistics of $\kappa$, the 1-D Wasserstein distance of the pixel histogram, the power and the kurtosis of every pyramid level, and the scatter of an ensemble of syntheses.}
-{The evaluation time drops as the inverse of the number of ranks with 75--85\% efficiency from 24 to 192 and from 128 to 512 CPU cores at $\nside=1024$, and every rank count gives the same losses to 16 digits. Ensembles of ten syntheses of the \citet{takahashi2017} convergence map at $\nside=1024$ lie within the scatter of ten independent realisations for the angular power spectrum, the per-level variance and the peak counts. % NUM2048
+{Scattering-covariance statistics generate new realisations of a non-Gaussian field from one or a few examples with a small, interpretable set of constraints. On the sphere they are limited by the memory of automatic differentiation: a full-sky gradient at $\nside=2048$ ($5\times10^7$ pixels) fills a large GPU.}
+{We make the synthesis scale with the nodes of a distributed-memory machine, each process holding a memory bounded by its share of the sky, and we test syntheses of a strongly non-Gaussian field against independent realisations.}
+{The statistics and their exact gradient are computed without a computational graph, block by block, on a pyramid of anti-aliased HEALPix decimations; the cross-scale terms are carried by decimated moduli stored once per pair of levels, and blocks interact only through fixed halos. The Rust implementation uses MPI (contiguous NESTED ranges, halo exchanges, additive ghost cells, a distributed L-BFGS) and one CUDA device per rank, and matches the reference Python code to $10^{-15}$. For weak-lensing convergence the loss adds, in a gaussianised space, the first-order statistics of $\kappa$, the Wasserstein distance of the histogram, the power and the kurtosis of every pyramid level, and the scatter of an ensemble.}
+{The evaluation time drops as the inverse of the number of ranks with 75--85\% efficiency up to 512 CPU cores at $\nside=1024$, with the same losses to 16 digits for any rank count. Ensembles of ten syntheses of the \citet{takahashi2017} convergence map at $\nside=1024$ lie within the scatter of ten independent realisations for the angular power spectrum, the per-level variance of $\kappa$ and the peak counts, but not for the Minkowski functionals of the finer levels. % NUM2048
 \todo{2048 results.}}
-{Scattering-covariance synthesis is no longer bound to the memory of one device. The same machinery applies to high-resolution, multi-channel and time-dependent geophysical fields, such as climate and ocean model outputs on HEALPix grids.}
+{Scattering-covariance synthesis is no longer bound to the memory of one device, and the same machinery applies to high-resolution, multi-channel and time-dependent geophysical fields such as climate and ocean model outputs.}
 
 \keywords{Methods: numerical -- Methods: statistical -- gravitational lensing: weak -- large-scale structure of Universe -- Techniques: image processing}
 
@@ -150,18 +136,19 @@ STL-Dev-MPI was written against fixtures dumped from STL-Dev; every test compare
 \hline\hline
 Quantity & Max.\ difference \\
 \hline
-Pixel indices, neighbourhoods, decimation sparsity & exact \\
+Pixel indices, neighbours, decimation sparsity & exact \\
 Pixel centres, stencil rotations & $10^{-14}$ \\
 Ring interpolation, decimation weights & $10^{-12}$ \\
 Block wavelet, adjoint, pieces & $8\times10^{-14}$ \\
 Statistics (values $O(1)$) & $7\times10^{-16}$ \\
 Map and band gradients & $9\times10^{-16}$ \\
 Gradient vs finite differences (relative) & $2.5\times10^{-9}$ \\
-2, 4 ranks vs 1 rank (threads and \texttt{mpirun}) & $7\times10^{-16}$ \\
+2, 4 ranks vs 1 (threads, \texttt{mpirun}) & $7\times10^{-16}$ \\
 GPU vs CPU statistics & $6\times10^{-16}$ \\
-L-BFGS losses vs STL-Dev, $\nside=64$, 25 evaluations & $2.3\times10^{-10}$ \\
+L-BFGS losses vs STL-Dev$^a$ & $2.3\times10^{-10}$ \\
 \hline
 \end{tabular}
+\tablefoot{$^a$ $\nside=64$, 25 evaluations.}
 \end{table}
 
 %======================================================================
@@ -320,19 +307,19 @@ Table~\ref{tab:kappa256} summarises the effect at $\nside=256$ (4-member ensembl
 \begin{table}
 \caption{Effect of the $\kappa$ terms on 4-member ensembles at $\nside=256$ (from \texttt{docs/kappa\_power\_spectrum.md}).}
 \label{tab:kappa256}
-\centering\small
+\centering\small\setlength{\tabcolsep}{4pt}
 \begin{tabular}{lccc}
 \hline\hline
- & no $\kappa$ term & $+\kappa$, $W_2$ & $+$ kurtosis \\
+ & none & $+\kappa$, $W_2$ & $+$ kurtosis \\
 \hline
-$C_\ell$ of $\kappa$, rms (max), $\ell\geq31$ & 12.5\% (24\%) & 6.6\% (14\%) & 6.5\% (14\%) \\
-$S_1$--$S_4$ of $g$ per member ($\sigma$) & 0.91--1.00 & 0.90--1.03 & 0.88--1.04 \\
-Kurtosis / target, $n=32,64$ & 0.6, 1.1 & 2.3, 3.0 & 1.03, 1.01 \\
-Kurtosis / target, $n=128,256$ & -- & 0.68, 1.32 & 1.00, 1.08 \\
-Cost per evaluation & 1 & 1.8 & 1.85 \\
+$C_\ell(\kappa)$, rms (max) & 12.5\% (24\%) & 6.6\% (14\%) & 6.5\% (14\%) \\
+$S_1$--$S_4$ of $g$ ($\sigma$) & 0.91--1.00 & 0.90--1.03 & 0.88--1.04 \\
+Kurtosis, $n=32,64$ & 0.6, 1.1 & 2.3, 3.0 & 1.03, 1.01 \\
+Kurtosis, $n=128,256$ & -- & 0.68, 1.32 & 1.00, 1.08 \\
+Cost / evaluation & 1 & 1.8 & 1.85 \\
 \hline
 \end{tabular}
-\tablefoot{Kurtosis ratios: medians over the members of the excess kurtosis of the $\kappa$ details over the target's (50, 100, 340, 513 at $n=32$, 64, 128, 256); for the control ensemble, 30 and 114 at $n=32$ and 64 (not measured at 128 and 256). The kurtosis ratios of the second and third columns come from a rerun of the second on a T4.}
+\tablefoot{Columns: no $\kappa$ term, then the $\kappa$ terms with the Wasserstein distance, then with the kurtosis term. $C_\ell(\kappa)$: rms and maximum relative deviation of the ensemble's $\kappa$ spectrum from the target's over $31\leq\ell\leq767$; $S_1$--$S_4$: residuals per member in units of $\sigma$. Kurtosis ratios: medians over the members of the excess kurtosis of the $\kappa$ details over the target's (50, 100, 340, 513 at $n=32$, 64, 128, 256); for the control ensemble, 30 and 114 at $n=32$ and 64 (not measured at 128 and 256). The kurtosis ratios of the second and third columns come from a rerun of the second on a T4.}
 \end{table}
 
 \begin{figure}
@@ -377,7 +364,7 @@ Over the ten realisations, the relative standard deviation is 8--18\% for the va
 
 \subsection{Results}
 
-Figure~\ref{fig:maps} shows the target, another realisation and two members; Figs.~\ref{fig:cl}--\ref{fig:minkowski} and Table~\ref{tab:zscores_n\nsidefig} compare the statistics. We quote the $\nside=1024$ ensembles below. % NUM2048
+Figures~\ref{fig:maps} and \ref{fig:zooms} show the target, another realisation and two members; Figs.~\ref{fig:cl}--\ref{fig:minkowski} and Table~\ref{tab:zscores_n\nsidefig} compare the statistics. We quote the $\nside=1024$ ensembles below. % NUM2048
 
 \emph{Power spectrum.} Without the $\kappa$ terms the members' spectrum is 24\% rms off r000 over $\ell\geq31$, up to $8\sigma$ in the last band. With them, it is within 5.9\% rms and within $1\sigma$ of r000 in every band (median $|z|=0.24$; Fig.~\ref{fig:cl}). At $\nside=512$ both ensembles, which carry the $\kappa$ terms, are within 3.4--4.4\% rms and $0.6\sigma$. % NUM2048
 
@@ -390,11 +377,17 @@ Per pyramid level (Table~\ref{tab:mf_levels_n\nsidefig} and Fig.~\ref{fig:mf_lev
 
 \begin{figure*}
 \centering
-\figfile{figures/maps_mollweide_n\nsidefig.png}{0.75\textwidth}\\[0.5em]
-\figfile{figures/maps_gnomonic_n\nsidefig.png}{0.66\textwidth}
-\caption{Convergence maps at $\nside=\nsidefig$: the target r000, an independent realisation r001 of the same simulation suite, and two members of the ensemble with the $\kappa$ terms. Top: Mollweide; bottom: gnomonic zooms of 20, 6 and 2 degrees on the same centre. Colour: $\kappa/\sigma({\rm r000})$, same range in every panel.}
+\figfile{figures/maps_mollweide_n\nsidefig.png}{0.8\textwidth}
+\caption{Convergence maps at $\nside=\nsidefig$ (Mollweide): the target r000, an independent realisation r001 of the same simulation suite, and two members of the ensemble with the $\kappa$ terms. Colour: $\kappa/\sigma({\rm r000})$, same range in every panel.}
 \label{fig:maps}
 \end{figure*}
+
+\begin{figure}
+\centering
+\figfile{figures/maps_gnomonic_n\nsidefig.png}{\columnwidth}
+\caption{Gnomonic zooms of 20, 6 and 2 degrees on the same centre in the maps of Fig.~\ref{fig:maps} (rows: r000, r001, two members), same colour scale.}
+\label{fig:zooms}
+\end{figure}
 
 \begin{figure}
 \centering
@@ -435,6 +428,7 @@ Per pyramid level (Table~\ref{tab:mf_levels_n\nsidefig} and Fig.~\ref{fig:mf_lev
 
 \tabfile{figures/mf_levels_n\nsidefig.tex}
 
+\FloatBarrier
 %======================================================================
 \section{Discussion and outlook}
 \label{sec:outlook}
@@ -462,7 +456,7 @@ We have presented STL-Dev-MPI, a distributed implementation of scattering-covari
 \todo{Acknowledgements: computing centres (Ifremer Datarmor, the hpc cluster, TGCC Ir\`ene under projects gen17863 and gen17889), funding.} This work used HEALPix \citep{gorski2005}, healpy \citep{zonca2019}, NumPy \citep{harris2020}, SciPy \citep{virtanen2020}, Matplotlib \citep{hunter2007}, rsmpi \citep{rsmpi}, cudarc \citep{cudarc} and cdshealpix \citep{cdshealpix}; the reference implementation is STL-Dev \citep{stldev}, with the anamorphosis of FOSCAT \citep{foscat}. MPI is the standard of \citet{mpi41}.
 \end{acknowledgements}
 
-\IfFileExists{aa.bst}{\bibliographystyle{aa}}{\bibliographystyle{plainnat}}
+\bibliographystyle{aa}
 \bibliography{refs}
 
 \appendix
