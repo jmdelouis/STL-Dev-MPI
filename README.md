@@ -69,7 +69,7 @@ maps never leave the clusters); only PDFs, PNGs and text come back.
 | `fig_minkowski.py` | `minkowski_n{N}_s0.pdf` (4 pixels), `_s1.pdf` (30 arcmin), `.txt` | caches |
 | `table_zscores.py` | `table_zscores_n{N}.tex` (input by `paper.tex`), `.txt` | caches |
 | `mf_levels.py` (`mf_levels.slurm`) | `mf_levels_n{N}.pdf`, `.tex`, `.txt`: Minkowski functionals of the maps degraded to each level, members and r001-r009 against r000 | maps (own cache `*_mfl.npz`) |
-| `fig_maps.py` | `maps_mollweide_n{N}.png`, `maps_gnomonic_n{N}.png` | maps |
+| `fig_maps.py` (`maps.slurm`) | `maps_mollweide_n{N}.png`, `maps_gnomonic_n{N}.png`: r000, r001, a Gaussian field with r000's spectrum and members, logarithmic colour scale as in Mousset et al. (2024) | maps |
 | `fig_scaling.py` | `scaling.pdf`, `.txt` | `benchmarks/` reports of the repository (runs locally) |
 | `make_all.sh` | measure + every figure for one nside | |
 | `paper_figures.slurm` | the hpc job: Minkowski test, nside 512, 1024, 2048 realizations (`STEPS`) | |
