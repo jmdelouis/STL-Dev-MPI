@@ -84,8 +84,11 @@ stl-synth --target MAP [options]
                         width 0.2 sigma_n) with least-squares derivatives on the 3x3 cells; default 0
   --minkowski-nside A-B levels of that term by nside; default 64 to nside / 2 (at the map's own nside
                         the functionals of kappa are those of g: the level power holds them)
-  --minkowski-sigma F   JSON of stl-minkowski --sigma-out: std of the functionals over realizations
-                        (and the thresholds and width used); default 1 % of the target's maximum
+  --minkowski-standardise standardise every level map by its own mean and std first (thresholds nu_i
+                        for every map, as mf_levels.py): the functionals then measure the shape only
+  --minkowski-sigma F   JSON of stl-minkowski --sigma-out: std of the functionals over realizations,
+                        with its estimator (thresholds, width, --minkowski-standardise or not);
+                        default 1 % of the target's maximum
   --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
                         distance between the sorted values of every member and of the target: holds
                         the pixel histogram; default 0
@@ -156,6 +159,7 @@ pub struct Args {
     pub minkowski_weight: f64,
     pub minkowski_nside: Option<(usize, usize)>,
     pub minkowski_sigma: Option<PathBuf>,
+    pub minkowski_standardise: bool,
     pub marginal_weight: f64,
     pub niter: usize,
     pub history_size: usize,
@@ -197,6 +201,7 @@ impl Args {
             minkowski_weight: 0.0,
             minkowski_nside: None,
             minkowski_sigma: None,
+            minkowski_standardise: false,
             marginal_weight: 0.0,
             niter: 50,
             history_size: 10,
@@ -290,6 +295,7 @@ impl Args {
                 "--kurtosis-nside" => a.kurtosis_nside = Some(parse_nside_range(k, it.next())?),
                 "--minkowski-nside" => a.minkowski_nside = Some(parse_nside_range(k, it.next())?),
                 "--minkowski-sigma" => a.minkowski_sigma = Some(it.next().ok_or("--minkowski-sigma needs a path")?.into()),
+                "--minkowski-standardise" => a.minkowski_standardise = true,
                 "--marginal-weight" => {
                     let v: f64 = it.next().ok_or("--marginal-weight needs a value")?.parse().map_err(|_| "--marginal-weight: not a number")?;
                     if !(v.is_finite() && v >= 0.0) {
@@ -611,7 +617,10 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             None => None,
         };
         let path = args.minkowski_sigma.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        Some(Minkowski::new(args.minkowski_weight, kurtosis_source, s, npix, members, &levels, file.as_ref().map(|f| (f, path.as_str())), gcomm)?)
+        // The sigma file's estimator wins.
+        let standardise = file.as_ref().map_or(args.minkowski_standardise, |f| f.standardise);
+        let sigma = file.as_ref().map(|f| (f, path.as_str()));
+        Some(Minkowski::new(args.minkowski_weight, kurtosis_source, s, npix, members, &levels, sigma, standardise, gcomm)?)
     } else {
         None
     };
@@ -766,6 +775,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 "nu": mk.nu,
                 "h_over_level_std": mk.h,
                 "eps_over_mean_squared_gradient": mk.eps,
+                "standardised_levels": mk.standardise,
                 "sigma": mk.sigma_source,
                 "loss_final_term": l,
                 "final_z_over_members": mk.report(kurtosis_x, e - s, first_member, gcomm, cross.as_ref()),

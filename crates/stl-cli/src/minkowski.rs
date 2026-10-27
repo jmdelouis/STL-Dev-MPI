@@ -16,12 +16,20 @@
 //! tangent plane at the cell, where the Christoffel symbols vanish: the
 //! covariant gradient and Hessian, and V1, V2 do not depend on the frame.
 //!
+//! With `standardise`, every level map is first standardised by its own
+//! mean and std (as `mf_levels.py` does), so that the thresholds are
+//! `nu_i` for every map and the functionals measure the shape of the field
+//! only (the level power term holds its variance); the gradient goes through
+//! the mean and the std.
+//!
 //! The term is `w / B sum_m mean_{n, k, i} ((V_k,i(map_m) - V_k,i(target)) / sigma_k,i)^2`,
 //! sigma the standard deviation of the functional over the realizations
 //! (`stl-minkowski --sigma-out`, same estimator), the thresholds where sigma
 //! is below 5 % of its maximum left out as in `mf_levels.py`.  The ranks of a
 //! group gather each level (a few MB), work on their own cells plus one ring
-//! of neighbours, and sum the functionals: no other exchange.
+//! of neighbours, and sum the functionals: no other exchange.  The (member,
+//! level) pairs run on host threads (`STL_MINKOWSKI_THREADS`, default the
+//! available cores); every pair is summed in a fixed order.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -46,6 +54,8 @@ pub struct SigmaFile {
     pub nu: Vec<f64>,
     pub h: f64,
     pub eps: f64,
+    /// Level maps standardised by their own mean and std.
+    pub standardise: bool,
     /// nside -> `[V0, V1, V2]` concatenated (3 x nu.len()).
     pub sigma: BTreeMap<usize, Vec<f64>>,
 }
@@ -69,7 +79,8 @@ impl SigmaFile {
             }
             sigma.insert(nside, s);
         }
-        Ok(SigmaFile { nu, h, eps, sigma })
+        let standardise = v["standardise"].as_bool().unwrap_or(false);
+        Ok(SigmaFile { nu, h, eps, standardise, sigma })
     }
 }
 
@@ -133,6 +144,38 @@ fn stencil(p: i64, nside: i64) -> ([u32; 9], [[f64; 9]; 5]) {
         }
     }
     (nb, w)
+}
+
+/// `f(0..items)` on host threads, in order.
+fn par_map<T: Send>(items: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let threads = std::env::var("STL_MINKOWSKI_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .clamp(1, items.max(1));
+    if threads == 1 {
+        return (0..items).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, T)> = std::thread::scope(|sc| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                sc.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= items {
+                            break mine;
+                        }
+                        mine.push((i, f(i)));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, v)| v).collect()
 }
 
 /// Logistic `s(u_i)` and `s'(u_i)`, `u_i = (x - t0 - i dt) / h`, for every
@@ -304,6 +347,7 @@ pub struct Minkowski {
     pub nu: Vec<f64>,
     pub h: f64,
     pub eps: f64,
+    pub standardise: bool,
     /// Where sigma comes from (a file, or 1 % of the target's maximum).
     pub sigma_source: String,
     levels: Vec<Level>,
@@ -316,7 +360,8 @@ impl Minkowski {
     /// `target`: owned slice `[s, e)` of the target (the field the term acts
     /// on); `levels` aligned on every rank's range; `comm`: the ranks sharing
     /// the sky.  Without `sigma`, sigma is 1 % of the target's maximum of
-    /// each functional over the thresholds (a crude scale).
+    /// each functional over the thresholds (a crude scale); with it, its
+    /// thresholds, width and regularisation, and `standardise` must agree.
     #[allow(clippy::too_many_arguments)]
     pub fn new<C: Comm>(
         weight: f64,
@@ -326,9 +371,15 @@ impl Minkowski {
         members: usize,
         levels: &[usize],
         sigma: Option<(&SigmaFile, &str)>,
+        standardise: bool,
         comm: &C,
     ) -> Result<Self, String> {
         let e = s + target.len();
+        if let Some((f, path)) = sigma {
+            if f.standardise != standardise {
+                return Err(format!("{path}: sigma of {} level maps", if f.standardise { "standardised" } else { "raw" }));
+            }
+        }
         let (nu, h, eps) = match sigma {
             Some((f, _)) => (f.nu.clone(), f.h, f.eps),
             None => (default_nu(), DEFAULT_H, DEFAULT_EPS),
@@ -342,12 +393,13 @@ impl Minkowski {
             nu: nu.clone(),
             h,
             eps,
+            standardise,
             sigma_source: sigma.map_or("1 % of the target's maximum".into(), |(_, p)| p.to_string()),
             levels: levels.iter().map(|&n| Level::new(n, npix, s, e)).collect(),
             terms: 0,
             members,
         };
-        let ys = mk.gather(target, target.len(), comm);
+        let (ys, _) = mk.gather(target, target.len(), comm);
         for (lv, y) in mk.levels.iter_mut().zip(&ys) {
             // Mean, std and mean squared gradient of the target at this level.
             let mut m = [0.0; 3];
@@ -405,8 +457,10 @@ impl Minkowski {
     }
 
     /// Every row of `x` (rows of `len` owned values at level 0) at every
-    /// level, gathered over the group: `[level][row * cells + cell]`.
-    fn gather<C: Comm>(&self, x: &[f64], len: usize, comm: &C) -> Vec<Vec<f64>> {
+    /// level, gathered over the group, `[level][row * cells + cell]`, and
+    /// standardised with `standardise`: then also the std of every level
+    /// map, `[level][row]` (1 otherwise).
+    fn gather<C: Comm>(&self, x: &[f64], len: usize, comm: &C) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
         self.levels
             .iter()
             .map(|lv| {
@@ -418,22 +472,39 @@ impl Minkowski {
                     }
                 }
                 comm.allreduce_sum(&mut full);
-                full
+                // Every rank holds the whole level: the same moments everywhere.
+                let stds = full
+                    .chunks_mut(lv.cells)
+                    .map(|f| {
+                        if !self.standardise {
+                            return 1.0;
+                        }
+                        let n = f.len() as f64;
+                        let m = f.iter().sum::<f64>() / n;
+                        let sd = (f.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n).sqrt();
+                        f.iter_mut().for_each(|v| *v = (*v - m) / sd);
+                        sd
+                    })
+                    .collect();
+                (full, stds)
             })
-            .collect()
+            .unzip()
     }
 
     /// The functionals of every row, `[row][level, V0..V2, threshold]`.
     pub fn functionals<C: Comm>(&self, x: &[f64], len: usize, comm: &C) -> Vec<Vec<f64>> {
-        self.values(&self.gather(x, len, comm), x.len() / len, comm)
+        self.values(&self.gather(x, len, comm).0, x.len() / len, comm)
     }
 
     /// The functionals of the gathered levels `ys` of `rows` rows.
     fn values<C: Comm>(&self, ys: &[Vec<f64>], rows: usize, comm: &C) -> Vec<Vec<f64>> {
         let nt = self.nu.len();
-        let mut v: Vec<f64> = (0..rows)
-            .flat_map(|row| self.levels.iter().zip(ys).flat_map(move |(lv, y)| lv.sums(&y[row * lv.cells..(row + 1) * lv.cells], nt)))
-            .collect();
+        let nl = self.levels.len();
+        let mut v: Vec<f64> = par_map(rows * nl, |i| {
+            let (row, lv, y) = (i / nl, &self.levels[i % nl], &ys[i % nl]);
+            lv.sums(&y[row * lv.cells..(row + 1) * lv.cells], nt)
+        })
+        .concat();
         comm.allreduce_sum(&mut v);
         let norms: Vec<f64> = self.levels.iter().flat_map(|lv| lv.norms().into_iter().flat_map(move |m| std::iter::repeat(m).take(nt))).collect();
         v.chunks(norms.len()).map(|r| r.iter().zip(&norms).map(|(x, m)| x * m).collect()).collect()
@@ -443,21 +514,57 @@ impl Minkowski {
     /// members; `comm` shares the sky, `cross` links the groups.
     pub fn loss_and_grad<C: Comm>(&self, x: &[f64], len: usize, comm: &C, cross: Option<&C>) -> (f64, Vec<f64>) {
         let nt = self.nu.len();
-        let ys = self.gather(x, len, comm);
-        let vals = self.values(&ys, x.len() / len, comm);
+        let rows = x.len() / len;
+        let (ys, stds) = self.gather(x, len, comm);
+        let vals = self.values(&ys, rows, comm);
         let w = self.weight / self.members as f64 / self.terms as f64;
         let mut loss = 0.0;
+        // Gradient on the owned cells of every (row, level); with
+        // `standardise`, the sums of g and g x over the level for the chain
+        // through the mean and the std.
+        let nl = self.levels.len();
+        let mut cots = Vec::with_capacity(rows * nl);
+        for v in &vals {
+            for (l, lv) in self.levels.iter().enumerate() {
+                cots.push(
+                    (0..3 * nt)
+                        .map(|k| {
+                            let z = (v[l * 3 * nt + k] - lv.target[k]) * lv.inv_sigma[k];
+                            loss += w * z * z;
+                            w * 2.0 * z * lv.inv_sigma[k]
+                        })
+                        .collect::<Vec<f64>>(),
+                );
+            }
+        }
+        let mut gls = par_map(rows * nl, |i| {
+            let (row, lv, y) = (i / nl, &self.levels[i % nl], &ys[i % nl]);
+            lv.vjp(&y[row * lv.cells..(row + 1) * lv.cells], &cots[i], nt)
+        });
+        let mut sums = vec![0.0; 2 * rows * nl];
+        if self.standardise {
+            for (i, gl) in gls.iter().enumerate() {
+                let (row, lv, y) = (i / nl, &self.levels[i % nl], &ys[i % nl]);
+                let xr = &y[row * lv.cells + lv.own.0..row * lv.cells + lv.own.1];
+                sums[2 * i] = gl.iter().sum();
+                sums[2 * i + 1] = gl.iter().zip(xr).map(|(g, v)| g * v).sum();
+            }
+        }
+        if self.standardise {
+            comm.allreduce_sum(&mut sums);
+        }
         let mut grad = vec![0.0; x.len()];
-        for (row, (v, g)) in vals.iter().zip(grad.chunks_mut(len)).enumerate() {
+        for (row, g) in grad.chunks_mut(len).enumerate() {
             for (l, (lv, y)) in self.levels.iter().zip(&ys).enumerate() {
-                let c: Vec<f64> = (0..3 * nt)
-                    .map(|k| {
-                        let z = (v[l * 3 * nt + k] - lv.target[k]) * lv.inv_sigma[k];
-                        loss += w * z * z;
-                        w * 2.0 * z * lv.inv_sigma[k]
-                    })
-                    .collect();
-                let gl = lv.vjp(&y[row * lv.cells..(row + 1) * lv.cells], &c, nt);
+                let at = row * nl + l;
+                let mut gl = std::mem::take(&mut gls[at]);
+                if self.standardise {
+                    // x = (y - m) / sd: dL/dy_q = (g_q - <g> - x_q <g x>) / sd.
+                    let nc = lv.cells as f64;
+                    let (a, b, sd) = (sums[2 * at] / nc, sums[2 * at + 1] / nc, stds[l][row]);
+                    let xr = &y[row * lv.cells + lv.own.0..row * lv.cells + lv.own.1];
+                    gl.iter_mut().zip(xr).for_each(|(gq, xq)| *gq = (*gq - a - xq * b) / sd);
+                }
                 // x_n is the mean of the 4^n children.
                 let k = 1usize << (2 * lv.n);
                 for (i, gi) in g.iter_mut().enumerate() {
@@ -559,9 +666,9 @@ mod tests {
             .collect();
         // std of n.a is 1 / sqrt(3): nu -1.5 ... 1.5 are t = -0.87 ... 0.87.
         let nu: Vec<f64> = (0..16).map(|i| -1.5 + 0.2 * i as f64).collect();
-        let sig = SigmaFile { nu: nu.clone(), h: 0.03, eps: 1e-10, sigma: BTreeMap::from([(nside, vec![1.0; 3 * nu.len()])]) };
+        let sig = SigmaFile { nu: nu.clone(), h: 0.03, eps: 1e-10, standardise: false, sigma: BTreeMap::from([(nside, vec![1.0; 3 * nu.len()])]) };
         run_ranks(1, |comm| {
-            let mk = Minkowski::new(1.0, &map, 0, npix, 1, &[0], Some((&sig, "unit")), comm).unwrap();
+            let mk = Minkowski::new(1.0, &map, 0, npix, 1, &[0], Some((&sig, "unit")), false, comm).unwrap();
             let v = mk.target_values();
             let lv = &mk.levels[0];
             let nt = nu.len();
@@ -596,7 +703,8 @@ mod tests {
         let maps = [field(nside, 1.1), field(nside, 2.7)];
         run_ranks(2, |comm| {
             let (s, e) = (comm.rank() * npix / 2, (comm.rank() + 1) * npix / 2);
-            let mk = Minkowski::new(0.7, &target[s..e], s, npix, 2, &[0, 1, 2], None, comm).unwrap();
+            for standardise in [false, true] {
+            let mk = Minkowski::new(0.7, &target[s..e], s, npix, 2, &[0, 1, 2], None, standardise, comm).unwrap();
             let len = e - s;
             let x: Vec<f64> = maps.iter().flat_map(|m| m[s..e].iter().copied()).collect();
             let (l0, g) = mk.loss_and_grad(&x, len, comm, None);
@@ -614,8 +722,9 @@ mod tests {
                 if comm.rank() == 0 {
                     let fd = (lp - lm) / (2.0 * h);
                     let rel = (fd - g[k]).abs() / g[k].abs().max(1e-3 * gmax);
-                    assert!(rel <= 1e-5, "pixel {k}: gradient {} vs finite difference {fd} (rel {rel:.1e})", g[k]);
+                    assert!(rel <= 1e-5, "standardise {standardise}, pixel {k}: gradient {} vs finite difference {fd} (rel {rel:.1e})", g[k]);
                 }
+            }
             }
         });
     }
@@ -627,10 +736,11 @@ mod tests {
         let npix = 12 * nside * nside;
         let target = field(nside, 0.3);
         let maps = [field(nside, 1.1), field(nside, 2.7)];
+        for standardise in [false, true] {
         let run = |ranks: usize| {
             run_ranks(ranks, |comm| {
                 let (s, e) = (comm.rank() * npix / ranks, (comm.rank() + 1) * npix / ranks);
-                let mk = Minkowski::new(0.7, &target[s..e], s, npix, 2, &[0, 1, 2], None, comm).unwrap();
+                let mk = Minkowski::new(0.7, &target[s..e], s, npix, 2, &[0, 1, 2], None, standardise, comm).unwrap();
                 let x: Vec<f64> = maps.iter().flat_map(|m| m[s..e].iter().copied()).collect();
                 let (l, g) = mk.loss_and_grad(&x, e - s, comm, None);
                 (l, g, mk.functionals(&x, e - s, comm), mk.target_values())
@@ -651,6 +761,7 @@ mod tests {
                     assert!((a - b).abs() <= 1e-12 * scale, "rank {r} row {row} pixel {i}: {a} vs {b}");
                 }
             }
+        }
         }
     }
 }

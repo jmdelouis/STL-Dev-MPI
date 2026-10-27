@@ -5,8 +5,9 @@
 //!     stl-minkowski REF MAP... --sigma-out sigma.json      std over REF and the MAPs
 //!     stl-minkowski REF MAP... --sigma sigma.json          z of the MAPs against REF
 //!
-//! Options: `--nside A-B` levels (default 64 to nside / 2), `--h X` and
-//! `--eps X` (defaults 0.2 and 0.01; with `--sigma`, those of the file),
+//! Options: `--nside A-B` levels (default 64 to nside / 2), `--h X`,
+//! `--eps X` (defaults 0.2 and 0.01) and `--standardise` (level maps
+//! standardised by their own mean and std; with `--sigma`, the file's),
 //! `--json OUT` every value.  With `--sigma`, prints per level and
 //! functional the median and maximum of |z| over maps and thresholds and the
 //! rms over the thresholds of the maps' median z, as `mf_levels.py`.
@@ -27,6 +28,7 @@ fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (mut maps, mut range, mut h, mut eps) = (Vec::<PathBuf>::new(), None, DEFAULT_H, DEFAULT_EPS);
     let (mut sigma_out, mut sigma_in, mut json) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
+    let mut standardise = false;
     let mut it = argv.iter();
     while let Some(k) = it.next() {
         let mut val = || it.next().ok_or(format!("{k} needs a value"));
@@ -42,12 +44,13 @@ fn run() -> Result<(), String> {
             "--sigma-out" => sigma_out = Some(val()?.into()),
             "--sigma" => sigma_in = Some(val()?.into()),
             "--json" => json = Some(val()?.into()),
+            "--standardise" => standardise = true,
             o if o.starts_with("--") => return Err(format!("unknown option {o}")),
             path => maps.push(path.into()),
         }
     }
     if maps.len() < 2 {
-        return Err("usage: stl-minkowski REF MAP... [--nside A-B] [--h X] [--eps X] [--sigma-out F] [--sigma F] [--json F]".into());
+        return Err("usage: stl-minkowski REF MAP... [--nside A-B] [--h X] [--eps X] [--standardise] [--sigma-out F] [--sigma F] [--json F]".into());
     }
     let reference = read_map(&maps[0])?;
     let npix = reference.len();
@@ -68,14 +71,14 @@ fn run() -> Result<(), String> {
         None => {
             let nu = default_nu();
             let sigma = level_nside.iter().map(|&ns| (ns, vec![1.0; 3 * nu.len()])).collect();
-            SigmaFile { nu, h, eps, sigma }
+            SigmaFile { nu, h, eps, standardise, sigma }
         }
     };
     let nt = file.nu.len();
     let label = sigma_in.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
     // [map][level, V0..V2, threshold], the reference first.
     let values: Vec<Vec<f64>> = stl_mpi::threads::run_ranks(1, |comm| -> Result<Vec<Vec<f64>>, String> {
-        let mk = Minkowski::new(1.0, &reference, 0, npix, 1, &levels, Some((&file, label.as_str())), comm)?;
+        let mk = Minkowski::new(1.0, &reference, 0, npix, 1, &levels, Some((&file, label.as_str())), file.standardise, comm)?;
         let mut out = vec![mk.target_values()];
         for p in &maps[1..] {
             let m = read_map(p)?;
@@ -91,7 +94,7 @@ fn run() -> Result<(), String> {
     let per = 3 * nt;
     let split = |v: &[f64], l: usize| -> Vec<Vec<f64>> { (0..3).map(|k| v[l * per + k * nt..l * per + (k + 1) * nt].to_vec()).collect() };
     let mut report = serde_json::json!({
-        "nu": file.nu, "h": file.h, "eps": file.eps,
+        "nu": file.nu, "h": file.h, "eps": file.eps, "standardise": file.standardise,
         "reference": maps[0], "maps": maps[1..],
     });
     if let Some(out) = &sigma_out {
@@ -108,7 +111,10 @@ fn run() -> Result<(), String> {
                 serde_json::json!({"sigma": split(&sd, 0), "mean": split(&mean, 0), "reference": split(&values[0], l)}),
             );
         }
-        let s = serde_json::json!({"nu": file.nu, "h": file.h, "eps": file.eps, "reference": maps[0], "maps": maps[1..], "levels": lv});
+        let s = serde_json::json!({
+            "nu": file.nu, "h": file.h, "eps": file.eps, "standardise": file.standardise,
+            "reference": maps[0], "maps": maps[1..], "levels": lv,
+        });
         std::fs::write(out, serde_json::to_string_pretty(&s).unwrap()).map_err(|e| format!("{}: {e}", out.display()))?;
         eprintln!("sigma over {} maps -> {}", values.len(), out.display());
     }
