@@ -275,6 +275,8 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--minkowski-standardise` | off | standardise every level map by its own mean and std first (as `mf_levels.py`); the sigma file decides when given |
 | `--minkowski-sigma F` | 1 % of the target's maximum | std of the functionals over realizations, from `stl-minkowski --sigma-out` |
 | `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
+| `--marginal-tail-weight X` | 0 | hold the most extreme values: the same squared differences over the K smallest and K largest ranks, without the 1/N (below) |
+| `--marginal-tail K` | 100 | ranks at each end of that term |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
@@ -330,6 +332,14 @@ nside 256.  Two terms fix it:
   keeps the matching from moving the statistics (S3 of the final map 0.6
   instead of 3.4 sigma).  X = 1000 per member (X = 1000 B for an ensemble);
   one sample sort per evaluation.
+- `--marginal-tail-weight X --marginal-tail K` adds
+  `X / B sum_m sum_i (x_m,(i) - t_(i))^2` over the K smallest and K largest
+  ranks, without the 1/N.  The 1/N leaves the few most extreme values free
+  (a maximum of g 0.3 below the target's adds 3e-8 to the squared distance
+  at nside 512), and the
+  histogram matching then puts the target's largest kappa on whatever
+  pixels rank first; a term on `kappa = f(g)` never sees them.  Same sort
+  as `--marginal-weight`.
 
 With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
 over l = 31-767, with every gaussianised family still at 1 sigma per member.
