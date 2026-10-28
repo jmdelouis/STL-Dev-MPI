@@ -118,8 +118,9 @@ until they are redrawn in the paper's style.
   (28 Oct; not used in production).
 - Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
   garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
-  (preliminary: loss still decreasing; continued on Datarmor to 600 iterations,
-  same setting, commit 39d2f60).
+  (preliminary: loss still decreasing; continuations with the same setting,
+  commit 39d2f60: Irene job 6090002, +150 iterations, queued, then the 2048
+  ensemble 6090003, queued; Datarmor to 600 iterations, then 2048).
 - Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
 - Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
   `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).
