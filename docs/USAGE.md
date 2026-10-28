@@ -339,7 +339,9 @@ nside 256.  Two terms fix it:
   at nside 512), and the
   histogram matching then puts the target's largest kappa on whatever
   pixels rank first; a term on `kappa = f(g)` never sees them.  Same sort
-  as `--marginal-weight`.
+  as `--marginal-weight`.  At nside 512, at 1 per member with K = 100, it
+  holds the tail of kappa but shifts variance between the two finest levels
+  of g (`kappa_power_spectrum.md` §8.6); not in the recommended setting.
 
 With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
 over l = 31-767, with every gaussianised family still at 1 sigma per member.

@@ -36,7 +36,11 @@ from nside 256 on with the native level, it does the same at nside 512 and
 brings V1 at 512 back too, without cost to the other statistics.  The
 largest V1, V2 deviations stay at 4-6 at levels 64-256, and the kurtosis of
 kappa at 512 rises to +4 cosmic sigma (control +1 to +2), as when the term
-is added to a converged ensemble (§8).
+is added to a converged ensemble (§8).  That excess sits in the few largest
+values of g, which the histogram term leaves free.  Holding them
+(`--marginal-tail-weight`) brings the kurtosis back.  At 1 per member it
+degrades the level variances of g and the Minkowski functionals of the two
+finest levels (§8.6).
 
 ## 1. Diagnosis: a Gaussian copula at small scales
 
@@ -220,6 +224,8 @@ python tools/gaussianize.py match table.npz ens_m000_synthesis_nested.npy ens_m0
   §8.5).  It costs the tail of kappa at the finest level (kurtosis +4
   cosmic sigma at nside 512, peaks above 3 sigma -0.9), and 15 % per
   evaluation.  Not on a converged ensemble (§8.4).
+- Not `--marginal-tail-weight`: at 1 per member it holds the tail of kappa
+  but shifts variance between the two finest levels of g (§8.6).
 
 Open points:
 
@@ -231,6 +237,9 @@ Open points:
 - The V1, V2 of the kappa levels keep maxima of 4-6 cosmic sigma at 64-256
   with or without the Minkowski term; its 3 x 3 stencil does not see the
   pixel scale of each level (§8.2, §8.4, §8.5).
+- The kurtosis of kappa at the finest level is +2 to +4 cosmic sigma high.
+  It comes from the few largest values of g (§8.6).  Holding them at 1 per
+  member costs the level variances.
 - Not yet tested at nside 1024 and 2048.  The table of knots has 256 points,
   for tails beyond 5 sigma at 2048.
 
@@ -684,6 +693,85 @@ at every level and V1 at the native level go back to cosmic variance, the
 V1, V2 offsets at 128-256 shrink, and the rest of the loss does not suffer.
 Two things it does not fix: V1, V2 maxima of 4-6 at 64-256 and of 4.8 for V2
 at 512 (reference 3.5-3.8), and the kurtosis of kappa at the finest level,
-4 cosmic sigma high whether the term starts early or late.  Untested: a
-larger kurtosis weight at the finest level, and derivatives that keep the
-pixel scale.
+4 cosmic sigma high whether the term starts early or late.  §8.6 finds
+where that excess comes from and tests a term on the extreme ranks of g.
+Untested: derivatives that keep the pixel scale.
+
+### 8.6 The extreme ranks of g
+
+The kurtosis term acts on `kappa = f(g)` through the 256 knots.  cv10 and
+`mf_levels.py` judge the histogram-matched kappa.  On the members of §8.5
+the two disagree.  The excess kurtosis of the finest details at 512 is
+793-890 through the knots (r000: 855) but 1069-1598 after matching (control
+at 450 it: 814-929 and 975-1450).  The members compress the top of g: their
+three largest values are at 4.77-4.82, against 4.80, 4.90 and 5.11 for the
+target.  The matching still gives those pixels the target's largest kappa
+(0.078, 0.069, ...), often next to low siblings.  Putting the knot values
+back on those three pixels alone brings the matched excess to 842-957.  A
+larger kurtosis weight would act on a quantity already at its target.  The
+1/N of the histogram term is what leaves those ranks free: a maximum of g
+0.3 below the target's adds 3e-8 to the squared distance at nside 512.
+
+`--marginal-tail-weight X --marginal-tail K` (USAGE.md) adds
+`X / B sum_m sum_i (x_m,(i) - t_(i))^2` over the K smallest and K largest
+ranks of each member, without the 1/N.  The 512 stage of §8.5 is redone
+with `--marginal-tail-weight 10 --marginal-tail 100` (1 per member) and
+nothing else changed, from the same nside-256 members with the term.  Against
+the control and §8.5 at 450 iterations (`mf_levels.py` as above):
+
+| level, functional | r001-r009 | control, 450 it | from 256 (§8.5) | with the tail |
+|---|---|---|---|---|
+| 64 V0 | 0.91 / 2.93 / 0.90 | 0.81 / 3.07 / 1.11 | 0.43 / 3.01 / 0.85 | 0.59 / 3.82 / 0.97 |
+| 64 V1 | 1.05 / 3.45 / 1.09 | 1.36 / 5.20 / 1.55 | 1.27 / 4.56 / 1.58 | 1.22 / 3.87 / 1.38 |
+| 64 V2 | 1.06 / 3.52 / 1.11 | 1.03 / 4.41 / 1.28 | 1.06 / 5.63 / 1.32 | 1.01 / 5.34 / 1.16 |
+| 128 V0 | 1.49 / 3.61 / 1.63 | 1.52 / 3.32 / 1.83 | 0.85 / 2.27 / 1.01 | 1.01 / 2.95 / 1.42 |
+| 128 V1 | 1.14 / 3.63 / 1.17 | 1.96 / 6.11 / 2.39 | 1.28 / 4.85 / 1.61 | 1.53 / 5.15 / 1.83 |
+| 128 V2 | 0.94 / 3.55 / 1.11 | 1.70 / 5.75 / 2.03 | 1.39 / 5.66 / 1.61 | 1.41 / 4.84 / 1.66 |
+| 256 V0 | 1.93 / 3.63 / 2.00 | 2.78 / 3.62 / 2.69 | 0.72 / 1.76 / 0.90 | 1.40 / 3.47 / 1.72 |
+| 256 V1 | 1.20 / 3.76 / 1.31 | 2.01 / 5.40 / 2.52 | 1.70 / 4.24 / 1.71 | 2.83 / 5.69 / 3.09 |
+| 256 V2 | 1.10 / 3.69 / 1.18 | 2.38 / 6.37 / 2.51 | 1.73 / 5.75 / 2.02 | 3.11 / 10.06 / 3.67 |
+| 512 V1 | 1.15 / 3.70 / 1.18 | 1.53 / 3.45 / 1.60 | 0.86 / 2.31 / 0.97 | 2.99 / 4.81 / 2.93 |
+| 512 V2 | 0.94 / 3.45 / 0.96 | 1.61 / 7.48 / 2.24 | 0.79 / 4.81 / 1.67 | 1.99 / 8.53 / 2.77 |
+
+| | control, 450 it | from 256 (§8.5) | with the tail |
+|---|---|---|---|
+| loss after 300 it; after 450 it | 2.725; 1.718 | 2.563; 1.574 | 6.692; 4.929 |
+| sum over the 2 K = 200 tail ranks, per member; top 3 deviations (standardised) | - | 0.17-2.74; up to 0.34 | 0.0003-0.0014; below 0.02 |
+| excess kurtosis of the finest kappa details, knots / matched (r000 855) | 814-929 / 975-1450 | 793-890 / 1069-1598 | 863-914 / 917-1013 |
+| mean, var of g | 2.54, 12.97 | 2.93, 11.15 | 12.75, 24.55 |
+| S1 S2 S3 S4, rms | 3.22 3.19 1.39 0.80 | 3.28 3.26 1.28 0.76 | 5.37 4.99 1.85 1.10 |
+| kappa term; mean of kappa | 0.0195; 3.12 | 0.0134; 2.58 | 0.173; 9.27 |
+| level power term; finest level / 256 variance over the target's | 0.769; 0.78 / 1.10 | 0.691; 0.79 / 1.09 | 2.716; 0.62 / 1.32 |
+| var of the levels of g, 128 / 256 / 512 (cv10) | +6.0 / +4.8 / -7.8 | +5.7 / +4.1 / -7.4 | +8.0 / +15.6 / -13.4 |
+| var of kappa, 256 / 512 (cv10) | -1.0 / +0.4 | +0.3 / -1.2 | +1.4 / -2.0 |
+| kurtosis of kappa at 64 / 128 / 512 (cv10) | +0.0 / +0.1 / +2.3 | +0.0 / +0.2 / +4.0 | +0.4 / +0.5 / +0.9 |
+| peaks above 3 / 5 / 10 sigma (cv10) | +0.1 / +0.1 / -1.1 | -0.9 / -0.5 / -0.6 | +0.8 / +1.2 / -0.5 |
+| C_l, l >= 31: median / max abs z (cv10) | 0.3 / 0.6 | 0.2 / 0.6 | 0.3 / 1.5 |
+| term's estimator, max abs z of V1 / V2 at 256; at 512 | 7.5 / 22.8; 3.5 / 10.5 | 1.5 / 1.2; 1.2 / 1.1 | 3.3 / 1.8; 2.6 / 1.1 |
+| s / eval (2 T4) | 41.3 | 47.3 | 48.2 |
+
+- **The tail is held and the kurtosis comes back.**  The top three ranks
+  sit within 0.02 standardised units of the target's.  The matched excess
+  of the finest details falls to 917-1013, and the kurtosis of kappa at 512
+  to +0.9 cosmic sigma, every member within +1.4.
+- **Everything else lags.**  From evaluation 40 on, the loss is about three
+  times that of §8.5 at the same evaluation (23.3 against 6.9 at 120, 4.93
+  against 1.57 at the end).  The level-power term carries most of it and
+  does not move over the last 150 iterations.  The finest level of g holds
+  0.62 of the target's variance at 300 and at 450 iterations, and 256 holds
+  1.32.  cv10 sees the same shift: level variances of g +15.6 / -13.4
+  cosmic sigma at 256 / 512.  The V1, V2 of the two finest levels go out
+  with it (medians 2.0-3.1, maxima up to 10).  Peaks above 5 sigma rise to
+  +1.2 and the largest C_l deviation to 1.5.
+- The run does not tell slow convergence from a conflict between the held
+  tail and the finest-level variance.  Per pixel, the tail's curvature (2 X
+  / B = 2) is about 3000 times the histogram term's (2 w / (B N)), and the
+  L-BFGS step scaling follows the stiffest directions.  The rest of the
+  loss still falls (-26 % over the last 150 iterations); the level power
+  does not.
+
+So, at 1 per member and K = 100, the term holds the tail it was written
+for.  The price is the level variances and the Minkowski functionals of the
+two finest levels.  It is not part of the §6 command.  Untested: a softer
+tail (0.1 per member, K = 30; the top three ranks carried the whole
+excess), and a longer run.
