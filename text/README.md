@@ -112,9 +112,14 @@ until they are redrawn in the paper's style.
   the runs and the other statistics: `docs/kappa_power_spectrum.md` sections 8.4
   (term added to the converged ensemble) and 8.5 (term from nside 256 on), and
   the recommendation in section 6 (branch `claude/kappa-minkowski`, commit 9b323f8).
+  The tail term (`--marginal-tail-weight`, `--marginal-tail`, commit e0496a1)
+  with the Minkowski term from nside 256: judged on garoupe,
+  `/tmp/jmdeloui-mf/cv10_n512ft.txt` and `/tmp/jmdeloui-mf/mfl512t/mf_levels_n512.txt`
+  (28 Oct; not used in production).
 - Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
   garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
-  (preliminary: loss still decreasing; continuation 6090002 queued).
+  (preliminary: loss still decreasing; continued on Datarmor to 600 iterations,
+  same setting, commit 39d2f60).
 - Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
 - Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
   `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).
