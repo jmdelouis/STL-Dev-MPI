@@ -564,3 +564,54 @@ state; the native level at 512 (`--minkowski-nside 64-512`), which helped
 V2 at 256 in §8.3; and derivatives that keep the pixel scale (a wider
 stencil or harmonic derivatives), so that the term sees what the judge
 sees.
+
+### 8.5 The term from nside 256 on
+
+`n512_garoupe_kurt_c` comes from three stages: `n256_1961965` (10 members,
+200 iterations from the nside-128 members, `--level-power-weight 10
+--scatter-weight 1` only), `n512` (300 iterations, the setting of §6 and §7)
+and `n512c` (150 more).  The chain is redone with the term at 0.025 per
+member at every stage, native level included, from the same nside-128
+members and the same seed, on two T4:
+
+- 256: `--kappa-table knots256.npy --kappa-weight 0 --minkowski-weight 0.25
+  --minkowski-nside 64-256 --minkowski-sigma sig256s.json`.  The table only
+  gives the term `kappa = f(g)`; there are no kappa statistics, no marginal
+  and no kurtosis term at this stage, as in the control;
+- 512: `--minkowski-weight 0.25 --minkowski-nside 64-512 --minkowski-sigma
+  sig512s.json` added to both runs.
+
+At 256, against `n256_1961965` (`mf_levels.py`, median / max |z| / rms over
+nu of the members' median z):
+
+| level, functional | r001-r009 | `n256_1961965` | with the term |
+|---|---|---|---|
+| 64 V0 | 0.91 / 2.93 / 0.90 | 1.60 / 3.34 / 1.68 | 0.34 / 1.64 / 0.47 |
+| 64 V1 | 1.05 / 3.45 / 1.09 | 1.26 / 5.45 / 1.44 | 0.90 / 5.64 / 1.09 |
+| 64 V2 | 1.06 / 3.52 / 1.11 | 1.03 / 4.57 / 1.20 | 0.77 / 3.72 / 0.93 |
+| 128 V0 | 1.49 / 3.61 / 1.63 | 2.00 / 6.17 / 2.12 | 1.26 / 2.79 / 1.24 |
+| 128 V1 | 1.14 / 3.63 / 1.17 | 1.49 / 7.01 / 1.79 | 0.86 / 4.36 / 0.99 |
+| 128 V2 | 0.94 / 3.55 / 1.11 | 1.16 / 5.10 / 1.41 | 0.90 / 4.31 / 1.11 |
+| 256 V0 | 1.93 / 3.63 / 2.00 | 2.20 / 4.80 / 2.39 | 1.35 / 2.37 / 1.37 |
+| 256 V1 | 1.20 / 3.76 / 1.31 | 2.03 / 9.69 / 2.52 | 2.47 / 5.58 / 2.76 |
+| 256 V2 | 1.10 / 3.69 / 1.18 | 1.03 / 15.01 / 3.29 | 1.34 / 10.97 / 2.69 |
+
+| | `n256_1961965` | with the term |
+|---|---|---|
+| mean, var of g; S1 S2 S3 S4, rms (ergodic sigma) | 0.06, 7.89; 1.06 1.15 1.12 0.70 | 0.36, 7.78; 1.09 1.19 1.13 0.71 |
+| term's estimator, max abs z of V1 / V2 at 64 / 128 / 256 | 4.1 / 4.8, 6.9 / 8.4, 6.1 / 9.7 | 1.5 / 1.8, 2.7 / 2.9, 3.8 / 3.6 |
+| kurtosis of kappa at 64 / 128 / 256 (cv10) | -0.2 / +0.2 / +1.8 | +4.4 / +10.8 / -1.4 |
+| peaks above 3 / 5 / 10 sigma (cv10) | +0.2 / +0.3 / +0.4 | +0.1 / +1.0 / +0.5 |
+| C_l, l >= 31: median / max abs z (cv10) | 0.7 / 2.3 | 0.7 / 2.0 |
+| s / eval | 9.4 (160 CPU ranks) | 6.5 (2 T4) |
+
+- **V0 and V1, V2 at 64 and 128 go back to cosmic variance**, apart from
+  one V1 maximum at 64 (5.6).  The term's own estimator is within 3.8
+  everywhere.
+- **At the native level V1, V2 stay out**: maxima 5.6 and 11 (control 9.7
+  and 15), and the median of V1 rises from 2.0 to 2.5.  The pixel scale of
+  the native level is what the stencil smooths most (§8.2).
+- **Without a kurtosis term the term fattens the tails at 64 and 128**:
+  kurtosis of kappa +4.4 and +10.8 cosmic sigma, against -0.2 and +0.2.  In
+  §8.3 the kurtosis term was there and nothing moved.  The 512 stage has
+  it.
