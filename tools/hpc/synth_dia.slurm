@@ -17,6 +17,8 @@
 set -euo pipefail
 export G=${G:-$SCRATCH/stl-dia}
 source "$G/src/tools/hpc/env_gpu.sh"
+# The compute nodes have no numpy: the venv of prepare_target.slurm.
+PY=${PY:-$W/pyenv/bin/python}
 OUT=$G/runs/$SLURM_JOB_ID
 mkdir -p "$OUT"
 cd "$OUT"
@@ -26,7 +28,7 @@ export STL_GPU_THREADS=$SLURM_CPUS_PER_TASK
 for N in ${NSIDES:-1024 2048}; do
     T=$G/field_nside${N}_nested.npy
     if [ ! -f "$T" ]; then
-        python3 - "$N" "$T" <<'PY'
+        "$PY" - "$N" "$T" <<'PY'
 import sys
 import numpy as np
 nside, path = int(sys.argv[1]), sys.argv[2]
