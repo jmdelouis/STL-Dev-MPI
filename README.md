@@ -105,6 +105,12 @@ until they are redrawn in the paper's style.
 - GPU: `docs/gpu.md`; H200 numbers from the run reports on hpc
   (`~/stl-mpi/ens/runs/*/syn.json`) and from
   `notebooks/takahashi_nside2048_results.ipynb` (nside 4096 on 2 H200).
+  Shared engine on A100 (Table `tab:gpu`, footnote d, and the paragraph
+  "One engine per rank"): hpc job 2285199, A100-SXM4-80GB, nside 1024,
+  10 members, kappa terms, 3 evaluations, no cache cap (preliminary);
+  code on branch `claude/musing-elgamal-9897d9`, commits badc63b and
+  f083c4a; memory formula in `docs/gpu.md` section 2.7. The capped H200
+  case before the change (16 GB cap, 98 GB peak) is in `docs/gpu.md`.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
