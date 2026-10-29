@@ -307,6 +307,27 @@ the same losses to the bit, and the objective's gradient with 3 ranks
 differs from the CPU by no more than with one (nside 256, three maps:
 loss <= 1e-13, gradient <= 2.1e-12 relative, `objective_gradient_rank_counts`).
 
+### 5.0 DIA geometry (`--gpu-conv dia`)
+
+garoupe, one T4 (`CUDA_VISIBLE_DEVICES=2`), `stl-synth --gpu`, the same
+lognormal targets and 3 L-BFGS iterations (4 evaluations) as above, `L =
+4`, cache `auto`, block size from the device memory; reports in
+`benchmarks/dia/t4_synth/`:
+
+| nside | geometry | s / evaluation | cache kept | peak GB | geometry built / recomputed (s, whole run) | blocks (level 0) |
+|---|---|---|---|---|---|---|
+| 256 | bound stencils | 1.246 | transposition, 7.0 GB | 9.8 | 1.5 / 1.7 | 4 |
+| 256 | DIA | 0.505 | full, 3.5 GB | 4.2 | 0.9 / 0 | 3 |
+| 1024 | bound stencils | 61.4 | transposition, 4.9 GB (part of the blocks) | 13.1 | 237.0 / 13.8 | 95 |
+| 1024 | DIA | 22.9 | masks of all blocks + 4.9 GB of whole geometries | 12.0 | 13.0 / 64.2 | 68 |
+
+The loss values agree to 2e-15 relative over the 4 evaluations. At
+nside 1024 the bound stencils cannot keep even the transposition of every
+block, so most blocks are rebuilt with their sort at every sweep; the DIA
+keeps the masks of all blocks (16 bytes per row) and only recomputes
+coefficients, and its convolutions are 1.6-2 x faster (`forward` 59.6
+against 170.4 s, `reverse` 46.9 against 127.1 s over the run).
+
 ### 5.1 Ensembles with the kappa term (`--kappa-table`)
 
 One engine per rank for all the objectives (§2.7) against c15e8ec (one
@@ -339,10 +360,11 @@ free at start-up in both builds).
 - **FP64 throughput.** On the T4 the stencil kernel (interpolation of
   `4 G P` taps per row: acos, atan2, ring search) is FP64-bound; it is
   recomputed at every sweep when the geometry does not fit whole. A
-  data-centre GPU (A100, H100) removes most of it; on small devices, the
-  next step is to merge the entries of a row that read the same cell
-  (~36 cells instead of 100 entries per gauge at kernel 5: geometry and
-  transposition ~2.8 x smaller, so the whole geometry fits more often).
+  data-centre GPU (A100, H100) removes most of it. The DIA geometry
+  (`--gpu-conv dia`, §2.3, §5.0) merges the entries of a row that read
+  the same cell and drops the transposition (3 x less memory whole, 100 x
+  less between sweeps); it should become the default once measured on
+  the A100.
 - **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
   for nside 2048 on one rank): nside 2048 needs two T4s. They could be
   computed on the device per sweep instead of stored.
