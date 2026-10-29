@@ -320,19 +320,52 @@ above, to be measured after the integration):
   ms): about 3.4 x less geometry time per sweep, convolutions ~1.7 x
   faster, and no cache to size.
 
-Integration (a follow-up, not done here): `GpuEngine::take_geometry` /
-`put_geometry` build a `DiaGeometry` (`OwnRows` from the topology's
-block: `start`, `len`, `f0`); the four call sites (`z` forward on `a1`,
-second wavelets on the block's rows, their adjoint through `dmap`, the
-`z` adjoint into the map cotangent) map one to one onto `forward` /
-`adjoint`; the cache policies become `full` = coefficients kept,
-`transposition` = masks and cells kept (16 bytes per row) with whole
-geometries in the rest of the budget, `none` = rebuilt; the per-row
-budget of `GpuEngine::new` takes the DIA transients (dense coefficients
-at the first build, the row-ordered cotangents of `dia_gin_t`). The
-engine's results then differ from today's by summation orders only, like
-the lane-strided `conv_adj` (synthesis trajectories from white noise may
-part after a few L-BFGS iterations, as with 3 GPUs, §5 of `gpu.md`).
+Integration (done, behind `--gpu-conv dia` / `STL_GPU_CONV=dia`; the
+default stays `stencils`): `GpuEngine::take_geometry` / `put_geometry`
+build a `DiaGeometry` on the levels with nside > 10 (`OwnRows` from the
+topology's block), the four call sites (`z` forward on `a1`, second
+wavelets on the block's rows, their adjoint through `dmap`, the `z`
+adjoint into the map cotangent) go through `forward` / `adjoint`; the
+cache policies are `full` = coefficients kept, `transposition` = masks
+and cells kept (16 bytes per row) with whole geometries in the rest of
+the budget, `none` = rebuilt; the per-row budget of `GpuEngine::new`
+counts the DIA transients (dense coefficients at the first build, the
+row-ordered cotangents of `dia_gin_t`). The cells reached are compacted
+on the device (`flag_count`, `flag_fill`: only the chunk counts reach the
+host). The engine's results differ from the bound stencils by summation
+orders only (`stats::dia_matches_stencils`: statistics <= 5e-17,
+gradients <= 5e-15 relative), so synthesis trajectories from white noise
+may part after a few L-BFGS iterations, as with 3 GPUs (§5 of `gpu.md`).
+
+## 7. Redundancy between rows, and index widths
+
+The DIA removes the redundancy within a row (100 entries per gauge for
+~39 distinct cells, positions shared by the gauges). Between rows,
+`examples/dia_redundancy.rs` compares the coefficients of the rows of a
+ring within a face (nside 64, `L = 4`):
+
+| gauge | rows of an equatorial ring (>= 6 rings from the caps) | distinct rows (to 1e-12) |
+|---|---|---|
+| cosmo (production) | differ by up to 0.5 x the largest coefficient | 49 152 of 49 152 |
+| phi | equal to 1e-13 on all 932 (ring, face) groups | 9 068 of 49 152 |
+
+With the gauge cosmo the stencil makes the angle `-phi + g pi / L` with
+the local meridian (regular at the poles), so it turns along a ring and
+every row has its own coefficients: the masked DIA is then close to the
+minimum the exact operator needs. With the gauge phi the angle is `g pi /
+L`, the equatorial rings are invariant under the rotation by one pixel,
+and their coefficients could be stored once per ring (2/3 of the sky,
+then a constant kernel per ring: the regime of NVIDIA's speed-ups). That
+is a different operator (other statistics), not pursued here.
+
+Index widths: positions are `u32` on purpose (half the bytes of `u64`).
+At nside 2048 on one rank the largest indices are the entries of the
+bound stencils (`4 G P K` <= 8.4e8 for `K` <= 2^21 rows per block, the
+reason for that cap), the decimation nonzeros of a level (~3.8e8) and the
+grid positions (5.0e7), all below 2^32 = 4.3e9; the DIA indexes its
+coefficients in 64 bits and has no entry indices. The decimation row
+pointers would overflow at nside 8192 on one rank (~6e9 nonzeros):
+`topology` now stops with a message there instead of wrapping.
 
 Possible refinements: per-gauge masks (39 instead of 44 slots per row at
 `L = 4`, ~10 % fewer bytes); 32-bit Morton arithmetic for the in-face

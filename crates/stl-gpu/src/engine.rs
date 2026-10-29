@@ -14,6 +14,11 @@
 //! Horner's scheme through the transposed rows.  The other halo and ghost
 //! exchanges are those of the CPU engine.
 //!
+//! The convolution geometry of a block is either the bound stencils with
+//! their transposition (`geometry`) or, with [`ConvForm::Dia`], the masked
+//! DIA form (`dia`) on the levels where it applies (nside > 2 W): the same
+//! operator to rounding, a third of the memory, no transposition.
+//!
 //! Summation orders: convolution and decimation sums in the CPU order;
 //! coefficient partial sums by chunks of `CHUNK` pixels in a fixed tree,
 //! chunks, blocks and levels in increasing order; cotangents of one target
@@ -27,6 +32,7 @@
 //! allocated for it.
 
 use crate::device::{Arg, Gpu, NULL};
+use crate::dia::{DeviceDiagonals, DiaGeometry, OwnRows};
 use crate::geometry::{DeviceGeometry, Grid, Spec};
 use crate::topology::{HostCsr, Topology};
 use cudarc::driver::{CudaSlice, DeviceRepr};
@@ -81,10 +87,43 @@ impl GeometryCache {
     }
 }
 
+/// The form of the convolution geometry of the blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvForm {
+    /// Bound stencils (positions and weights by row) and their
+    /// transposition sorted by grid cell (`geometry`).
+    Stencils,
+    /// Masked DIA (`dia`, `docs/dia_convolution.md`) on the levels with
+    /// nside > 2 W, the bound stencils on the coarser ones.  "Full" keeps
+    /// the coefficients, "transposition" the row masks and the cells
+    /// reached (16 bytes per row).
+    Dia,
+}
+
+impl ConvForm {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "stencils" => Some(ConvForm::Stencils),
+            "dia" => Some(ConvForm::Dia),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ConvForm::Stencils => "stencils",
+            ConvForm::Dia => "dia",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GpuOptions {
     /// Owned cells per device block; 0: from the device memory.
     pub block_rows: usize,
+    /// Form of the convolution geometry (`STL_GPU_CONV`: `stencils`, the
+    /// default, or `dia`).
+    pub conv: ConvForm,
     pub cache: GeometryCache,
     /// Bytes for the geometry cache; 0: from the device memory.
     pub cache_bytes: usize,
@@ -96,9 +135,50 @@ impl Default for GpuOptions {
     fn default() -> Self {
         GpuOptions {
             block_rows: 0,
+            conv: std::env::var("STL_GPU_CONV")
+                .ok()
+                .map(|v| ConvForm::parse(&v).unwrap_or_else(|| panic!("STL_GPU_CONV: 'stencils' or 'dia', not {v:?}")))
+                .unwrap_or(ConvForm::Stencils),
             cache: GeometryCache::Auto,
             cache_bytes: 0,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        }
+    }
+}
+
+/// The convolution geometry of one block.
+enum BlockGeometry {
+    Stencils(DeviceGeometry),
+    Dia(DiaGeometry),
+}
+
+impl BlockGeometry {
+    fn bytes(&self) -> usize {
+        match self {
+            BlockGeometry::Stencils(g) => g.bytes(),
+            BlockGeometry::Dia(g) => g.bytes(),
+        }
+    }
+
+    /// Bytes once stripped.
+    fn stripped_bytes(&self) -> usize {
+        match self {
+            BlockGeometry::Stencils(g) => DeviceGeometry::stripped_bytes(g),
+            BlockGeometry::Dia(g) => g.stripped_bytes(),
+        }
+    }
+
+    fn strip(&mut self) {
+        match self {
+            BlockGeometry::Stencils(g) => g.strip(),
+            BlockGeometry::Dia(g) => g.strip(),
+        }
+    }
+
+    fn is_stripped(&self) -> bool {
+        match self {
+            BlockGeometry::Stencils(g) => g.is_stripped(),
+            BlockGeometry::Dia(g) => g.is_stripped(),
         }
     }
 }
@@ -212,7 +292,9 @@ pub struct GpuEngine<'a> {
     a1_pos: Vec<Vec<CudaSlice<u32>>>,
     down: Vec<DevCsr>,
     up: Vec<DevCsr>,
-    cache: Vec<Vec<Option<DeviceGeometry>>>,
+    /// The diagonals of the DIA geometry (`ConvForm::Dia`).
+    diag: Option<DeviceDiagonals>,
+    cache: Vec<Vec<Option<BlockGeometry>>>,
     cache_mode: GeometryCache,
     /// Budget and use of the geometry cache, bytes.
     cache_bytes: usize,
@@ -263,9 +345,20 @@ impl<'a> GpuEngine<'a> {
         let csr_bytes: usize = held[..levels - 1].iter().sum::<usize>() * 200;
         let fixed = field_doubles * 8 + csr_bytes + held.iter().sum::<usize>() * 32 + (512 << 20);
         let avail = free.saturating_sub(fixed);
+        let diag = (opts.conv == ConvForm::Dia).then(|| {
+            let d = stl_core::dia::Diagonals::observed(&[8, 16, 32], geo.kernel_sz, l, geo.gauge);
+            DeviceDiagonals::new(&gpu, &d)
+        });
         // Transients of one block: its geometry while built (and the
-        // transposition temporaries), second wavelets and their cotangents.
-        let per_row = DeviceGeometry::bytes_per_row(l, p) * 3 / 2 + levels * bc * l * l * 32 + bc * l * 48;
+        // transposition temporaries, or the dense DIA coefficients and the
+        // row-ordered copy of a cotangent; the coarse levels that keep the
+        // bound stencils are smaller than a block), second wavelets and
+        // their cotangents.
+        let geometry_transient = match &diag {
+            None => DeviceGeometry::bytes_per_row(l, p) * 3 / 2,
+            Some(dg) => DiaGeometry::dense_bytes_per_row(l, dg.d) + DiaGeometry::bytes_per_row_estimate(l, dg.d) + bc * l * l * 16,
+        };
+        let per_row = geometry_transient + levels * bc * l * l * 32 + bc * l * 48;
         // At most 2^20 owned cells: the convolution rows (with their halo)
         // must stay within geometry::MAX_ROWS (packed transposed entries).
         let max_rows = crate::geometry::MAX_ROWS / 2;
@@ -283,8 +376,22 @@ impl<'a> GpuEngine<'a> {
         let a1_pos = topo.levels.iter().map(|lv| lv.blocks.iter().map(|b| gpu.upload(&b.a1pos)).collect()).collect();
         let down = topo.down.iter().map(|h| DevCsr::new(&gpu, h)).collect();
         let up = topo.up.iter().map(|h| DevCsr::new(&gpu, h)).collect();
-        let rows_total: usize = topo.levels.iter().flat_map(|lv| lv.blocks.iter().map(|b| b.a1.len())).sum();
         let largest = topo.levels.iter().flat_map(|lv| lv.blocks.iter().map(|b| b.a1.len())).max().unwrap_or(0);
+        // Bytes of every block's geometry, whole and stripped.
+        let (mut whole_total, mut stripped_total) = (0usize, 0usize);
+        for lv in &topo.levels {
+            let rows: usize = lv.blocks.iter().map(|b| b.a1.len()).sum();
+            match &diag {
+                Some(dg) if lv.nside > 2 * dg.w => {
+                    whole_total += rows * DiaGeometry::bytes_per_row_estimate(l, dg.d);
+                    stripped_total += rows * DiaGeometry::STRIPPED_BYTES_PER_ROW;
+                }
+                _ => {
+                    whole_total += rows * DeviceGeometry::bytes_per_row(l, p);
+                    stripped_total += rows * DeviceGeometry::transposition_bytes_per_row(l, p);
+                }
+            }
+        }
         // Cache budget from what is free once the topology is on the device
         // (the level fields are allocated at the first sweeps).
         let cache_bytes = if opts.cache_bytes > 0 {
@@ -294,7 +401,7 @@ impl<'a> GpuEngine<'a> {
             free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20)) * 4 / 5
         };
         let cache_mode = match opts.cache {
-            GeometryCache::Auto if rows_total * DeviceGeometry::bytes_per_row(l, p) <= cache_bytes => GeometryCache::Full,
+            GeometryCache::Auto if whole_total <= cache_bytes => GeometryCache::Full,
             GeometryCache::Auto => GeometryCache::Transposition,
             m => m,
         };
@@ -316,11 +423,12 @@ impl<'a> GpuEngine<'a> {
             a1_pos,
             down,
             up,
+            diag,
             cache,
             cache_mode,
             cache_bytes,
             cached_bytes: 0,
-            whole_budget: cache_bytes.saturating_sub(rows_total * DeviceGeometry::transposition_bytes_per_row(l, p)),
+            whole_budget: cache_bytes.saturating_sub(stripped_total),
             whole_used: 0,
             dmap,
             maps: Vec::new(),
@@ -372,6 +480,16 @@ impl<'a> GpuEngine<'a> {
         self.topo.levels.iter().map(|lv| lv.blocks.len()).collect()
     }
 
+    /// The form of the convolution geometry (DIA on the levels with nside >
+    /// 2 W only).
+    pub fn conv_form(&self) -> ConvForm {
+        if self.diag.is_some() {
+            ConvForm::Dia
+        } else {
+            ConvForm::Stencils
+        }
+    }
+
     /// The geometry cache policy, its budget and its use, bytes.
     pub fn geometry_cache(&self) -> (GeometryCache, usize, usize) {
         (self.cache_mode, self.cache_bytes, self.cached_bytes)
@@ -410,36 +528,134 @@ impl<'a> GpuEngine<'a> {
         Spec { nside: self.topo.levels[n].nside, kernel_sz: self.geo.kernel_sz, g: self.geo.l, gauge: self.geo.gauge }
     }
 
-    fn take_geometry(&mut self, n: usize, b: usize) -> DeviceGeometry {
+    /// Whether level `n` takes the DIA geometry.
+    fn dia_level(&self, n: usize) -> bool {
+        self.diag.as_ref().is_some_and(|d| self.topo.levels[n].nside > 2 * d.w)
+    }
+
+    fn take_geometry(&mut self, n: usize, b: usize) -> BlockGeometry {
         let spec = self.spec(n);
         if let Some(mut g) = self.cache[n][b].take() {
             self.cached_bytes -= g.bytes();
             if !g.is_stripped() && self.cache_mode != GeometryCache::Full {
-                self.whole_used -= g.bytes() - DeviceGeometry::stripped_bytes(&g);
+                self.whole_used -= g.bytes() - g.stripped_bytes();
             }
             if g.is_stripped() {
                 let t = Instant::now();
-                g.refresh(&self.gpu, &self.grids[n], &self.a1_ids[n][b], &spec);
+                let (grid, rows) = (&self.grids[n], &self.a1_ids[n][b]);
+                match &mut g {
+                    BlockGeometry::Stencils(s) => s.refresh(&self.gpu, grid, rows, &spec),
+                    BlockGeometry::Dia(d) => {
+                        d.refresh(&self.gpu, grid, rows, &spec, self.diag.as_ref().unwrap(), &self.ker);
+                        assert_eq!(d.misses, 0, "DIA coefficients off the masks of their first build");
+                    }
+                }
                 self.tick("gpu_geometry_weights", t);
             }
             return g;
         }
         let t = Instant::now();
-        let k = self.topo.levels[n].blocks[b].a1.len();
-        let g = DeviceGeometry::build(&self.gpu, &self.grids[n], &self.a1_ids[n][b], k, &spec, false);
+        let blk = &self.topo.levels[n].blocks[b];
+        let k = blk.a1.len();
+        let mut g = None;
+        if self.dia_level(n) {
+            let own = OwnRows { start: blk.start, len: blk.len as i64, f0: blk.f0 as i64 };
+            let d = DiaGeometry::build(&self.gpu, &self.grids[n], &self.a1_ids[n][b], k, &spec, self.diag.as_ref().unwrap(), &self.ker, own);
+            if d.misses == 0 {
+                g = Some(BlockGeometry::Dia(d));
+            } else {
+                eprintln!("level {n} block {b}: {} reads off the DIA diagonals, bound stencils instead", d.misses);
+            }
+        }
+        let g = g.unwrap_or_else(|| BlockGeometry::Stencils(DeviceGeometry::build(&self.gpu, &self.grids[n], &self.a1_ids[n][b], k, &spec, false)));
         self.tick("gpu_geometry", t);
         g
+    }
+
+    /// `out[((r G + g) 2 + o) out_stride + opos(i)]` for the geometry rows
+    /// `row0 + i`, `i < n_rows`, of block `b` of level `n`, from `x[r
+    /// x_stride + .]`, `r < rows`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_forward(
+        &self,
+        geom: &BlockGeometry,
+        n: usize,
+        b: usize,
+        x: Arg,
+        x_stride: usize,
+        rows: usize,
+        row0: usize,
+        n_rows: usize,
+        opos: Arg,
+        out: Arg,
+        out_stride: usize,
+    ) {
+        match geom {
+            BlockGeometry::Stencils(g) => g.forward(&self.gpu, &self.ker, x, x_stride, rows, row0, n_rows, opos, out, out_stride),
+            BlockGeometry::Dia(g) => g.forward(
+                &self.gpu,
+                &self.grids[n],
+                &self.a1_ids[n][b],
+                self.diag.as_ref().unwrap(),
+                x,
+                x_stride,
+                rows,
+                row0,
+                n_rows,
+                opos,
+                out,
+                out_stride,
+            ),
+        }
+    }
+
+    /// Adjoint of [`conv_forward`](Self::conv_forward): `out[r out_stride +
+    /// dmap(j)] += sum` over the rows `row0 + i`, `i < n_rows`, reading grid
+    /// cell `j`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_adjoint(
+        &self,
+        geom: &BlockGeometry,
+        n: usize,
+        b: usize,
+        gin: Arg,
+        gin_stride: usize,
+        rows: usize,
+        row0: usize,
+        n_rows: usize,
+        dmap: Arg,
+        out: Arg,
+        out_stride: usize,
+    ) {
+        match geom {
+            BlockGeometry::Stencils(g) => g.adjoint(&self.gpu, &self.ker, gin, gin_stride, rows, row0, n_rows, dmap, out, out_stride, true),
+            BlockGeometry::Dia(g) => g.adjoint(
+                &self.gpu,
+                &self.grids[n],
+                &self.a1_ids[n][b],
+                self.diag.as_ref().unwrap(),
+                gin,
+                gin_stride,
+                rows,
+                row0,
+                n_rows,
+                dmap,
+                out,
+                out_stride,
+                true,
+            ),
+        }
     }
 
     /// Keeps the geometry of a block as the policy and the budget allow:
     /// with `Transposition`, the budget left once every block's
     /// transposition is counted keeps whole geometries, first come.
-    fn put_geometry(&mut self, n: usize, b: usize, mut g: DeviceGeometry) {
+    fn put_geometry(&mut self, n: usize, b: usize, mut g: BlockGeometry) {
         if self.cache_mode == GeometryCache::None {
             return;
         }
         let whole = g.bytes();
-        let mut stripped = DeviceGeometry::stripped_bytes(&g);
+        let mut stripped = g.stripped_bytes();
         let keep_whole = match self.cache_mode {
             GeometryCache::Full => self.cached_bytes + whole <= self.cache_bytes,
             _ => self.whole_used + (whole - stripped) <= self.whole_budget,
@@ -532,7 +748,7 @@ impl<'a> GpuEngine<'a> {
     }
 
     /// Second wavelets of the block on its owned cells: `[B C L(l1), L(l3), 2, |F|]`.
-    fn branches(&self, n: usize, b: usize, geom: &DeviceGeometry, which: &BTreeSet<usize>) -> BTreeMap<usize, CudaSlice<f64>> {
+    fn branches(&self, n: usize, b: usize, geom: &BlockGeometry, which: &BTreeSet<usize>) -> BTreeMap<usize, CudaSlice<f64>> {
         let (bc, l) = (self.batch * self.channels, self.geo.l);
         let blk = &self.topo.levels[n].blocks[b];
         let ln = self.held(n);
@@ -541,7 +757,7 @@ impl<'a> GpuEngine<'a> {
             .map(|&d| {
                 let out = self.gpu.zeros::<f64>(bc * l * l * 2 * blk.len);
                 let input = if d == n { &self.absz[n] } else { &self.m[&(d, n)] };
-                geom.forward(&self.gpu, &self.ker, self.gpu.a(input), ln, bc * l, blk.f0, blk.len, NULL, self.gpu.a(&out), blk.len);
+                self.conv_forward(geom, n, b, self.gpu.a(input), ln, bc * l, blk.f0, blk.len, NULL, self.gpu.a(&out), blk.len);
                 (d, out)
             })
             .collect()
@@ -644,9 +860,10 @@ impl<'a> GpuEngine<'a> {
                 let geom = self.take_geometry(n, b);
                 let (na1, nf) = (self.topo.levels[n].blocks[b].a1.len(), self.topo.levels[n].blocks[b].len);
                 let t = Instant::now();
-                geom.forward(
-                    &self.gpu,
-                    &self.ker,
+                self.conv_forward(
+                    &geom,
+                    n,
+                    b,
                     self.gpu.a(&self.maps[n]),
                     ln,
                     bc,
@@ -930,7 +1147,7 @@ impl<'a> GpuEngine<'a> {
                 }
                 for (&d, g) in &gbranch {
                     let slot = gmod.entry(d).or_insert_with(|| self.gpu.zeros::<f64>(rows * na1));
-                    geom.adjoint(&self.gpu, &self.ker, self.gpu.a(g), nf, rows, blk.f0, nf, self.gpu.a(&self.dmap), self.gpu.a(slot), na1, true);
+                    self.conv_adjoint(&geom, n, b, self.gpu.a(g), nf, rows, blk.f0, nf, self.gpu.a(&self.dmap), self.gpu.a(slot), na1);
                 }
                 drop(gbranch);
                 // Own level: modulus VJP; finer levels: stored-moduli cotangents.
@@ -1000,7 +1217,7 @@ impl<'a> GpuEngine<'a> {
                     );
                 }
                 // Wavelet adjoint on the a1 rows -> map cotangent.
-                geom.adjoint(&self.gpu, &self.ker, self.gpu.a(&gz), na1, bc, 0, na1, NULL, self.gpu.a(&mg[n]), ln, true);
+                self.conv_adjoint(&geom, n, b, self.gpu.a(&gz), na1, bc, 0, na1, NULL, self.gpu.a(&mg[n]), ln);
                 self.tick("gpu_reverse_adjoint", t);
                 self.put_geometry(n, b, geom);
             }

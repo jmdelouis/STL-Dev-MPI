@@ -11,4 +11,4 @@ pub mod geometry;
 pub mod topology;
 
 pub use device::Gpu;
-pub use engine::{GeometryCache, GpuEngine, GpuEvaluator, GpuOptions};
+pub use engine::{ConvForm, GeometryCache, GpuEngine, GpuEvaluator, GpuOptions};

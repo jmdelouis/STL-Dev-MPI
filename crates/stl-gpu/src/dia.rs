@@ -223,7 +223,19 @@ impl DiaGeometry {
                 gpu.a(&flag),
             ],
         );
-        let dest: Vec<u32> = gpu.download(&flag).iter().enumerate().filter(|(_, &f)| f != 0).map(|(j, _)| j as u32).collect();
+        // Compacted on the device (in increasing order): only the chunk
+        // counts cross to the host.
+        let n_chunks = grid.n.div_ceil(1024);
+        let counts = gpu.zeros::<u32>(n_chunks);
+        gpu.launch("flag_count", (n_chunks as u32, 1), 256, &[gpu.a(&flag), Arg::I64(grid.n as i64), gpu.a(&counts)]);
+        let mut offsets = gpu.download(&counts);
+        let mut total = 0u32;
+        for c in offsets.iter_mut() {
+            (*c, total) = (total, total + *c);
+        }
+        let offsets = gpu.upload(&offsets);
+        let dest = gpu.zeros::<u32>(total as usize);
+        gpu.launch("flag_fill", (n_chunks as u32, 1), 256, &[gpu.a(&flag), Arg::I64(grid.n as i64), gpu.a(&offsets), gpu.a(&dest)]);
         drop(flag);
         crate::geometry::lapper(gpu)("DIA cells reached");
         let (coef, mask, misses) = coefficients(gpu, grid, rows, k, s, diag, ker, None);
@@ -238,8 +250,8 @@ impl DiaGeometry {
             coef: Some(coef),
             mask,
             slots,
-            n_dest: dest.len(),
-            dest: gpu.upload(&dest),
+            n_dest: total as usize,
+            dest,
             own,
             misses,
         }
@@ -271,6 +283,21 @@ impl DiaGeometry {
     /// Bytes once stripped (masks and cells reached).
     pub fn stripped_bytes(&self) -> usize {
         self.mask.len() * 4 + self.n_dest * 4
+    }
+
+    /// Bytes per row once stripped: the mask and about one reached cell.
+    pub const STRIPPED_BYTES_PER_ROW: usize = 16;
+
+    /// Bytes per row of the dense coefficients of a first build (`G`
+    /// gauges, `D` diagonals).
+    pub fn dense_bytes_per_row(g: usize, d: usize) -> usize {
+        g * 2 * d * 8
+    }
+
+    /// Bytes per row kept whole, for budgets: a row uses ~58 % of the
+    /// diagonals at most (49 of 85 at `L = 4`, 45 of 77 at `L = 2`).
+    pub fn bytes_per_row_estimate(g: usize, d: usize) -> usize {
+        (d * 3).div_ceil(5) * g * 2 * 8 + Self::STRIPPED_BYTES_PER_ROW
     }
 
     /// The coefficients on all diagonals, `[D, K, G, 2]` (host, for tests).

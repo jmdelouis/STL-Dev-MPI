@@ -706,6 +706,45 @@ extern "C" __global__ void dia_reach(
     if (j >= 0) flag[j] = 1;
 }
 
+// Compaction of the flagged grid cells, in increasing order, by chunks of
+// 1024 positions (blocks of 256 threads, 4 positions each): flag_count
+// counts a chunk, flag_fill writes it from offsets[chunk] (the exclusive
+// prefix of the counts).
+extern "C" __global__ void flag_count(const unsigned char* flag, i64 n, u32* counts) {
+    __shared__ u32 sh[256];
+    i64 base = (i64)blockIdx.x * 1024 + threadIdx.x * 4;
+    u32 c = 0;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) c++;
+    sh[threadIdx.x] = c;
+    __syncthreads();
+    for (int st = 128; st > 0; st >>= 1) {
+        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) counts[blockIdx.x] = sh[0];
+}
+
+extern "C" __global__ void flag_fill(const unsigned char* flag, i64 n, const u32* offsets, u32* dest) {
+    __shared__ u32 sh[256];
+    int t = threadIdx.x;
+    i64 base = (i64)blockIdx.x * 1024 + t * 4;
+    u32 c = 0;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) c++;
+    sh[t] = c;
+    __syncthreads();
+    for (int off = 1; off < 256; off <<= 1) {
+        u32 v = t >= off ? sh[t - off] : 0u;
+        __syncthreads();
+        sh[t] += v;
+        __syncthreads();
+    }
+    u32 o = offsets[blockIdx.x] + sh[t] - c;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) dest[o++] = (u32)(base + i);
+}
+
 // Dense coefficients of the output rows `rows[K]` reading `grid` (coef zeroed),
 // one thread per (gauge, row): the bound stencil of geom_build, each
 // nonzero weight w of a tap p folded as ker[g, o, p] * w into the diagonal
