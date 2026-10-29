@@ -80,10 +80,10 @@ fn dia_matches_the_convolution() {
             let mut dia = DiaGeometry::build(&gpu, &grid, &rows_d, k, &spec, &diag, &ker_d, own_rows);
             assert_eq!(dia.misses, 0, "reads off the diagonals");
             // Dropping and recomputing the coefficients gives them back to the bit.
-            let coef = gpu.download(dia.coef.as_ref().unwrap());
+            let coef = dia.dense(&gpu);
             dia.strip();
             dia.refresh(&gpu, &grid, &rows_d, &spec, &diag, &ker_d);
-            assert_eq!(gpu.download(dia.coef.as_ref().unwrap()), coef);
+            assert_eq!(dia.dense(&gpu), coef);
             // Complete rows only: incomplete ones renormalise over the cells
             // found, where a 1e-16 weight may decide (geometry.rs).
             let on_complete = |v: &[f64]| -> Vec<f64> { v.iter().enumerate().map(|(i, &a)| if cpu.complete[i % k] { a } else { 0.0 }).collect() };
@@ -158,11 +158,12 @@ fn dia_matches_the_convolution() {
             let adj_sub = max_rel(&gx_sub, &convolution_adjoint(&cpu, &ker, &g_cpu, 2));
 
             eprintln!(
-                "nside {nside} kernel {ksz} L {l} rows {k} ({} own), {} diagonals, {} cells: coefficients {coef_err:.1e} from the CPU DIA; \
+                "nside {nside} kernel {ksz} L {l} rows {k} ({} own), {} diagonals ({} slots), {} cells: coefficients {coef_err:.1e} from the CPU DIA; \
                  forward {vs_cpu:.3} x noise from the CPU, {vs_old:.3} from conv_fwd, {vs_cpu_dia:.1e} relative from the CPU DIA; \
                  adjoint {adj_cpu:.1e} / {adj_old:.1e} / {adj_cpu_dia:.1e} relative (CPU, conv_adj, CPU DIA; conv_adj from the CPU {old_cpu:.1e}, noise {noise:.1e}), own rows {adj_sub:.1e}",
                 own_rows.len,
                 diag.d,
+                dia.slots,
                 dia.n_dest
             );
             assert!(vs_cpu <= 1.0 && vs_old <= 1.0, "forward beyond the rounding noise");

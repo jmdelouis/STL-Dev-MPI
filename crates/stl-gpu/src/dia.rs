@@ -3,13 +3,19 @@
 //! The cell a row reads on diagonal `d` is found from the row's face
 //! coordinates and the offset `off_d` (`ext_pix`), so no position is
 //! stored; the kernel and the bound bilinear weights are folded into
-//! coefficients `coef[((d * K + k) * G + g) * 2 + o]` (the gauges and
-//! channels of a row together, rows next).  The adjoint gathers, for each
-//! grid cell, the rows at the opposite offsets: no transposition, no sort;
-//! the cotangents are first copied row by row (`dia_gin_t`, a transient of
-//! the size of the cotangents) so that a row's values are contiguous.  What is kept is the coefficients (`2 G D`
-//! doubles per row) and the list of the cells the rows reach (`dest`, 4
-//! bytes per cell), which [`DiaGeometry::strip`] keeps alone.
+//! per-row coefficients, computed dense on all `D` diagonals (a transient
+//! of `2 G D` doubles per row) and kept for the diagonals the row uses
+//! (that receive a term; ~44 of 85 at `L = 4`): a mask per row (`3 x u32`) and
+//! `coef[((s * K + k) * G + g) * 2 + o]` for its `s`-th used diagonal (the
+//! gauges and channels of a row together, rows next, `S` slots: the most
+//! diagonals a row of the block uses).  The adjoint gathers, for each grid
+//! cell, the rows at the opposite offsets: no transposition, no sort; the
+//! cotangents are first copied row by row (`dia_gin_t`, a transient of the
+//! size of the cotangents) so that a row's values are contiguous.  What is
+//! kept is the coefficients, the masks (12 bytes per row) and the list of
+//! the cells the rows reach (`dest`, 4 bytes per cell); [`DiaGeometry::
+//! strip`] keeps the masks and cells, from which [`DiaGeometry::refresh`]
+//! accumulates the coefficients directly into their slots.
 //!
 //! Summation orders: the coefficient of a diagonal adds the taps then the
 //! bilinear neighbours reading its cell; the forward adds the diagonals in
@@ -18,7 +24,7 @@
 //! then the rows by [`lanes`] lane-strided partial sums combined by a fixed
 //! shuffle tree (the CPU adds them in window order, as one lane does).
 
-use crate::device::{Arg, Gpu};
+use crate::device::{Arg, Gpu, NULL};
 use crate::geometry::{Grid, Spec};
 use cudarc::driver::CudaSlice;
 use stl_core::dia::Diagonals;
@@ -86,8 +92,13 @@ pub struct DiaGeometry {
     nside: i64,
     order: u32,
     w: i64,
-    /// `None` once stripped.
+    /// `[S, K, G, 2]`, slot `s` of row `k` its `s`-th used diagonal
+    /// (`None` once stripped).
     pub coef: Option<CudaSlice<f64>>,
+    /// `[K, 3]`: bit `b` of word `w` for diagonal `32 w + b`.
+    pub mask: CudaSlice<u32>,
+    /// `S`, the most diagonals a row uses.
+    pub slots: usize,
     /// Grid positions reached by the rows' diagonals (increasing).
     pub dest: CudaSlice<u32>,
     pub n_dest: usize,
@@ -96,7 +107,10 @@ pub struct DiaGeometry {
     pub misses: u32,
 }
 
-/// Coefficients of the `k` rows (and the count of reads off the diagonals).
+/// Packed coefficients of the `k` rows, with their masks and slot count
+/// (computed through the dense coefficients, or `packed` as in a previous
+/// build), and the count of reads off the diagonals.
+#[allow(clippy::too_many_arguments)]
 fn coefficients(
     gpu: &Gpu,
     grid: &Grid,
@@ -105,7 +119,10 @@ fn coefficients(
     s: &Spec,
     diag: &DeviceDiagonals,
     ker: &CudaSlice<f64>,
-) -> (CudaSlice<f64>, u32) {
+    packed: Option<(&CudaSlice<u32>, usize)>,
+) -> (CudaSlice<f64>, Option<(CudaSlice<u32>, usize)>, u32) {
+    assert!(diag.d <= 96, "at most 96 diagonals (row masks of 3 words)");
+    let lap = crate::geometry::lapper(gpu);
     let order = order_of(s.nside);
     let p = s.kernel_sz * s.kernel_sz;
     let stencil: Vec<f64> = local_kernel_grid(s.kernel_sz, s.nside).into_iter().flatten().collect();
@@ -114,7 +131,8 @@ fn coefficients(
     let n_rings = 4 * s.nside as usize;
     let thetas = gpu.zeros::<f64>(n_rings);
     gpu.launch1("ring_thetas", n_rings, &[s.nside.into(), gpu.a(&thetas)]);
-    let coef = gpu.zeros::<f64>(s.g * 2 * diag.d * k);
+    let out = gpu.zeros::<f64>(packed.map_or(diag.d, |p| p.1) * s.g * 2 * k);
+    let mask = gpu.zeros::<u32>(if packed.is_some() { 0 } else { 3 * k });
     let errors = gpu.zeros::<u32>(1);
     gpu.launch1(
         "dia_build",
@@ -143,12 +161,30 @@ fn coefficients(
             gpu.a(&diag.index),
             (diag.w as i32).into(),
             (diag.d as i32).into(),
-            gpu.a(&coef),
+            gpu.a(&out),
+            if packed.is_some() { NULL } else { gpu.a(&mask) },
+            packed.map_or(NULL, |p| gpu.a(p.0)),
             gpu.a(&errors),
         ],
     );
     let misses = gpu.download(&errors)[0];
-    (coef, misses)
+    if packed.is_some() {
+        lap("DIA packed coefficients");
+        return (out, None, misses);
+    }
+    let dense = out;
+    lap("DIA dense coefficients");
+    let slots = gpu.zeros::<u32>(1);
+    gpu.launch1("dia_slots", k, &[gpu.a(&mask), k.into(), gpu.a(&slots)]);
+    let n_slots = gpu.download(&slots)[0] as usize;
+    let coef = gpu.zeros::<f64>(n_slots * k * s.g * 2);
+    gpu.launch1(
+        "dia_pack",
+        k,
+        &[gpu.a(&dense), k.into(), (s.g as i32).into(), (diag.d as i32).into(), gpu.a(&mask), gpu.a(&coef)],
+    );
+    lap("DIA packed");
+    (coef, Some((mask, n_slots)), misses)
 }
 
 impl DiaGeometry {
@@ -189,7 +225,9 @@ impl DiaGeometry {
         );
         let dest: Vec<u32> = gpu.download(&flag).iter().enumerate().filter(|(_, &f)| f != 0).map(|(j, _)| j as u32).collect();
         drop(flag);
-        let (coef, misses) = coefficients(gpu, grid, rows, k, s, diag, ker);
+        crate::geometry::lapper(gpu)("DIA cells reached");
+        let (coef, mask, misses) = coefficients(gpu, grid, rows, k, s, diag, ker, None);
+        let (mask, slots) = mask.unwrap();
         DiaGeometry {
             k,
             g: s.g,
@@ -198,6 +236,8 @@ impl DiaGeometry {
             order,
             w: diag.w,
             coef: Some(coef),
+            mask,
+            slots,
             n_dest: dest.len(),
             dest: gpu.upload(&dest),
             own,
@@ -205,7 +245,7 @@ impl DiaGeometry {
         }
     }
 
-    /// Drops the coefficients, keeps the cells reached.
+    /// Drops the coefficients, keeps the masks and the cells reached.
     pub fn strip(&mut self) {
         self.coef = None;
     }
@@ -218,19 +258,36 @@ impl DiaGeometry {
     #[allow(clippy::too_many_arguments)]
     pub fn refresh(&mut self, gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, s: &Spec, diag: &DeviceDiagonals, ker: &CudaSlice<f64>) {
         if self.is_stripped() {
-            let (coef, misses) = coefficients(gpu, grid, rows, self.k, s, diag, ker);
+            let (coef, _, misses) = coefficients(gpu, grid, rows, self.k, s, diag, ker, Some((&self.mask, self.slots)));
             self.coef = Some(coef);
             self.misses = misses;
         }
     }
 
     pub fn bytes(&self) -> usize {
-        self.coef.as_ref().map_or(0, |c| c.len() * 8) + self.n_dest * 4
+        self.coef.as_ref().map_or(0, |c| c.len() * 8) + self.stripped_bytes()
     }
 
-    /// Coefficient bytes per output row (`G` gauges, `D` diagonals).
-    pub fn bytes_per_row(g: usize, d: usize) -> usize {
-        g * 2 * d * 8
+    /// Bytes once stripped (masks and cells reached).
+    pub fn stripped_bytes(&self) -> usize {
+        self.mask.len() * 4 + self.n_dest * 4
+    }
+
+    /// The coefficients on all diagonals, `[D, K, G, 2]` (host, for tests).
+    pub fn dense(&self, gpu: &Gpu) -> Vec<f64> {
+        let (packed, mask) = (gpu.download(self.coef.as_ref().expect("stripped geometry")), gpu.download(&self.mask));
+        let row = self.g * 2;
+        let mut out = vec![0f64; self.d * self.k * row];
+        for k in 0..self.k {
+            let mut s = 0;
+            for d in 0..self.d {
+                if (mask[3 * k + d / 32] >> (d % 32)) & 1 != 0 {
+                    out[(d * self.k + k) * row..][..row].copy_from_slice(&packed[(s * self.k + k) * row..][..row]);
+                    s += 1;
+                }
+            }
+        }
+        out
     }
 
     /// `out[((r G + g) 2 + o) out_stride + opos(i)]` for the rows `row0 + i`,
@@ -257,9 +314,9 @@ impl DiaGeometry {
             n * self.g.div_ceil(GB) * rows_in.div_ceil(RC),
             &[
                 gpu.a(self.coef.as_ref().expect("stripped geometry")),
+                gpu.a(&self.mask),
                 (self.g as i32).into(),
                 self.k.into(),
-                (self.d as i32).into(),
                 gpu.a(&diag.offsets),
                 gpu.a(rows),
                 self.nside.into(),
@@ -313,9 +370,9 @@ impl DiaGeometry {
                 self.n_dest.into(),
                 gpu.a(&grid.ids),
                 gpu.a(self.coef.as_ref().expect("stripped geometry")),
+                gpu.a(&self.mask),
                 (self.g as i32).into(),
                 self.k.into(),
-                (self.d as i32).into(),
                 gpu.a(&diag.index),
                 (self.w as i32).into(),
                 gpu.a(rows),

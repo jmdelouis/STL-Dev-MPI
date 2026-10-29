@@ -619,8 +619,11 @@ extern "C" __global__ void conv_adj(
 // DIA convolution (port of stl_core::dia): the cells of a row are found
 // from its face coordinates and a fixed set of D offsets (diagonals); the
 // kernel and the bound bilinear weights are folded into per-row
-// coefficients coef[((d * K + k) * G + g) * 2 + o]; the adjoint gathers the
-// rows at the opposite offsets, so there is no transposition.
+// coefficients, dense[((g * 2 + o) * D + d) * K + k] (dia_build), then
+// kept for the diagonals a row uses only: mask[3 k + w] bit b for diagonal
+// 32 w + b, coef[((s * K + k) * G + g) * 2 + o] for its s-th used
+// diagonal (dia_slots, dia_pack); the adjoint gathers the rows at the
+// opposite offsets, so there is no transposition.
 // ---------------------------------------------------------------------------
 
 // HEALPix C++ nb_facearray (face beyond side / corner 4 + xdir + 3 ydir,
@@ -703,16 +706,21 @@ extern "C" __global__ void dia_reach(
     if (j >= 0) flag[j] = 1;
 }
 
-// Coefficients of the output rows `rows[K]` reading `grid` (coef zeroed),
+// Dense coefficients of the output rows `rows[K]` reading `grid` (coef zeroed),
 // one thread per (gauge, row): the bound stencil of geom_build, each
 // nonzero weight w of a tap p folded as ker[g, o, p] * w into the diagonal
 // of its cell, taps then bilinear neighbours in order (DiaGeometry::
-// from_conv).  errors[0] counts the nonzero reads off the diagonals.
+// from_conv).  Without `pmask`, into the dense coef[((g 2 + o) D + d) K +
+// k], the diagonals that receive a term or-ed into the row's mask
+// (mask[3 k + w], zeroed); with the masks of a previous build `pmask`,
+// directly into the packed coef[((s K + k) G + g) 2 + o] (the same values:
+// each coefficient adds its terms in the same order).  errors[0] counts the
+// nonzero reads off the diagonals (or off the row's mask).
 extern "C" __global__ void dia_build(
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
     const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
     const double* stencil, int p_ref, const double* thetas,
-    const double* ker, const int* dindex, int W, int D, double* coef, u32* errors)
+    const double* ker, const int* dindex, int W, int D, double* coef, u32* mask, const u32* pmask, u32* errors)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= K * G) return;
@@ -728,7 +736,12 @@ extern "C" __global__ void dia_build(
     nest2xyf(row, order, &x, &y, &f);
     const double* k0 = ker + ((i64)g * 2 + 0) * P;
     const double* k1 = ker + ((i64)g * 2 + 1) * P;
-    double* cg = coef + ((i64)k * G + g) * 2;
+    double* c0 = coef + ((i64)g * 2 + 0) * D * K + k;
+    double* c1 = coef + ((i64)g * 2 + 1) * D * K + k;
+    u32 used[3] = {0u, 0u, 0u};
+    u32 pm[3] = {0u, 0u, 0u};
+    if (pmask)
+        for (int w = 0; w < 3; w++) pm[w] = pmask[3 * k + w];
     for (int p = 0; p < P; p++) {
         i64 ix[4], found[4];
         double w[4];
@@ -740,9 +753,50 @@ extern "C" __global__ void dia_build(
                 atomicAdd(&errors[0], 1u);
                 continue;
             }
-            cg[(i64)d * K * G * 2] += k0[p] * w[n];
-            cg[(i64)d * K * G * 2 + 1] += k1[p] * w[n];
+            if (pmask) {
+                u32 mw = pm[d >> 5];
+                if (!((mw >> (d & 31)) & 1u)) {
+                    atomicAdd(&errors[0], 1u);
+                    continue;
+                }
+                i64 slot = __popc(mw & ((1u << (d & 31)) - 1u));
+                if (d >= 32) slot += __popc(pm[0]);
+                if (d >= 64) slot += __popc(pm[1]);
+                double* cp = coef + ((slot * K + k) * G + g) * 2;
+                cp[0] += k0[p] * w[n];
+                cp[1] += k1[p] * w[n];
+            } else {
+                c0[(i64)d * K] += k0[p] * w[n];
+                c1[(i64)d * K] += k1[p] * w[n];
+                used[d >> 5] |= 1u << (d & 31);
+            }
         }
+    }
+    if (!pmask)
+        for (int w = 0; w < 3; w++)
+            if (used[w]) atomicOr(&mask[3 * k + w], used[w]);
+}
+
+// *slots = the most diagonals a row uses (popcount of its mask).
+extern "C" __global__ void dia_slots(const u32* mask, i64 K, u32* slots) {
+    i64 k = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    atomicMax(slots, (u32)(__popc(mask[3 * k]) + __popc(mask[3 * k + 1]) + __popc(mask[3 * k + 2])));
+}
+
+// coef[((s K + k) G + g) 2 + o] = dense[((g 2 + o) D + d) K + k] for the
+// s-th diagonal d used by row k (increasing d; the threads of a warp walk
+// the diagonals together, so that the dense reads are coalesced).
+extern "C" __global__ void dia_pack(const double* dense, i64 K, int G, int D, const u32* mask, double* coef) {
+    i64 k = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    u32 m[3] = {mask[3 * k], mask[3 * k + 1], mask[3 * k + 2]};
+    i64 s = 0;
+    for (int d = 0; d < D; d++) {
+        if (!((m[d >> 5] >> (d & 31)) & 1u)) continue;
+        double* o = coef + (s * K + k) * G * 2;
+        for (int go = 0; go < G * 2; go++) o[go] = dense[((i64)go * D + d) * K + k];
+        s++;
     }
 }
 
@@ -750,11 +804,12 @@ extern "C" __global__ void dia_build(
 #define GB 4
 
 // out[((r * G + g) * 2 + o) * out_stride + opos(i)] = sum_d coef[g, o, d, k]
-// x[r, cell(k, d)] for the rows k = row0 + i (i < n_sel), diagonals in
-// increasing order.  One thread per (i, GB gauges, RC input rows): the
-// cell of a diagonal and its RC inputs serve every gauge.
+// x[r, cell(k, d)] for the rows k = row0 + i (i < n_sel), over the
+// diagonals the row uses in increasing order (the others are zero for
+// every gauge).  One thread per (i, GB gauges, RC input rows): the cell of
+// a diagonal and its RC inputs serve every gauge.
 extern "C" __global__ void dia_fwd(
-    const double* coef, int G, i64 K, int D, const int* doff,
+    const double* coef, const u32* mask, int G, i64 K, const int* doff,
     const i64* rows, i64 nside, int order,
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
     const double* x, i64 x_stride, int R,
@@ -778,23 +833,30 @@ extern "C" __global__ void dia_fwd(
     for (int gb = 0; gb < GB; gb++)
 #pragma unroll
         for (int j = 0; j < RC; j++) { s[gb][0][j] = 0.0; s[gb][1][j] = 0.0; }
-    for (int d = 0; d < D; d++) {
-        i64 q = ext_pix(fr, xr + doff[2 * d], yr + doff[2 * d + 1], nside, order);
-        if (q < 0) continue;
-        i64 ps = grid_find(grid, n_grid, own_start, own_end, own_pos0, q);
-        if (ps < 0) continue;
-        double xv[RC];
+    i64 slot = 0;
+    for (int w = 0; w < 3; w++) {
+        u32 m = mask[3 * k + w];
+        while (m) {
+            int d = 32 * w + __ffs(m) - 1;
+            m &= m - 1;
+            const double* cg = coef + ((slot * K + k) * G + g0) * 2;
+            slot++;
+            i64 q = ext_pix(fr, xr + doff[2 * d], yr + doff[2 * d + 1], nside, order);
+            if (q < 0) continue;
+            i64 ps = grid_find(grid, n_grid, own_start, own_end, own_pos0, q);
+            if (ps < 0) continue;
+            double xv[RC];
 #pragma unroll
-        for (int j = 0; j < RC; j++) xv[j] = j < nr ? x[(i64)(r0 + j) * x_stride + ps] : 0.0;
+            for (int j = 0; j < RC; j++) xv[j] = j < nr ? x[(i64)(r0 + j) * x_stride + ps] : 0.0;
 #pragma unroll
-        for (int gb = 0; gb < GB; gb++) {
-            if (gb < ng) {
-                const double* cg = coef + (((i64)d * K + k) * G + g0 + gb) * 2;
-                double c0 = cg[0], c1 = cg[1];
+            for (int gb = 0; gb < GB; gb++) {
+                if (gb < ng) {
+                    double c0 = cg[2 * gb], c1 = cg[2 * gb + 1];
 #pragma unroll
-                for (int j = 0; j < RC; j++) {
-                    s[gb][0][j] += c0 * xv[j];
-                    s[gb][1][j] += c1 * xv[j];
+                    for (int j = 0; j < RC; j++) {
+                        s[gb][0][j] += c0 * xv[j];
+                        s[gb][1][j] += c1 * xv[j];
+                    }
                 }
             }
         }
@@ -836,9 +898,9 @@ extern "C" __global__ void dia_gin_t(const double* gin, i64 gin_stride, int RG2,
 // dia_gin_t: `[n_rows, R, G, 2]` at k - row0), gathered per grid cell
 // dest[s] over the rows at the offsets v of the window [-W, W]^2 in the
 // cell's extended frame, each through the diagonal on which it reads the
-// cell.  The result goes to out[r * out_stride + dmap(dest[s])] (dmap null:
-// dest[s]; -1: dropped), added when `accumulate`; cells without a row in
-// range are left alone.
+// cell (diagonals unused by the row skipped).  The result goes to out[r *
+// out_stride + dmap(dest[s])] (dmap null: dest[s]; -1: dropped), added
+// when `accumulate`; cells without a row in range are left alone.
 //
 // `lpc` lanes (a power of two <= 32) per (cell, RC input rows): lane l
 // takes the offsets l, l + lpc, ... of the window (vy then vx increasing),
@@ -847,7 +909,7 @@ extern "C" __global__ void dia_gin_t(const double* gin, i64 gin_stride, int RG2,
 // lpc = 1 the order of DiaGeometry::adjoint on the CPU).
 extern "C" __global__ void dia_adj(
     const u32* dest, i64 n_dest, const i64* grid,
-    const double* coef, int G, i64 K, int D, const int* dindex, int W,
+    const double* coef, const u32* mask, int G, i64 K, const int* dindex, int W,
     const i64* rows, i64 blk_start, i64 blk_len, i64 blk_f0, i64 nside, int order,
     const double* gt, int R, i64 row0, i64 n_rows,
     const int* dmap, double* out, i64 out_stride, int accumulate, int lpc)
@@ -895,10 +957,17 @@ extern "C" __global__ void dia_adj(
                 d = diag_of(xr, yr, fr, q, nside, order, dindex, W);
                 if (d < 0) continue;
             }
+            // Diagonals the row does not use are zero for every gauge.
+            const u32* mk = mask + 3 * k;
+            u32 mw = mk[d >> 5];
+            if (!((mw >> (d & 31)) & 1u)) continue;
+            i64 slot = __popc(mw & ((1u << (d & 31)) - 1u));
+            if (d >= 32) slot += __popc(mk[0]);
+            if (d >= 64) slot += __popc(mk[1]);
             any = true;
             // The row's coefficients and cotangents are contiguous; per
             // input row the gauges and channels in order.
-            const double* cr = coef + ((i64)d * K + k) * G * 2;
+            const double* cr = coef + (slot * K + k) * G * 2;
             const double* gr = gt + ri * RG2 + (i64)r0 * G * 2;
             double sj[RC];
 #pragma unroll

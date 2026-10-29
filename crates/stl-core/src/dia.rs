@@ -264,7 +264,7 @@ impl DiaGeometry {
     /// offsets (window order), then gauges and channels.
     pub fn adjoint(&self, rows: &[i64], grid: &[i64], gy: &[f64], batch: usize) -> Vec<f64> {
         let order = crate::healpix::order_of(self.nside);
-        let (gg, co, dd, kk, ni) = (self.g, self.c_out, self.diagonals.len(), self.k, grid.len());
+        let (gg, co, kk, ni) = (self.g, self.c_out, self.k, grid.len());
         assert_eq!(gy.len(), batch * gg * co * kk);
         let w = self.diagonals.w;
         let mut out = vec![0f64; batch * ni];

@@ -98,7 +98,7 @@ fn bench_dia() {
         dia.refresh(&gpu, &grid, &rows, &spec, &diag, &ker);
     });
     table.push(("weights / coefficients recomputed".into(), t_old, t_dia));
-    let dia_kept = dia.n_dest * 4;
+    let dia_kept = dia.stripped_bytes();
     for r in [1usize, 4, 16] {
         let x = gpu.upload(&(0..r * grid.n).map(|i| ((i % 97) as f64) / 97.0 - 0.5).collect::<Vec<_>>());
         let y_old = gpu.zeros::<f64>(r * l * 2 * k);
