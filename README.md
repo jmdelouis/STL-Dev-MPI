@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 19 pages with no warning (abstract
+comes from TeX Live. The draft builds to 20 pages with no warning (abstract
 under the 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
 editorial system, not printed), no ORCID, `[longauth]` only for long author
@@ -111,6 +111,16 @@ until they are redrawn in the paper's style.
   code on branch `claude/musing-elgamal-9897d9`, commits badc63b and
   f083c4a; memory formula in `docs/gpu.md` section 2.7. The capped H200
   case before the change (16 GB cap, 98 GB peak) is in `docs/gpu.md`.
+  Diagonal (DIA) form of the convolution (paragraph after "Performance" in
+  the GPU section, Table `tab:gpu` footnote e): PR jmdelouis/STL-Dev-MPI#3,
+  branch `claude/great-moore-0f5dae` (engine at 74c0b0e, option
+  `stl-synth --gpu --gpu-conv dia`, default still `stencils`), method and
+  per-row bytes in `docs/dia_convolution.md`; A100 stencils against DIA:
+  hpc job 2353875, one A100-SXM4-80GB, nside 1024 and 2048, one map,
+  L = 4, 3 L-BFGS iterations (4 evaluations) from white noise on a
+  lognormal target, cache `auto` (transposition), reports
+  `benchmarks/dia/a100_synth/synth_n{1024,2048}_L4_{stencils,dia}.json`
+  (preliminary, one run per case); T4 figures in `docs/gpu.md` section 5.0.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,

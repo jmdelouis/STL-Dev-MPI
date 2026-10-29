@@ -306,6 +306,8 @@ The GPU engine runs the same sweeps on one CUDA device per MPI rank, with the CP
 
 \emph{Performance} (Table~\ref{tab:gpu}). On the Tesla T4, whose double-precision throughput is 1/32 of its single precision, three devices take 13.3\,s per evaluation at $\nside=1024$, $L=4$, and 114\,s at 2048, where the geometry no longer fits and is rebuilt at each sweep; three T4s are twice as fast as a 192-core EPYC node at $\nside=1024$, $L=2$. The scaling from 1 to 3 T4s is superlinear while the geometry cache covers more of each rank's rows. On H200 GPUs, an ensemble of 10 syntheses at $\nside=1024$ runs on a single device, and a single map at $\nside=4096$ ($2\times10^8$ pixels, $J=11$) takes about 325\,s per evaluation on one device and 67.9\,s on two, a superlinear gain as on the T4s, where it comes from the geometry cache covering more of each rank's rows. The same $\nside=4096$ synthesis runs on 16 V100s with 16\,GB each (25.2\,s per evaluation, 13.9\,GB per device): small devices are usable as long as there are enough of them. On Ir\`ene, a node of 4 V100s is worth about 1024 AMD Rome cores (23.4 against 28.8\,s per evaluation for the same synthesis at $\nside=2048$).
 
+\emph{A diagonal form of the convolution} (preliminary: an option of the GPU engine, not yet its default). In the coordinates of a HEALPix face, extended across its edges and corners with the neighbour tables of the HEALPix library, every cell that a row reads through its rotated and interpolated stencil (kernel 5) lies at one of 81 offsets within $\pm5$ pixels of the row, the same at every $\nside$ from 16 to 1024. The convolution is then exactly a diagonal (DIA) operator, $y_k=\sum_d a_{d,k}\,x_{k+o_d}$, whose coefficients fold together the kernel, the rotation and the bilinear weights: no position is stored, and the adjoint gathers from the opposite offsets, with neither transposition nor sort. A row uses about 44 of these diagonals over its 4 gauges; keeping a mask of them and their coefficients only takes 3152 bytes per row at $L=4$, instead of 9608 for the bound stencils and their transposition, and 16 bytes between sweeps instead of 1608. The statistics and gradients differ from those of the stencils by summation orders only (below $5\times10^{-15}$ relative). On one A100 (one map, 4 evaluations from white noise; Table~\ref{tab:gpu}), an evaluation takes 3.04 instead of 4.87\,s at $\nside=1024$ (1.6 times faster) and 17.9 instead of 46.3\,s at $\nside=2048$ (2.6 times), with losses equal to $2\times10^{-15}$ relative. At $\nside=2048$ the transpositions of the stencils do not all fit in the cache, so most blocks are rebuilt and sorted at every sweep, and the geometry takes 168 of the 185\,s of the run; the diagonal form keeps the masks of all blocks and recomputes only their coefficients, and the geometry takes 42 of 72\,s. The memory peak does not drop, since the cache budget fills the device in both forms: the diagonal form holds more geometry in it. On one T4 the gain is 2.5 times at $\nside=256$ and 2.7 at 1024.
+
 \begin{table}
 \caption{Seconds per evaluation on GPUs ($L=4$, kernel 5, double precision). $B$: maps synthesised together; ``mem.'': device memory peak per GPU, cache included.}
 \label{tab:gpu}
@@ -320,6 +322,10 @@ $\nside$ & $B$ & GPUs & s / eval. & mem.\ (GB) \\
 1024 & 1 & 3 T4 & 13.3 & 10.9 \\
 2048 & 1 & 2 T4 & 474 & 13.8 \\
 2048 & 1 & 3 T4 & 114 & 12.9 \\
+1024 & 1 & 1 A100$^e$ & 4.87 & 62.0 \\
+1024 & 1 & 1 A100, DIA$^e$ & 3.04 & 61.0 \\
+2048 & 1 & 1 A100$^e$ & 46.3 & 67.4 \\
+2048 & 1 & 1 A100, DIA$^e$ & 17.9 & 63.2 \\
 512 & 10$^a$ & 2 T4 & 50.6 & 13.3 \\
 1024 & 10$^a$ & 1 H200$^c$ & 54.3 & 98 \\
 1024 & 10$^a$ & 1 A100$^d$ & 64.4 & 62.8 \\
@@ -329,7 +335,7 @@ $\nside$ & $B$ & GPUs & s / eval. & mem.\ (GB) \\
 4096$^b$ & 1 & 16 V100 & 25.2 & 13.9 \\
 \hline
 \end{tabular}
-\tablefoot{$^a$ Ensembles with the $\kappa$ terms of Sect.~\ref{sec:kappa}. $^b$ Synthesis of the $\nside=2048$ convergence map at twice its resolution ($J=11$, 19\,450 coefficients); the H200 memory is mostly geometry cache, which fills the device. $^c$ One engine per objective, geometry cache capped at 16\,GB. $^d$ One engine shared by all objectives, no cap (3 evaluations; preliminary). T4: garoupe; H200 and A100 (80\,GB): hpc cluster; V100: Ir\`ene (4 nodes of 4 V100 16\,GB, job 6048940).}
+\tablefoot{$^a$ Ensembles with the $\kappa$ terms of Sect.~\ref{sec:kappa}. $^b$ Synthesis of the $\nside=2048$ convergence map at twice its resolution ($J=11$, 19\,450 coefficients); the H200 memory is mostly geometry cache, which fills the device. $^c$ One engine per objective, geometry cache capped at 16\,GB. $^d$ One engine shared by all objectives, no cap (3 evaluations; preliminary). $^e$ Bound stencils or diagonal (DIA) form of the convolution (Sect.~\ref{sec:gpu}), one run of 4 evaluations each (preliminary); the memory peak is set by the geometry-cache budget, which fills the device. T4: garoupe; H200 and A100 (80\,GB): hpc cluster; V100: Ir\`ene (4 nodes of 4 V100 16\,GB, job 6048940).}
 \end{table}
 
 %======================================================================
