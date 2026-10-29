@@ -12,7 +12,7 @@ Target journal: A&A.
 | `refs.bib` | bibliography; every entry checked against its DOI record, arXiv or the publisher (2026-10-27) |
 | `figures/` | figures and generated tables (`*_n512.*`, `*_n1024.*`, then `*_n2048.*`), with the `.txt` summaries the text quotes |
 | `scripts/` | the scripts of every data figure and table (below) |
-| `TODO_2048.md` | what to run and edit when the nside 2048 ensembles are available |
+| `TODO_2048.md` | what to run and edit when the nside 2048 ensemble is available |
 | `paper.pdf` | the compiled draft, committed so that it can be shared: rebuild and commit it with every change of the text |
 
 ## Building
