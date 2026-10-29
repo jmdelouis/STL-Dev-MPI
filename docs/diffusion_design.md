@@ -631,15 +631,25 @@ garoupe (27 s), gaussianised there (`tools/gaussianize.py`).
   evaluations (100 iterations, 1 h 40), loss 10 991 -> 19.8, then 162
   evaluations (150 iterations, 2 h 36), loss 19.8 -> 1.22, still falling
   by about 1 % per evaluation.
+- Continuation from these maps with the level-power term
+  (`--level-power-weight 10`, 150 iterations), on one hpc A100 80 GB
+  (`--gres=gpu:a100:1`) because the GPU 0 of the only H200 node had failed.
+  The build runs unchanged on `sm_80`: NVRTC compiles the kernels for the
+  device, and a test at nside 128 (ensemble, level power, 12 evaluations)
+  gives the CPU trajectory to 2e-11 relative.  161 evaluations in 5 h 36,
+  125 s per evaluation (2.2 times the H200), 71 GB peak; loss 1.368 (1.22 of
+  statistics plus 0.15 of level power) -> 0.523 (0.055 of level power).
 
 | 4 members, nside 2048 | detail variance / target 2048, 1024, 512, 256, 128, 64 | detail kurtosis 2048, 1024, 512, 256, 128 | `C_l` / target, `l` = 362, 512, 724 to 4096 | STL residual per member S1 / S2 / S3 / S4 / var (sigma) |
 |---|---|---|---|---|
 | target | 1 | 0.92, 0.52, 0.57, 0.61, 0.63 | 1 | |
 | hybrid before minimisation | 1.08, 1.13, 1.18, 0.98, 0.98, 0.99 | 0.80, 0.38, 0.46, 0.31, 0.50 | 1.22, 1.08, 1.07 to 1.26 | |
 | after 117 evaluations | | | | 13.9 / 10.8 / 2.9 / 2.1 / 16.6 |
-| **after 279 evaluations** | **1.02, 0.99, 1.02, 0.89, 0.98, 1.01** | **0.88, 0.51, 0.71, 0.43, 0.49** | **1.10, 0.90, 0.99 to 1.04** | **1.90 / 1.71 / 1.06 / 1.00 / 3.39** |
+| after 279 evaluations | 1.02, 0.99, 1.02, 0.89, 0.98, 1.01 | 0.88, 0.51, 0.71, 0.43, 0.49 | 1.10, 0.90, 0.99 to 1.04 | 1.90 / 1.71 / 1.06 / 1.00 / 3.39 |
+| **then 161 with level power 10** | **1.02, 1.00, 0.99, 0.93, 0.98, 0.99** | **0.89, 0.51, 0.72, 0.43, 0.48** | **1.10, 0.90, 0.99 to 1.04** | **1.19 / 0.99 / 0.96 / 0.92 / 1.01** |
 
-Figure: `docs/figures/diffusion_eval2048_polished.png`.
+Figures: `docs/figures/diffusion_eval2048_polished.png` (279 evaluations),
+`docs/figures/diffusion_eval2048_lp10.png` (with the continuation).
 
 - The minimisation removes the over-dispersion of the diffused levels
   (512 to 2048 within 2.5 % of the target, `C_l` within 4 % from `l = 724`
@@ -647,20 +657,35 @@ Figure: `docs/figures/diffusion_eval2048_polished.png`.
   (target 0.92, 0.80 before), level 1024 0.51 (0.52).  No seam at the face
   edges (`seams.py`: variance of the edge rows within 2 % of the
   interiors, kurtosis 0.85 to 0.93 against 0.87 to 0.89).
-- It is not converged: S3 and S4 are at the ergodic level (1 sigma per
-  member, scatter between members 1.03 to 1.06 times the ergodic variance)
-  but S1, S2 and the variance are 1.7 to 3.4 sigma off, and the mean of the
-  4 members is off by 3 to 6.5 sigma / sqrt(4) on these families: a bias
-  shared by the members, not scatter.  The power is still moving between
-  levels 256 and 512: level 256 dropped from 0.98 to 0.89 (`C_l` 1.10 and
-  0.90 in the bands at `l` = 362 and 512) while level 512 went from 1.18 to
-  1.02, the exchange between neighbouring levels that the statistics pin
-  only loosely (sections 8.4 and 8.5).
+- After 279 evaluations it was not converged: S3 and S4 were at the
+  ergodic level (1 sigma per member, scatter between members 1.03 to 1.06
+  times the ergodic variance) but S1, S2 and the variance were 1.7 to 3.4
+  sigma off, and the mean of the 4 members was off by 3 to 6.5 sigma /
+  sqrt(4) on these families: a bias shared by the members, not scatter.
+  The power was moving between levels 256 and 512: level 256 dropped from
+  0.98 to 0.89 (`C_l` 1.10 and 0.90 in the bands at `l` = 362 and 512)
+  while level 512 went from 1.18 to 1.02, the exchange between neighbouring
+  levels that the statistics pin only loosely (sections 8.4 and 8.5).
+- The continuation with the level-power term converges the statistics:
+  every family about 1 sigma per member (S1 1.19, S2 0.99, S3 0.96, S4
+  0.92, mean 0.85, variance 1.01), the mean of the 4 members within 1.5
+  sigma / sqrt(4) (S1 1.53, variance 1.38, the others 0.02 to 1.14: little
+  shared bias left),
+  scatter between members 0.88 to 1.12 times the ergodic variance (0.72 for
+  the variance).  The term brings level 256 back from 0.89 to 0.93 with every
+  other level within 2.2 % (levels 8 to 2048 as seen by the term: 0.93 at
+  256, 0.98 to 1.02 elsewhere), but leaves the `C_l` bands at `l` = 362 and
+  512 at 1.10 and 0.90: the deficit of the level-256 details is in the
+  bands that neither the wavelet statistics nor the level variances
+  resolve.  Kurtosis and seams are unchanged by the continuation (edge-row
+  variance 0.99 to 1.03 of the interiors).
 - The large-scale non-Gaussianity comes from the coarse STL maps, which are
   too non-Gaussian in the map itself (excess kurtosis of `x_n` 0.46 to 0.49
   at nside 128 and 256 against 0.27 and 0.20 for the target) and not
   enough in the details (level-256 kurtosis 0.31 against 0.61); the
-  minimisation at 2048 has moved this only a little (0.43 at level 256).
+  minimisation at 2048 has moved this only a little (0.43 at level 256,
+  map kurtosis still 0.46 to 0.48 at nside 128 and 256 and 0.11 at 2048
+  against 0.00, a heavier positive tail in the pixel histogram).
 - The fine scales of nside 2048 have many more independent patches, hence
   much smaller ergodic sigmas, so the 8 to 18 % over-dispersion of the
   diffused levels cost a loss of 10 991 at the start (264 at nside 256 for
@@ -691,24 +716,24 @@ At nside 2048 the diffusion levels (512 to 2048) learn without
 memorising (0.8 to 12.6 M parent pixels) and are calibrated on the true
 pyramid; conditioned on STL coarse maps they are 8 to 18 % over-dispersed,
 and 279 evaluations of the ensemble minimisation on one H200 (4 h 15)
-bring the diffused levels within 2.5 % with their kurtosis, but leave S1,
-S2 and the variance 1.7 to 3.4 sigma off and level 256 at 0.89 of its
-variance (section 8.7): more iterations, and better coarse maps, are
-needed there.
+bring the diffused levels within 2.5 % with their kurtosis.  161 more
+evaluations with the level-power term (one A100, 5 h 36) converge the
+statistics (every family about 1 sigma per member) with levels 8 to 2048
+within 2.2 % of the target except level 256 at 0.93 (section 8.7).  What
+remains comes from the coarse STL maps: the level-256 deficit in `C_l`
+(bands at `l` = 362 and 512), too little kurtosis in the level-128 and 256
+details and too much in the map; better coarse maps are the next step
+there.
 
 ## 9. Next steps
 
 - More realisations (section 5) before scaling up: they are what would let
   the coarse levels be learned too.
-- nside 2048: continue the minimisation of the 4 members (another 150 to
-  300 evaluations, 2.5 to 5 h on one H200), with the level-power term to
-  hold level 256, when the hpc GPU quota is free; check that S1, S2 and
-  the variance reach 1 sigma per member and that the levels stay within
-  3 %.
 - Better coarse maps for nside 2048: the STL ensemble at nside 256 has the
   right detail variances but too much kurtosis in the map and too little in
   the level-256 details (section 8.7); the diffusion levels inherit the
-  mismatch.  Options: the coarse ensemble at nside 512 averaged down,
+  mismatch, and the converged minimisation at 2048 keeps it (level 256 at
+  0.93, `C_l` 1.10 and 0.90 at `l` = 362 and 512).  Options: the coarse ensemble at nside 512 averaged down,
   diffusion from nside 128 with a model of level 256 trained on the nside
   2048 map (4 times more parent pixels than at nside 256), or a variance
   correction of the diffused details by the measured over-dispersion.
