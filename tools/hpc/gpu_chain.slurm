@@ -6,7 +6,7 @@
 #   3. synthesis at 2N (ergodic weights) with stl-synth --gpu;
 #   4. cut back to N (mean of the 4 children);
 #   5. rank-based histogram matching on T_N.
-#   sbatch --gres=gpu:h200:2 --ntasks=2 \
+#   sbatch --gres=gpu:a100:2 --ntasks=2 \
 #          --export=ALL,PREP=$HOME/stl-mpi/prep/takahashi_zs1_2048,L=4,NITER=150,INIT=... \
 #          $HOME/stl-gpu/src/tools/hpc/gpu_chain.slurm
 # TARGET (the NESTED target at N) when steps 1-2 are to be done here, or
@@ -17,7 +17,7 @@
 # the number of GPUs (--ntasks = GPUs of --gres).
 #SBATCH --job-name=stl-gpu-chain
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:h200:2
+#SBATCH --gres=gpu:a100:2
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=600G
