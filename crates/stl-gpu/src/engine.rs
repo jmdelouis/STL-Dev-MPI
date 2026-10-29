@@ -14,10 +14,11 @@
 //! Horner's scheme through the transposed rows.  The other halo and ghost
 //! exchanges are those of the CPU engine.
 //!
-//! The convolution geometry of a block is either the bound stencils with
-//! their transposition (`geometry`) or, with [`ConvForm::Dia`], the masked
-//! DIA form (`dia`) on the levels where it applies (nside > 2 W): the same
-//! operator to rounding, a third of the memory, no transposition.
+//! The convolution geometry of a block is either the masked DIA form
+//! ([`ConvForm::Dia`], the default, `dia`) on the levels where it applies
+//! (nside > 2 W), or the bound stencils with their transposition
+//! (`geometry`): the same operator to rounding; the DIA takes a third of
+//! the memory and no transposition.
 //!
 //! Summation orders: convolution and decimation sums in the CPU order;
 //! coefficient partial sums by chunks of `CHUNK` pixels in a fixed tree,
@@ -121,8 +122,8 @@ impl ConvForm {
 pub struct GpuOptions {
     /// Owned cells per device block; 0: from the device memory.
     pub block_rows: usize,
-    /// Form of the convolution geometry (`STL_GPU_CONV`: `stencils`, the
-    /// default, or `dia`).
+    /// Form of the convolution geometry (`STL_GPU_CONV`: `dia`, the
+    /// default, or `stencils`).
     pub conv: ConvForm,
     pub cache: GeometryCache,
     /// Bytes for the geometry cache; 0: from the device memory.
@@ -138,7 +139,7 @@ impl Default for GpuOptions {
             conv: std::env::var("STL_GPU_CONV")
                 .ok()
                 .map(|v| ConvForm::parse(&v).unwrap_or_else(|| panic!("STL_GPU_CONV: 'stencils' or 'dia', not {v:?}")))
-                .unwrap_or(ConvForm::Stencils),
+                .unwrap_or(ConvForm::Dia),
             cache: GeometryCache::Auto,
             cache_bytes: 0,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),

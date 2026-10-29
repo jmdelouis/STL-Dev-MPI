@@ -88,7 +88,8 @@ between sweeps and evaluations within a budget measured on the device:
 for the blocks that fit. At `L = 2`, kernel 5, a row costs 4.8 kB in
 `full` and 0.8 kB in `transposition`.
 
-**DIA form** (`--gpu-conv dia`, `STL_GPU_CONV=dia`;
+**DIA form** (the default; `--gpu-conv stencils` or
+`STL_GPU_CONV=stencils` selects the bound stencils above;
 `docs/dia_convolution.md`). The same operator written on the diagonals of
 the extended face frames: every read of a row is an offset of max-norm
 <= 5 in the frame of its face (81 offsets at nside >= 16, 85 with nside 8),
@@ -105,10 +106,12 @@ stencils). The cache policies keep, per row at `L = 4`:
 | `transposition` | 1608 bytes (transposition; weights recomputed per sweep) | 16 bytes (mask and cells reached; coefficients recomputed per sweep into their slots) |
 
 with whole geometries in the rest of the budget in both cases. Results
-differ from the bound stencils by summation orders only (<= 5e-15
-relative on the fixtures, `stats::dia_matches_stencils`). The default
-stays `stencils` until the DIA has been measured on the production
-devices.
+differ from the bound stencils by summation orders only (<= 5.3e-15
+relative on the fixtures, `stats::dia_matches_stencils`). It is the
+default since its measurements on the T4 and the A100 (§5.0: 1.6-2.7 x
+less time per evaluation); runs before it used the bound stencils, so
+their trajectories from white noise may part from new ones after a few
+L-BFGS iterations (summation orders, as with 3 GPUs in §5).
 
 ### 2.4 Kernels
 
@@ -204,9 +207,9 @@ All tests run on both devices above with identical results.
 | `stats`: device vs CPU engine, same inputs | statistics <= 6e-16, spatial variances <= 3e-15, level-0 gradient <= 9e-13 relative to its maximum |
 | `multirank`: 1, 2, 4 thread ranks sharing a device, small blocks, misaligned ranges (3, 5, 7 ranks), 52 ranks (some without coarse cells) | <= 2.2e-16 from one rank; vs CPU engine <= 4e-17 |
 | `stats`: geometry cache policies (`full`, `transposition`, `none`, small budgets), two evaluations, both geometry forms | identical to the bit |
-| `stats`: the fixtures and the CPU engine with the DIA geometry (`--gpu-conv dia`); DIA engine vs bound-stencil engine | same tolerances as above; statistics <= 5e-17, gradients <= 5e-15 relative from the bound stencils |
+| `stats`: the fixtures and the CPU engine with the DIA geometry (`--gpu-conv dia`); DIA engine vs bound-stencil engine | same tolerances as above; statistics <= 5.3e-17, gradients <= 5.3e-15 relative from the bound stencils |
 | `dia`: device DIA vs `conv_fwd` / `conv_adj` and the CPU (9 blocks, poles, 3-face vertices) | forward 0.000 x noise, adjoint <= 7e-16 relative (`docs/dia_convolution.md`) |
-| the whole `stl-gpu` suite with `STL_GPU_CONV=dia` | all pass |
+| the whole `stl-gpu` suite with the default (DIA) and with `STL_GPU_CONV=stencils` | all pass |
 | `stats`: one engine shared by the full plan and a mean / var / S1 / S2 plan at batches 1 and 2 (target statistics, then alternated evaluations, as `stl-synth --kappa-table`) vs one engine each; the plan without S3 / S4 vs the full plan restricted to it (laptop) | identical to the bit (values, variances, gradients) |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
@@ -229,8 +232,8 @@ libclang wheels under `$W` (default `$HOME/stl-gpu-work`); `env.sh` sets
 directory; `bench.sh` runs the benchmarks below.
 
 Options: `--gpu-block-rows N` (owned cells per device block),
-`--gpu-conv stencils|dia` (form of the convolution geometry, default
-`STL_GPU_CONV` else `stencils`),
+`--gpu-conv dia|stencils` (form of the convolution geometry, default
+`STL_GPU_CONV` else `dia`),
 `--gpu-cache auto|full|transposition|none`, `STL_GPU_CACHE_MB` (cache
 budget), `STL_GPU_THREADS` (host threads of the setup per rank),
 `STL_GPU_DEVICE`, `STL_GPU_SYNC=1` (synchronise after every kernel, to
@@ -383,8 +386,7 @@ free at start-up in both builds).
   (`--gpu-conv dia`, §2.3, §5.0) merges the entries of a row that read
   the same cell and drops the transposition (3 x less memory whole, 100 x
   less between sweeps); measured 2.5-2.7 x faster per evaluation on the
-  T4 and 1.6-2.6 x on the A100 (§5.0), it is the candidate for the
-  default.
+  T4 and 1.6-2.6 x on the A100 (§5.0), it is the default.
 - **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
   for nside 2048 on one rank): nside 2048 needs two T4s. They could be
   computed on the device per sweep instead of stored.

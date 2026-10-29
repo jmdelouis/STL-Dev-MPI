@@ -331,8 +331,9 @@ the per-row figures above, still to be measured):
   ms): about 3.4 x less geometry time per sweep, convolutions ~1.7 x
   faster, and no cache to size.
 
-Integration (done, behind `--gpu-conv dia` / `STL_GPU_CONV=dia`; the
-default stays `stencils`): `GpuEngine::take_geometry` / `put_geometry`
+Integration (done; the default since the A100 measurement,
+`--gpu-conv stencils` / `STL_GPU_CONV=stencils` selects the bound
+stencils): `GpuEngine::take_geometry` / `put_geometry`
 build a `DiaGeometry` on the levels with nside > 10 (`OwnRows` from the
 topology's block), the four call sites (`z` forward on `a1`, second
 wavelets on the block's rows, their adjoint through `dmap`, the `z`
@@ -344,8 +345,8 @@ counts the DIA transients (dense coefficients at the first build, the
 row-ordered cotangents of `dia_gin_t`). The cells reached are compacted
 on the device (`flag_count`, `flag_fill`: only the chunk counts reach the
 host). The engine's results differ from the bound stencils by summation
-orders only (`stats::dia_matches_stencils`: statistics <= 5e-17,
-gradients <= 5e-15 relative), so synthesis trajectories from white noise
+orders only (`stats::dia_matches_stencils`: statistics <= 5.3e-17,
+gradients <= 5.3e-15 relative), so synthesis trajectories from white noise
 may part after a few L-BFGS iterations, as with 3 GPUs (§5 of `gpu.md`).
 
 ## 7. Redundancy between rows, and index widths

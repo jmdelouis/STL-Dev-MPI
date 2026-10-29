@@ -107,9 +107,9 @@ stl-synth --target MAP [options]
   --gpu-cache C         convolution geometry kept on the device between sweeps: 'full', 'transposition'
                         (the weights are recomputed), 'none', or 'auto' (default: full if it fits,
                         else transposition); budget from the device memory or STL_GPU_CACHE_MB
-  --gpu-conv F          form of the convolution geometry: 'stencils' (bound stencils and their
-                        transposition) or 'dia' (masked diagonals, docs/dia_convolution.md);
-                        default STL_GPU_CONV, else stencils
+  --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
+                        docs/dia_convolution.md) or 'stencils' (bound stencils and their
+                        transposition); default STL_GPU_CONV, else dia
   --quiet               no line per evaluation
 ";
 
@@ -178,7 +178,7 @@ pub struct Args {
     pub gpu: bool,
     pub gpu_block_rows: usize,
     pub gpu_cache: String,
-    /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else stencils).
+    /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
     pub gpu_conv: Option<String>,
 }
 
