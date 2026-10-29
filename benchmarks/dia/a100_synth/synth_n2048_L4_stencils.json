@@ -1,0 +1,206 @@
+{
+  "J": 10,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 15042,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 0.007741525297361651,
+    "loss_final_scatter_term": 0.0,
+    "member_files": [
+      "synth_n2048_L4_stencils_synthesis_nested.npy"
+    ],
+    "members": 1,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 918.7233923529152,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      },
+      "S2": {
+        "residual_rms_sigma": 804.3060353709451,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      },
+      "S3": {
+        "residual_rms_sigma": 341.7256145946139,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      },
+      "S4": {
+        "residual_rms_sigma": 196.1592231532075,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      },
+      "mean": {
+        "residual_rms_sigma": 0.8107090971491699,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      },
+      "var": {
+        "residual_rms_sigma": 0.44810628160536936,
+        "scatter_over_ergodic_variance": 0.0,
+        "scatter_rms_sigma": 0.0
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 0.0
+  },
+  "evaluations": 4,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 40,
+      "max_sigma": 2237.861342233897,
+      "rms_sigma": 918.7233923529152
+    },
+    "S2": {
+      "count": 40,
+      "max_sigma": 1875.2728734839886,
+      "rms_sigma": 804.3060353709451
+    },
+    "S3": {
+      "count": 880,
+      "max_sigma": 1994.3171061627572,
+      "rms_sigma": 341.7256145946139
+    },
+    "S4": {
+      "count": 14080,
+      "max_sigma": 1829.6885875383493,
+      "rms_sigma": 196.1592231532075
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 0.8107090971491699,
+      "rms_sigma": 0.8107090971491699
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 0.44810628160536936,
+      "rms_sigma": 0.44810628160536936
+    }
+  },
+  "fits": [
+    "synth_n2048_L4_stencils_target.fits",
+    "synth_n2048_L4_stencils_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 873745,
+    "blocks_per_level": [
+      58,
+      15,
+      4,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "stencils",
+    "device": "NVIDIA A100-SXM4-80GB",
+    "device_ordinal": 0,
+    "devices_visible": 1,
+    "geometry_cache": "transposition",
+    "geometry_cache_budget_bytes": 33196452800,
+    "geometry_cache_used_bytes_per_rank": [
+      33040267704
+    ],
+    "memory_peak_bytes_per_rank": [
+      67388702720
+    ],
+    "memory_total_bytes": 85094825984
+  },
+  "init": null,
+  "kappa": null,
+  "kernel_size": 5,
+  "kurtosis": null,
+  "level_power": {
+    "levels_nside": [],
+    "loss_final_term": 0.0,
+    "variance_over_target": [],
+    "weight": 0.0
+  },
+  "loss_final_map": 0.007741525297361651,
+  "loss_first": 0.007741535785581675,
+  "loss_history": [
+    0.007741535785581675,
+    0.0077415355950422125,
+    0.0077415338801879435,
+    0.007741525297361651
+  ],
+  "loss_last": 0.007741525297361651,
+  "marginal": {
+    "loss_final_term": 0.0,
+    "weight": 0.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      50331648,
+      12582912,
+      3145728,
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 9663676416,
+    "maps_and_gradients": 1073740800,
+    "stored_moduli_and_cotangents": 1431613440
+  },
+  "memory_floor_bytes_per_rank": [
+    12169030656
+  ],
+  "memory_peak_bytes_per_rank": [
+    23777521664
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 1.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 3,
+  "nside": 2048,
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    18080571392
+  ],
+  "seconds": 185.0,
+  "seconds_per_evaluation": 46.25,
+  "setup_seconds": 318.57,
+  "target": {
+    "file": "/scratch/jmdeloui/stl-dia/field_nside2048_nested.npy",
+    "mean": 1.0728952390786148,
+    "std": 0.4168291615643203
+  },
+  "timers_seconds": {
+    "analysis_vjp": 0.03,
+    "forward": 113.1,
+    "gpu_forward_coefficients": 0.89,
+    "gpu_forward_conv": 6.51,
+    "gpu_forward_decimation": 0.9,
+    "gpu_geometry": 159.88,
+    "gpu_geometry_weights": 8.22,
+    "gpu_reverse_adjoint": 5.39,
+    "gpu_reverse_chain": 0.43,
+    "gpu_reverse_coefficients": 2.79,
+    "gpu_reverse_conv": 3.96,
+    "gpu_reverse_exchange": 0.38,
+    "gpu_setup_topology": 86.58,
+    "reverse": 77.37
+  },
+  "variables": "map",
+  "weights": "none"
+}

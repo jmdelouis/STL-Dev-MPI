@@ -11,7 +11,10 @@ use stl_core::engine::{EngineConfig, LocalEngine, Partition, Serial};
 use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::stencil::Gauge;
-use stl_gpu::{Gpu, GpuEngine, GpuOptions};
+use stl_gpu::{ConvForm, Gpu, GpuEngine, GpuOptions};
+
+/// Both forms of the convolution geometry.
+const CONVS: [ConvForm; 2] = [ConvForm::Stencils, ConvForm::Dia];
 
 fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(0) {
@@ -63,58 +66,62 @@ fn flat(v: &[Complex64]) -> Vec<f64> {
 }
 
 /// Statistics, stored moduli, map cotangents and band gradients against the
-/// fixtures; `block_rows` small enough to give several device blocks per
-/// level on some cases.
+/// fixtures, with both geometries; `block_rows` small enough to give
+/// several device blocks per level on some cases.
 #[test]
 fn statistics_and_gradients() {
     let Some(gpu) = gpu() else { return };
-    for (case, block_rows) in cases("stats", "stats").into_iter().zip([0usize, 100, 1000, 0, 37, 0, 500, 0].into_iter().cycle()) {
-        let s = setup(&case);
-        let part = Partition::serial(&s.geo, s.cfg.levels());
-        let opts = GpuOptions { block_rows: if block_rows == 0 { 1 << 20 } else { block_rows }, ..Default::default() };
-        let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
-        e.load(&Serial, &case.f64("map0"));
-        for d in 0..e.levels() {
-            let err = max_abs_diff(&e.map_host(d), &case.f64(&format!("map{d}")));
-            assert!(err <= 1e-12, "{}: map {d} {err:e}", case.name());
-        }
-        let (values, _) = e.forward(&Serial, &s.plan, false);
-        let reference = complex(&case, "values");
-        let ratio = close_ratio(&flat(&values), &flat(&reference), 1e-11, 1e-10);
-        let err = max_abs_diff(&flat(&values), &flat(&reference));
-        for d in 0..e.levels() {
-            for n in d + 1..e.levels() {
-                let m = e.m_host(d, n);
-                let er = max_abs_diff(&m, &case.f64(&format!("m{d}_{n}")));
-                assert!(er <= 1e-12, "{}: stored moduli m[{d}][{n}] {er:e}", case.name());
+    for conv in CONVS {
+        for (case, block_rows) in cases("stats", "stats").into_iter().zip([0usize, 100, 1000, 0, 37, 0, 500, 0].into_iter().cycle()) {
+            let s = setup(&case);
+            let part = Partition::serial(&s.geo, s.cfg.levels());
+            let opts = GpuOptions { block_rows: if block_rows == 0 { 1 << 20 } else { block_rows }, conv, ..Default::default() };
+            let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
+            e.load(&Serial, &case.f64("map0"));
+            for d in 0..e.levels() {
+                let err = max_abs_diff(&e.map_host(d), &case.f64(&format!("map{d}")));
+                assert!(err <= 1e-12, "{}: map {d} {err:e}", case.name());
             }
+            let (values, _) = e.forward(&Serial, &s.plan, false);
+            let reference = complex(&case, "values");
+            let ratio = close_ratio(&flat(&values), &flat(&reference), 1e-11, 1e-10);
+            let err = max_abs_diff(&flat(&values), &flat(&reference));
+            for d in 0..e.levels() {
+                for n in d + 1..e.levels() {
+                    let m = e.m_host(d, n);
+                    let er = max_abs_diff(&m, &case.f64(&format!("m{d}_{n}")));
+                    assert!(er <= 1e-12, "{}: stored moduli m[{d}][{n}] {er:e}", case.name());
+                }
+            }
+            let mg = e.reverse(&Serial, &s.plan, &complex(&case, "gradient"));
+            let mut gerr = 0f64;
+            for (d, g) in mg.iter().enumerate() {
+                let g = gpu.download(g);
+                let r = close_ratio(&g, &case.f64(&format!("maps_gradient{d}")), 1e-10, 1e-9);
+                gerr = gerr.max(max_abs_diff(&g, &case.f64(&format!("maps_gradient{d}"))));
+                assert!(r <= 1.0, "{}: maps gradient {d} ({r} x tolerance)", case.name());
+            }
+            let g0 = e.analysis_vjp(&Serial, mg);
+            let bands = e.bands(&Serial, gpu.download(&g0));
+            for (d, g) in bands.iter().enumerate() {
+                let r = close_ratio(g, &case.f64(&format!("band_gradient{d}")), 1e-10, 1e-9);
+                assert!(r <= 1.0, "{}: band gradient {d} ({r} x tolerance)", case.name());
+            }
+            eprintln!(
+                "{} ({}): {} coefficients, {:?} device blocks, statistics max error {err:.2e} ({ratio:.2e} x tol), gradient max error {gerr:.2e}",
+                case.name(),
+                conv.name(),
+                s.plan.len(),
+                e.blocks_per_level(),
+            );
+            assert!(ratio <= 1.0, "{}: statistics ({ratio} x tolerance)", case.name());
         }
-        let mg = e.reverse(&Serial, &s.plan, &complex(&case, "gradient"));
-        let mut gerr = 0f64;
-        for (d, g) in mg.iter().enumerate() {
-            let g = gpu.download(g);
-            let r = close_ratio(&g, &case.f64(&format!("maps_gradient{d}")), 1e-10, 1e-9);
-            gerr = gerr.max(max_abs_diff(&g, &case.f64(&format!("maps_gradient{d}"))));
-            assert!(r <= 1.0, "{}: maps gradient {d} ({r} x tolerance)", case.name());
-        }
-        let g0 = e.analysis_vjp(&Serial, mg);
-        let bands = e.bands(&Serial, gpu.download(&g0));
-        for (d, g) in bands.iter().enumerate() {
-            let r = close_ratio(g, &case.f64(&format!("band_gradient{d}")), 1e-10, 1e-9);
-            assert!(r <= 1.0, "{}: band gradient {d} ({r} x tolerance)", case.name());
-        }
-        eprintln!(
-            "{}: {} coefficients, {:?} device blocks, statistics max error {err:.2e} ({ratio:.2e} x tol), gradient max error {gerr:.2e}",
-            case.name(),
-            s.plan.len(),
-            e.blocks_per_level(),
-        );
-        assert!(ratio <= 1.0, "{}: statistics ({ratio} x tolerance)", case.name());
     }
 }
 
 /// The geometry cache only saves work: every policy and budget gives the
-/// same statistics and gradients, to the bit, over two evaluations.
+/// same statistics and gradients, to the bit, over two evaluations, with
+/// either geometry.
 #[test]
 fn geometry_cache_policies_agree() {
     use stl_gpu::GeometryCache;
@@ -123,9 +130,9 @@ fn geometry_cache_policies_agree() {
     let s = setup(&case);
     let x = case.f64("map0");
     let g = complex(&case, "gradient");
-    let run = |cache: GeometryCache, cache_bytes: usize| {
+    let run = |conv: ConvForm, cache: GeometryCache, cache_bytes: usize| {
         let part = Partition::serial(&s.geo, s.cfg.levels());
-        let opts = GpuOptions { block_rows: 1500, cache, cache_bytes, ..Default::default() };
+        let opts = GpuOptions { block_rows: 1500, conv, cache, cache_bytes, ..Default::default() };
         let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
         let mut out = Vec::new();
         for _ in 0..2 {
@@ -136,15 +143,45 @@ fn geometry_cache_policies_agree() {
         }
         out
     };
-    let reference = run(GeometryCache::None, 0);
-    assert_eq!(reference[0], reference[1]);
-    for (cache, bytes) in [
-        (GeometryCache::Full, 1 << 34),
-        (GeometryCache::Full, 3 << 20),
-        (GeometryCache::Transposition, 1 << 34),
-        (GeometryCache::Transposition, 2 << 20),
-    ] {
-        assert_eq!(run(cache, bytes), reference, "{cache:?} with {bytes} bytes");
+    for conv in CONVS {
+        let reference = run(conv, GeometryCache::None, 0);
+        assert_eq!(reference[0], reference[1]);
+        for (cache, bytes) in [
+            (GeometryCache::Full, 1 << 34),
+            (GeometryCache::Full, 3 << 20),
+            (GeometryCache::Transposition, 1 << 34),
+            (GeometryCache::Transposition, 2 << 20),
+            (GeometryCache::Transposition, 64 << 10),
+        ] {
+            assert_eq!(run(conv, cache, bytes), reference, "{conv:?}: {cache:?} with {bytes} bytes");
+        }
+    }
+}
+
+/// The DIA geometry against the bound stencils: the same operator, so the
+/// same statistics, variances and gradients to the summation orders.
+#[test]
+fn dia_matches_stencils() {
+    let Some(gpu) = gpu() else { return };
+    for case in cases("stats", "stats") {
+        let s = setup(&case);
+        let x = case.f64("map0");
+        let g = complex(&case, "gradient");
+        let run = |conv: ConvForm| {
+            let part = Partition::serial(&s.geo, s.cfg.levels());
+            let opts = GpuOptions { block_rows: 1500, conv, ..Default::default() };
+            let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
+            assert_eq!(e.conv_form(), conv);
+            e.load(&Serial, &x);
+            let (v, var) = e.forward(&Serial, &s.plan, true);
+            let mg = e.reverse(&Serial, &s.plan, &g);
+            (flat(&v), var, gpu.download(&e.analysis_vjp(&Serial, mg)))
+        };
+        let (a, b) = (run(ConvForm::Stencils), run(ConvForm::Dia));
+        let rel = |p: &[f64], q: &[f64]| max_abs_diff(p, q) / p.iter().fold(0f64, |m, v| m.max(v.abs()));
+        let (ev, evar, eg) = (rel(&a.0, &b.0), rel(&a.1, &b.1), rel(&a.2, &b.2));
+        eprintln!("{}: DIA vs stencils: statistics {ev:.1e}, variances {evar:.1e}, gradient {eg:.1e} (relative to max)", case.name());
+        assert!(ev <= 1e-14 && evar <= 1e-13 && eg <= 1e-13, "{}", case.name());
     }
 }
 
@@ -153,27 +190,29 @@ fn geometry_cache_policies_agree() {
 #[test]
 fn device_matches_cpu_engine() {
     let Some(gpu) = gpu() else { return };
-    for case in cases("stats", "stats") {
-        let s = setup(&case);
-        let x = case.f64("map0");
-        let g = complex(&case, "gradient");
-        let mut cpu = LocalEngine::new(&s.geo, &s.cfg, x.clone(), s.batch, s.channels);
-        let (v_cpu, var_cpu) = cpu.forward_moments(&s.plan);
-        let mg = cpu.reverse(&s.plan, &g);
-        let (g_cpu, _) = cpu.analysis_vjp(mg);
+    for conv in CONVS {
+        for case in cases("stats", "stats") {
+            let s = setup(&case);
+            let x = case.f64("map0");
+            let g = complex(&case, "gradient");
+            let mut cpu = LocalEngine::new(&s.geo, &s.cfg, x.clone(), s.batch, s.channels);
+            let (v_cpu, var_cpu) = cpu.forward_moments(&s.plan);
+            let mg = cpu.reverse(&s.plan, &g);
+            let (g_cpu, _) = cpu.analysis_vjp(mg);
 
-        let part = Partition::serial(&s.geo, s.cfg.levels());
-        let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &GpuOptions::default());
-        e.load(&Serial, &x);
-        let (v_gpu, var_gpu) = e.forward(&Serial, &s.plan, true);
-        let mg = e.reverse(&Serial, &s.plan, &g);
-        let g_gpu = gpu.download(&e.analysis_vjp(&Serial, mg));
-        let scale = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
-        let ev = max_abs_diff(&flat(&v_cpu), &flat(&v_gpu)) / scale(&flat(&v_cpu));
-        let evar = max_abs_diff(&var_cpu, &var_gpu) / scale(&var_cpu);
-        let eg = max_abs_diff(&g_cpu, &g_gpu) / scale(&g_cpu);
-        eprintln!("{}: statistics {ev:.1e}, variances {evar:.1e}, gradient {eg:.1e} (relative to max)", case.name());
-        assert!(ev <= 1e-13 && evar <= 1e-12 && eg <= 1e-12, "{}", case.name());
+            let part = Partition::serial(&s.geo, s.cfg.levels());
+            let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &GpuOptions { conv, ..Default::default() });
+            e.load(&Serial, &x);
+            let (v_gpu, var_gpu) = e.forward(&Serial, &s.plan, true);
+            let mg = e.reverse(&Serial, &s.plan, &g);
+            let g_gpu = gpu.download(&e.analysis_vjp(&Serial, mg));
+            let scale = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
+            let ev = max_abs_diff(&flat(&v_cpu), &flat(&v_gpu)) / scale(&flat(&v_cpu));
+            let evar = max_abs_diff(&var_cpu, &var_gpu) / scale(&var_cpu);
+            let eg = max_abs_diff(&g_cpu, &g_gpu) / scale(&g_cpu);
+            eprintln!("{} ({}): statistics {ev:.1e}, variances {evar:.1e}, gradient {eg:.1e} (relative to max)", case.name(), conv.name());
+            assert!(ev <= 1e-13 && evar <= 1e-12 && eg <= 1e-12, "{}", case.name());
+        }
     }
 }
 

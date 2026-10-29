@@ -107,6 +107,9 @@ stl-synth --target MAP [options]
   --gpu-cache C         convolution geometry kept on the device between sweeps: 'full', 'transposition'
                         (the weights are recomputed), 'none', or 'auto' (default: full if it fits,
                         else transposition); budget from the device memory or STL_GPU_CACHE_MB
+  --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
+                        docs/dia_convolution.md) or 'stencils' (bound stencils and their
+                        transposition); default STL_GPU_CONV, else dia
   --quiet               no line per evaluation
 ";
 
@@ -175,6 +178,8 @@ pub struct Args {
     pub gpu: bool,
     pub gpu_block_rows: usize,
     pub gpu_cache: String,
+    /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
+    pub gpu_conv: Option<String>,
 }
 
 impl Args {
@@ -219,6 +224,7 @@ impl Args {
             gpu: false,
             gpu_block_rows: 0,
             gpu_cache: "auto".into(),
+            gpu_conv: None,
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -324,6 +330,12 @@ impl Args {
                     a.gpu_cache = match it.next().map(String::as_str) {
                         Some(v @ ("auto" | "full" | "transposition" | "none")) => v.to_string(),
                         _ => return Err("--gpu-cache is 'auto', 'full', 'transposition' or 'none'".into()),
+                    }
+                }
+                "--gpu-conv" => {
+                    a.gpu_conv = match it.next().map(String::as_str) {
+                        Some(v @ ("stencils" | "dia")) => Some(v.to_string()),
+                        _ => return Err("--gpu-conv is 'stencils' or 'dia'".into()),
                     }
                 }
                 "-h" | "--help" => return Err(USAGE.into()),
@@ -1023,7 +1035,7 @@ mod gpu {
     use stl_core::engine::{EngineConfig, Partition};
     use stl_core::local::LocalGeometry;
     use stl_core::plan::Coefficient;
-    use stl_gpu::{GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
+    use stl_gpu::{ConvForm, GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
 
     /// The device engine of the rank, sized for `batch` maps (the largest
     /// batch it evaluates), as the evaluator of `plan` at that batch (other
@@ -1041,6 +1053,9 @@ mod gpu {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
         let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        if let Some(c) = &args.gpu_conv {
+            opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
+        }
         if let Some(mb) = std::env::var("STL_GPU_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
             opts.cache_bytes = mb << 20;
         }
@@ -1055,6 +1070,7 @@ mod gpu {
             "blocks_per_level": engine.blocks_per_level(),
             "block_rows": engine.block_rows(),
             "geometry_cache": engine.geometry_cache().0.name(),
+            "conv_form": engine.conv_form().name(),
             "geometry_cache_budget_bytes": engine.geometry_cache().1,
         });
         Ok((GpuEvaluator::new(engine, plan), info))

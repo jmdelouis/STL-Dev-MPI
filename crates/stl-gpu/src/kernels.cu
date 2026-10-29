@@ -290,24 +290,13 @@ __device__ __forceinline__ i64 grid_find(const i64* grid, i64 n_grid, i64 own_st
     return (lo < n_grid && grid[lo] == v) ? lo : -1;
 }
 
-// Bound stencils of the output rows `rows[K]` reading `grid`, one thread
-// per (row, gauge).  Entry ((g * 4 + n) * P + p) * K + k (rows fastest, so
-// that consecutive threads read consecutive entries).  `complete[k * G + g]`.
-extern "C" __global__ void geom_build(
-    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
-    const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
-    const double* stencil, int p_ref, const double* thetas,
-    u32* pos, double* wout, unsigned char* complete)
-{
-    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= K * G) return;
-    i64 k = t / G;
-    int g = (int)(t - k * G);
+// rotation_matrices(theta, phi, G, gauge)[g] at the centre of `pix`,
+// rounded through degrees as in ConvGeometry::rows.
+__device__ void stencil_rotation(i64 pix, i64 nside, int order, int G, int g, int gauge, double r[3][3]) {
     double th, ph;
-    pix2ang_nest(rows[k], nside, order, &th, &ph);
+    pix2ang_nest(pix, nside, order, &th, &ph);
     double theta = deg2rad(90.0 - rad2deg(PI_D / 2.0 - th));
     double phi = deg2rad(rad2deg(ph));
-    // rotation_matrices(theta, phi, G, gauge)[g]
     double ct = cos(theta), st = sin(theta), cp = cos(phi), sp = sin(phi);
     double base[3][3] = {{cp * ct, -sp, cp * st}, {sp * ct, cp, sp * st}, {-st, 0.0, ct}};
     double nn = fmax(norm3(base[0][2], base[1][2], base[2][2]), 1e-12);
@@ -322,7 +311,7 @@ extern "C" __global__ void geom_build(
     double step = PI_D / (double)G;
     double alpha = alpha_base + sign_g * ((double)g * step);
     double ca = cos(alpha), sa = sin(alpha);
-    double rg[3][3], r[3][3];
+    double rg[3][3];
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++) {
             double eye = i == j ? 1.0 : 0.0;
@@ -331,46 +320,72 @@ extern "C" __global__ void geom_build(
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++)
             r[i][j] = rg[i][0] * base[0][j] + rg[i][1] * base[1][j] + rg[i][2] * base[2][j];
+}
 
+__device__ __forceinline__ void rotate_interp(double r[3][3], const double* v, int order, const double* thetas, i64 ix[4], double wx[4]) {
+    interp_weights_nested(r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
+                          r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
+                          r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, thetas, ix, wx);
+}
+
+// Tap `v` of the rotated stencil `r` interpolated and bound on the grid
+// (ConvGeometry::rows): its cells `ix`, their grid positions `found` (-1:
+// absent) and weights `w` renormalised over the cells found; a tap with no
+// cell found takes the central tap (`ref_idx`, `ref_w`).
+__device__ void bind_tap(double r[3][3], const double* v, int order, const double* thetas,
+    const i64* ref_idx, const double* ref_w,
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    i64 ix[4], i64 found[4], double w[4])
+{
+    double wx[4];
+    rotate_interp(r, v, order, thetas, ix, wx);
+    bool any = false;
+    for (int n = 0; n < 4; n++) {
+        found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
+        any = any || found[n] >= 0;
+    }
+    if (!any) {
+        for (int n = 0; n < 4; n++) {
+            ix[n] = ref_idx[n];
+            wx[n] = ref_w[n];
+            found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
+        }
+    }
+    for (int n = 0; n < 4; n++) w[n] = wx[n] * (found[n] >= 0 ? 1.0 : 0.0);
+    double colsum = w[0] + w[1] + w[2] + w[3];
+    if (colsum == 0.0) {
+        w[0] = found[0] >= 0 ? 1.0 : 0.0;
+        colsum = w[0] + w[1] + w[2] + w[3];
+    }
+    for (int n = 0; n < 4; n++) w[n] = w[n] / fmax(colsum, 1e-12);
+}
+
+// Bound stencils of the output rows `rows[K]` reading `grid`, one thread
+// per (row, gauge).  Entry ((g * 4 + n) * P + p) * K + k (rows fastest, so
+// that consecutive threads read consecutive entries).  `complete[k * G + g]`.
+extern "C" __global__ void geom_build(
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
+    const double* stencil, int p_ref, const double* thetas,
+    u32* pos, double* wout, unsigned char* complete)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= K * G) return;
+    i64 k = t / G;
+    int g = (int)(t - k * G);
+    double r[3][3];
+    stencil_rotation(rows[k], nside, order, G, g, gauge, r);
     i64 ref_idx[4];
     double ref_w[4];
-    {
-        const double* v = stencil + 3 * p_ref;
-        interp_weights_nested(r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
-                              r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
-                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, thetas, ref_idx, ref_w);
-    }
+    rotate_interp(r, stencil + 3 * p_ref, order, thetas, ref_idx, ref_w);
     bool comp = true;
     for (int p = 0; p < P; p++) {
-        const double* v = stencil + 3 * p;
-        i64 ix[4];
-        double wx[4];
-        interp_weights_nested(r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
-                              r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
-                              r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2], order, thetas, ix, wx);
-        i64 found[4];
-        bool any = false;
-        for (int n = 0; n < 4; n++) {
-            found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
-            any = any || found[n] >= 0;
-        }
-        if (!any) {
-            for (int n = 0; n < 4; n++) {
-                ix[n] = ref_idx[n];
-                wx[n] = ref_w[n];
-                found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
-            }
-        }
+        i64 ix[4], found[4];
         double w[4];
-        for (int n = 0; n < 4; n++) w[n] = wx[n] * (found[n] >= 0 ? 1.0 : 0.0);
-        double colsum = w[0] + w[1] + w[2] + w[3];
-        if (colsum == 0.0) {
-            w[0] = found[0] >= 0 ? 1.0 : 0.0;
-            colsum = w[0] + w[1] + w[2] + w[3];
-        }
+        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, ix, found, w);
         for (int n = 0; n < 4; n++) {
             i64 a = (((i64)g * 4 + n) * P + p) * K + k;
-            wout[a] = w[n] / fmax(colsum, 1e-12);
+            wout[a] = w[n];
             pos[a] = found[n] >= 0 ? (u32)found[n] : 0u;
             comp = comp && found[n] >= 0;
         }
@@ -599,6 +614,463 @@ extern "C" __global__ void conv_adj(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// DIA convolution (port of stl_core::dia): the cells of a row are found
+// from its face coordinates and a fixed set of D offsets (diagonals); the
+// kernel and the bound bilinear weights are folded into per-row
+// coefficients, dense[((g * 2 + o) * D + d) * K + k] (dia_build), then
+// kept for the diagonals a row uses only: mask[3 k + w] bit b for diagonal
+// 32 w + b, coef[((s * K + k) * G + g) * 2 + o] for its s-th used
+// diagonal (dia_slots, dia_pack); the adjoint gathers the rows at the
+// opposite offsets, so there is no transposition.
+// ---------------------------------------------------------------------------
+
+// HEALPix C++ nb_facearray (face beyond side / corner 4 + xdir + 3 ydir,
+// -1 at the vertices of three faces) and nb_swaparray (by face / 4).
+__constant__ signed char NB_FACE[9][12] = {
+    {8, 9, 10, 11, -1, -1, -1, -1, 10, 11, 8, 9},
+    {5, 6, 7, 4, 8, 9, 10, 11, 9, 10, 11, 8},
+    {-1, -1, -1, -1, 5, 6, 7, 4, -1, -1, -1, -1},
+    {4, 5, 6, 7, 11, 8, 9, 10, 11, 8, 9, 10},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+    {1, 2, 3, 0, 0, 1, 2, 3, 5, 6, 7, 4},
+    {-1, -1, -1, -1, 7, 4, 5, 6, -1, -1, -1, -1},
+    {3, 0, 1, 2, 3, 0, 1, 2, 4, 5, 6, 7},
+    {2, 3, 0, 1, -1, -1, -1, -1, 0, 1, 2, 3}};
+__constant__ unsigned char NB_SWAP[9][3] = {{0, 0, 3}, {0, 0, 6}, {0, 0, 0}, {0, 0, 5}, {0, 0, 0}, {5, 0, 0}, {0, 0, 0}, {6, 0, 0}, {3, 0, 0}};
+
+__device__ __forceinline__ void nest2xyf(i64 pix, int order, i64* x, i64* y, i64* f) {
+    *f = pix >> (2 * order);
+    i64 local = pix & ((1LL << (2 * order)) - 1);
+    *x = compress_bits(local);
+    *y = compress_bits(local >> 1);
+}
+
+// Pixel at the extended coordinates (ex, ey) of `face` (-nside <= ex, ey <
+// 2 nside), -1 in the quadrant missing at a vertex of three faces.
+__device__ i64 ext_pix(i64 face, i64 ex, i64 ey, i64 nside, int order) {
+    int nb = 4;
+    if (ex < 0) { ex += nside; nb -= 1; } else if (ex >= nside) { ex -= nside; nb += 1; }
+    if (ey < 0) { ey += nside; nb -= 3; } else if (ey >= nside) { ey -= nside; nb += 3; }
+    if (nb == 4) return xyf2nest(ex, ey, face, order);
+    int f = NB_FACE[nb][face];
+    if (f < 0) return -1;
+    int bits = NB_SWAP[nb][face >> 2];
+    if (bits & 1) ex = nside - ex - 1;
+    if (bits & 2) ey = nside - ey - 1;
+    if (bits & 4) { i64 t = ex; ex = ey; ey = t; }
+    return xyf2nest(ex, ey, (i64)f, order);
+}
+
+// Diagonal of `cell` seen from (x, y) on face f (extended frame), -1 if the
+// cell is off the diagonals.  `dindex[(dy + W) (2 W + 1) + dx + W]`.
+__device__ int diag_of(i64 x, i64 y, i64 f, i64 cell, i64 nside, int order, const int* dindex, int W) {
+    i64 xq, yq, fq;
+    nest2xyf(cell, order, &xq, &yq, &fq);
+    i64 dx, dy;
+    if (fq == f) {
+        dx = xq - x;
+        dy = yq - y;
+    } else {
+        int nb = 0;
+        while (nb < 9 && (nb == 4 || NB_FACE[nb][f] != fq)) nb++;
+        if (nb == 9) return -1;
+        int bits = NB_SWAP[nb][f >> 2];
+        i64 a = xq, b = yq;
+        if (bits & 4) { i64 t = a; a = b; b = t; }
+        if (bits & 2) b = nside - b - 1;
+        if (bits & 1) a = nside - a - 1;
+        dx = a + (nb % 3 - 1) * nside - x;
+        dy = b + (nb / 3 - 1) * nside - y;
+    }
+    if (dx < -W || dx > W || dy < -W || dy > W) return -1;
+    return dindex[(dy + W) * (2 * W + 1) + dx + W];
+}
+
+// flag[j] = 1 for the grid cells j on a diagonal of a row (one thread per
+// (row, diagonal)): the cells the adjoint produces.
+extern "C" __global__ void dia_reach(
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    const i64* rows, i64 K, i64 nside, int order, const int* doff, int D, unsigned char* flag)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= K * D) return;
+    int d = (int)(t / K);
+    i64 k = t - (i64)d * K;
+    i64 x, y, f;
+    nest2xyf(rows[k], order, &x, &y, &f);
+    i64 q = ext_pix(f, x + doff[2 * d], y + doff[2 * d + 1], nside, order);
+    if (q < 0) return;
+    i64 j = grid_find(grid, n_grid, own_start, own_end, own_pos0, q);
+    if (j >= 0) flag[j] = 1;
+}
+
+// Compaction of the flagged grid cells, in increasing order, by chunks of
+// 1024 positions (blocks of 256 threads, 4 positions each): flag_count
+// counts a chunk, flag_fill writes it from offsets[chunk] (the exclusive
+// prefix of the counts).
+extern "C" __global__ void flag_count(const unsigned char* flag, i64 n, u32* counts) {
+    __shared__ u32 sh[256];
+    i64 base = (i64)blockIdx.x * 1024 + threadIdx.x * 4;
+    u32 c = 0;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) c++;
+    sh[threadIdx.x] = c;
+    __syncthreads();
+    for (int st = 128; st > 0; st >>= 1) {
+        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) counts[blockIdx.x] = sh[0];
+}
+
+extern "C" __global__ void flag_fill(const unsigned char* flag, i64 n, const u32* offsets, u32* dest) {
+    __shared__ u32 sh[256];
+    int t = threadIdx.x;
+    i64 base = (i64)blockIdx.x * 1024 + t * 4;
+    u32 c = 0;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) c++;
+    sh[t] = c;
+    __syncthreads();
+    for (int off = 1; off < 256; off <<= 1) {
+        u32 v = t >= off ? sh[t - off] : 0u;
+        __syncthreads();
+        sh[t] += v;
+        __syncthreads();
+    }
+    u32 o = offsets[blockIdx.x] + sh[t] - c;
+    for (int i = 0; i < 4; i++)
+        if (base + i < n && flag[base + i]) dest[o++] = (u32)(base + i);
+}
+
+// Dense coefficients of the output rows `rows[K]` reading `grid` (coef zeroed),
+// one thread per (gauge, row): the bound stencil of geom_build, each
+// nonzero weight w of a tap p folded as ker[g, o, p] * w into the diagonal
+// of its cell, taps then bilinear neighbours in order (DiaGeometry::
+// from_conv).  Without `pmask`, into the dense coef[((g 2 + o) D + d) K +
+// k], the diagonals that receive a term or-ed into the row's mask
+// (mask[3 k + w], zeroed); with the masks of a previous build `pmask`,
+// directly into the packed coef[((s K + k) G + g) 2 + o] (the same values:
+// each coefficient adds its terms in the same order).  errors[0] counts the
+// nonzero reads off the diagonals (or off the row's mask).
+extern "C" __global__ void dia_build(
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
+    const double* stencil, int p_ref, const double* thetas,
+    const double* ker, const int* dindex, int W, int D, double* coef, u32* mask, const u32* pmask, u32* errors)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= K * G) return;
+    int g = (int)(t / K);
+    i64 k = t - (i64)g * K;
+    i64 row = rows[k];
+    double r[3][3];
+    stencil_rotation(row, nside, order, G, g, gauge, r);
+    i64 ref_idx[4];
+    double ref_w[4];
+    rotate_interp(r, stencil + 3 * p_ref, order, thetas, ref_idx, ref_w);
+    i64 x, y, f;
+    nest2xyf(row, order, &x, &y, &f);
+    const double* k0 = ker + ((i64)g * 2 + 0) * P;
+    const double* k1 = ker + ((i64)g * 2 + 1) * P;
+    double* c0 = coef + ((i64)g * 2 + 0) * D * K + k;
+    double* c1 = coef + ((i64)g * 2 + 1) * D * K + k;
+    u32 used[3] = {0u, 0u, 0u};
+    u32 pm[3] = {0u, 0u, 0u};
+    if (pmask)
+        for (int w = 0; w < 3; w++) pm[w] = pmask[3 * k + w];
+    for (int p = 0; p < P; p++) {
+        i64 ix[4], found[4];
+        double w[4];
+        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, ix, found, w);
+        for (int n = 0; n < 4; n++) {
+            if (w[n] == 0.0) continue;
+            int d = diag_of(x, y, f, ix[n], nside, order, dindex, W);
+            if (d < 0) {
+                atomicAdd(&errors[0], 1u);
+                continue;
+            }
+            if (pmask) {
+                u32 mw = pm[d >> 5];
+                if (!((mw >> (d & 31)) & 1u)) {
+                    atomicAdd(&errors[0], 1u);
+                    continue;
+                }
+                i64 slot = __popc(mw & ((1u << (d & 31)) - 1u));
+                if (d >= 32) slot += __popc(pm[0]);
+                if (d >= 64) slot += __popc(pm[1]);
+                double* cp = coef + ((slot * K + k) * G + g) * 2;
+                cp[0] += k0[p] * w[n];
+                cp[1] += k1[p] * w[n];
+            } else {
+                c0[(i64)d * K] += k0[p] * w[n];
+                c1[(i64)d * K] += k1[p] * w[n];
+                used[d >> 5] |= 1u << (d & 31);
+            }
+        }
+    }
+    if (!pmask)
+        for (int w = 0; w < 3; w++)
+            if (used[w]) atomicOr(&mask[3 * k + w], used[w]);
+}
+
+// *slots = the most diagonals a row uses (popcount of its mask).
+extern "C" __global__ void dia_slots(const u32* mask, i64 K, u32* slots) {
+    i64 k = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    atomicMax(slots, (u32)(__popc(mask[3 * k]) + __popc(mask[3 * k + 1]) + __popc(mask[3 * k + 2])));
+}
+
+// coef[((s K + k) G + g) 2 + o] = dense[((g 2 + o) D + d) K + k] for the
+// s-th diagonal d used by row k (increasing d; the threads of a warp walk
+// the diagonals together, so that the dense reads are coalesced).
+extern "C" __global__ void dia_pack(const double* dense, i64 K, int G, int D, const u32* mask, double* coef) {
+    i64 k = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    u32 m[3] = {mask[3 * k], mask[3 * k + 1], mask[3 * k + 2]};
+    i64 s = 0;
+    for (int d = 0; d < D; d++) {
+        if (!((m[d >> 5] >> (d & 31)) & 1u)) continue;
+        double* o = coef + (s * K + k) * G * 2;
+        for (int go = 0; go < G * 2; go++) o[go] = dense[((i64)go * D + d) * K + k];
+        s++;
+    }
+}
+
+// Gauges per thread of dia_fwd.
+#define GB 4
+
+// out[((r * G + g) * 2 + o) * out_stride + opos(i)] = sum_d coef[g, o, d, k]
+// x[r, cell(k, d)] for the rows k = row0 + i (i < n_sel), over the
+// diagonals the row uses in increasing order (the others are zero for
+// every gauge).  One thread per (i, GB gauges, RC input rows): the cell of
+// a diagonal and its RC inputs serve every gauge.
+extern "C" __global__ void dia_fwd(
+    const double* coef, const u32* mask, int G, i64 K, const int* doff,
+    const i64* rows, i64 nside, int order,
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    const double* x, i64 x_stride, int R,
+    i64 row0, i64 n_sel, const u32* opos, i64 out_stride, double* out)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    int n_rc = (R + RC - 1) / RC;
+    int n_gb = (G + GB - 1) / GB;
+    if (t >= n_sel * n_gb * (i64)n_rc) return;
+    i64 i = t % n_sel;
+    i64 rest = t / n_sel;
+    int g0 = (int)(rest % n_gb) * GB;
+    int r0 = (int)(rest / n_gb) * RC;
+    int ng = G - g0 < GB ? G - g0 : GB;
+    int nr = R - r0 < RC ? R - r0 : RC;
+    i64 k = row0 + i;
+    i64 xr, yr, fr;
+    nest2xyf(rows[k], order, &xr, &yr, &fr);
+    double s[GB][2][RC];
+#pragma unroll
+    for (int gb = 0; gb < GB; gb++)
+#pragma unroll
+        for (int j = 0; j < RC; j++) { s[gb][0][j] = 0.0; s[gb][1][j] = 0.0; }
+    i64 slot = 0;
+    for (int w = 0; w < 3; w++) {
+        u32 m = mask[3 * k + w];
+        while (m) {
+            int d = 32 * w + __ffs(m) - 1;
+            m &= m - 1;
+            const double* cg = coef + ((slot * K + k) * G + g0) * 2;
+            slot++;
+            i64 q = ext_pix(fr, xr + doff[2 * d], yr + doff[2 * d + 1], nside, order);
+            if (q < 0) continue;
+            i64 ps = grid_find(grid, n_grid, own_start, own_end, own_pos0, q);
+            if (ps < 0) continue;
+            double xv[RC];
+#pragma unroll
+            for (int j = 0; j < RC; j++) xv[j] = j < nr ? x[(i64)(r0 + j) * x_stride + ps] : 0.0;
+#pragma unroll
+            for (int gb = 0; gb < GB; gb++) {
+                if (gb < ng) {
+                    double c0 = cg[2 * gb], c1 = cg[2 * gb + 1];
+#pragma unroll
+                    for (int j = 0; j < RC; j++) {
+                        s[gb][0][j] += c0 * xv[j];
+                        s[gb][1][j] += c1 * xv[j];
+                    }
+                }
+            }
+        }
+    }
+    i64 o = opos ? (i64)opos[i] : i;
+#pragma unroll
+    for (int gb = 0; gb < GB; gb++)
+#pragma unroll
+        for (int j = 0; j < RC; j++)
+            if (gb < ng && j < nr) {
+                out[(((i64)(r0 + j) * G + g0 + gb) * 2 + 0) * out_stride + o] = s[gb][0][j];
+                out[(((i64)(r0 + j) * G + g0 + gb) * 2 + 1) * out_stride + o] = s[gb][1][j];
+            }
+}
+
+// Row of the NESTED cell `id` among the sorted rows: the block's own rows
+// [blk_start, blk_start + blk_len) sit at blk_f0 + (id - blk_start).
+__device__ __forceinline__ i64 row_find(const i64* rows, i64 K, i64 blk_start, i64 blk_len, i64 blk_f0, i64 id) {
+    if (id >= blk_start && id < blk_start + blk_len) return blk_f0 + (id - blk_start);
+    i64 lo = 0, hi = K;
+    while (lo < hi) {
+        i64 mid = (lo + hi) >> 1;
+        if (rows[mid] < id) lo = mid + 1; else hi = mid;
+    }
+    return (lo < K && rows[lo] == id) ? lo : -1;
+}
+
+// gt[i * (R G 2) + (r G + g) 2 + o] = gin[((r G + g) 2 + o) gin_stride + i]
+// for the rows i < n_rows: the cotangents of a row together (dia_adj).
+extern "C" __global__ void dia_gin_t(const double* gin, i64 gin_stride, int RG2, i64 n_rows, double* gt) {
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n_rows * (i64)RG2) return;
+    i64 i = t / RG2;
+    int c = (int)(t - i * RG2);
+    gt[t] = gin[(i64)c * gin_stride + i];
+}
+
+// Adjoint of dia_fwd for the rows k in [row0, row0 + n_rows) (gt from
+// dia_gin_t: `[n_rows, R, G, 2]` at k - row0), gathered per grid cell
+// dest[s] over the rows at the offsets v of the window [-W, W]^2 in the
+// cell's extended frame, each through the diagonal on which it reads the
+// cell (diagonals unused by the row skipped).  The result goes to out[r *
+// out_stride + dmap(dest[s])] (dmap null: dest[s]; -1: dropped), added
+// when `accumulate`; cells without a row in range are left alone.
+//
+// `lpc` lanes (a power of two <= 32) per (cell, RC input rows): lane l
+// takes the offsets l, l + lpc, ... of the window (vy then vx increasing),
+// each row summed over gauges and channels then added to the lane's sum;
+// the lane sums are combined by a fixed shuffle tree (deterministic; with
+// lpc = 1 the order of DiaGeometry::adjoint on the CPU).
+extern "C" __global__ void dia_adj(
+    const u32* dest, i64 n_dest, const i64* grid,
+    const double* coef, const u32* mask, int G, i64 K, const int* dindex, int W,
+    const i64* rows, i64 blk_start, i64 blk_len, i64 blk_f0, i64 nside, int order,
+    const double* gt, int R, i64 row0, i64 n_rows,
+    const int* dmap, double* out, i64 out_stride, int accumulate, int lpc)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+    int sub = lane & (lpc - 1);
+    i64 unit = t / lpc;
+    int n_rc = (R + RC - 1) / RC;
+    bool valid = unit < n_dest * (i64)n_rc;
+    i64 s = valid ? unit % n_dest : 0;
+    int r0 = valid ? (int)(unit / n_dest) * RC : 0;
+    int nr = R - r0 < RC ? R - r0 : RC;
+    u32 j = valid ? dest[s] : 0;
+    i64 dst = !valid ? -1 : (dmap ? (i64)dmap[j] : (i64)j);
+    valid = valid && dst >= 0;
+    int side = 2 * W + 1;
+    int RG2 = R * G * 2;
+    double acc[RC];
+#pragma unroll
+    for (int jj = 0; jj < RC; jj++) acc[jj] = 0.0;
+    bool any = false;
+    if (valid) {
+        i64 q = grid[j];
+        i64 xq, yq, fq;
+        nest2xyf(q, order, &xq, &yq, &fq);
+        for (int vi = sub; vi < side * side; vi += lpc) {
+            int vy = vi / side - W, vx = vi - (vi / side) * side - W;
+            i64 ex = xq + vx, ey = yq + vy;
+            bool inside = ex >= 0 && ex < nside && ey >= 0 && ey < nside;
+            int d = -1;
+            if (inside) {
+                // Same face: the row reads the cell at the opposite offset.
+                d = dindex[(-vy + W) * side - vx + W];
+                if (d < 0) continue;
+            }
+            i64 rid = ext_pix(fq, ex, ey, nside, order);
+            if (rid < 0) continue;
+            i64 k = row_find(rows, K, blk_start, blk_len, blk_f0, rid);
+            i64 ri = k - row0;
+            if (k < 0 || ri < 0 || ri >= n_rows) continue;
+            if (!inside) {
+                i64 xr, yr, fr;
+                nest2xyf(rid, order, &xr, &yr, &fr);
+                d = diag_of(xr, yr, fr, q, nside, order, dindex, W);
+                if (d < 0) continue;
+            }
+            // Diagonals the row does not use are zero for every gauge.
+            const u32* mk = mask + 3 * k;
+            u32 mw = mk[d >> 5];
+            if (!((mw >> (d & 31)) & 1u)) continue;
+            i64 slot = __popc(mw & ((1u << (d & 31)) - 1u));
+            if (d >= 32) slot += __popc(mk[0]);
+            if (d >= 64) slot += __popc(mk[1]);
+            any = true;
+            // The row's coefficients and cotangents are contiguous; per
+            // input row the gauges and channels in order.
+            const double* cr = coef + (slot * K + k) * G * 2;
+            const double* gr = gt + ri * RG2 + (i64)r0 * G * 2;
+            double sj[RC];
+#pragma unroll
+            for (int jj = 0; jj < RC; jj++) sj[jj] = 0.0;
+            for (int go = 0; go < G * 2; go++) {
+                double c = cr[go];
+#pragma unroll
+                for (int jj = 0; jj < RC; jj++)
+                    if (jj < nr) sj[jj] += c * gr[jj * G * 2 + go];
+            }
+#pragma unroll
+            for (int jj = 0; jj < RC; jj++) acc[jj] += sj[jj];
+        }
+    }
+    unsigned ballot = __ballot_sync(0xffffffffu, any);
+    unsigned group = lpc == 32 ? 0xffffffffu : ((1u << lpc) - 1u) << (lane & ~(lpc - 1));
+    any = (ballot & group) != 0u;
+#pragma unroll
+    for (int jj = 0; jj < RC; jj++)
+        for (int off = lpc >> 1; off > 0; off >>= 1) acc[jj] += __shfl_down_sync(0xffffffffu, acc[jj], off, lpc);
+    if (!valid || !any || sub != 0) return;
+#pragma unroll
+    for (int jj = 0; jj < RC; jj++) {
+        if (jj < nr) {
+            double* o = out + (i64)(r0 + jj) * out_stride + dst;
+            if (accumulate) *o += acc[jj]; else *o = acc[jj];
+        }
+    }
+}
+
+// Upper bound only, not the operator (bench_kernels): a constant
+// kernel_sz^2 complex kernel per gauge on face images (no rotation, no
+// interpolation, zero outside the face), out[((r G + g) 2 + o) n + i] for
+// the first n pixels i of the faces (raster order, x fastest).
+#define FACE_CONV(NAME, T)                                                                         \
+    extern "C" __global__ void NAME(const T* x, i64 npix, int R, i64 nside, int G, int ksz,        \
+                                    const T* ker, i64 n, T* out) {                                 \
+        i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;                                        \
+        if (t >= n * R) return;                                                                    \
+        i64 i = t % n;                                                                             \
+        int r = (int)(t / n);                                                                      \
+        i64 f = i / (nside * nside), loc = i - f * nside * nside;                                  \
+        i64 y = loc / nside, xx = loc - y * nside;                                                 \
+        int h = ksz / 2, P = ksz * ksz;                                                            \
+        const T* xs = x + (i64)r * npix + f * nside * nside;                                       \
+        for (int g = 0; g < G; g++) {                                                              \
+            T s0 = 0, s1 = 0;                                                                      \
+            for (int ty = 0; ty < ksz; ty++) {                                                     \
+                i64 yy = y + ty - h;                                                               \
+                if (yy < 0 || yy >= nside) continue;                                               \
+                for (int tx = 0; tx < ksz; tx++) {                                                 \
+                    i64 x2 = xx + tx - h;                                                          \
+                    if (x2 < 0 || x2 >= nside) continue;                                           \
+                    T v = xs[yy * nside + x2];                                                     \
+                    s0 += ker[(g * 2) * P + ty * ksz + tx] * v;                                    \
+                    s1 += ker[(g * 2 + 1) * P + ty * ksz + tx] * v;                                \
+                }                                                                                  \
+            }                                                                                      \
+            out[(((i64)r * G + g) * 2) * n + i] = s0;                                              \
+            out[(((i64)r * G + g) * 2 + 1) * n + i] = s1;                                          \
+        }                                                                                          \
+    }
+FACE_CONV(face_conv_f32, float)
+FACE_CONV(face_conv_f64, double)
 
 // ---------------------------------------------------------------------------
 // Sparse rows (decimation and its transpose)

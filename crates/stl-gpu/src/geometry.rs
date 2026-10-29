@@ -80,7 +80,9 @@ pub struct DeviceGeometry {
     pub n_dest: usize,
 }
 
-fn lapper(gpu: &Gpu) -> impl Fn(&str) + '_ {
+/// With `STL_GPU_PROFILE` set, prints the time since its creation (after a
+/// synchronisation) at every call.
+pub(crate) fn lapper(gpu: &Gpu) -> impl Fn(&str) + '_ {
     let profile = std::env::var_os("STL_GPU_PROFILE").is_some();
     let started = std::time::Instant::now();
     move |what: &str| {

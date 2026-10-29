@@ -1,0 +1,111 @@
+
+## nside 64, kernel 5, L = 4: 49152 rows, 19660800 entries (361778 with a zero weight)
+
+reads without an offset within 12: 0; offsets not leading back: 0; reverse max-norm differs: 0
+
+distinct offsets used (nonzero weight): 81 over all rows and gauges; per gauge [77, 67, 77, 67]
+distinct cells per (row, gauge): 39.02 mean, 29..45 (with zero weights 39.02, 31..45); per row over the 4 gauges: 44.11, 37..49
+
+rows by class (cells read on other faces), max-norm of the offsets:
+
+| class | rows | fraction | max-norm histogram |
+|---|---|---|---|
+| interior | 39400 | 8.016e-1 | 3: 2864, 4: 35368, 5: 1168 |
+| edge | 9128 | 1.857e-1 | 3: 1456, 4: 5448, 5: 2224 |
+| corner (4 faces) | 272 | 5.534e-3 | 4: 272 |
+| corner (3 faces) | 352 | 7.161e-3 | 4: 136, 5: 216 |
+
+rows by (max |dx + dy|, max |dx - dy|) of their nonzero reads:
+
+  ring  4, along  4: 8
+  ring  4, along  5: 4872
+  ring  4, along  6: 21897
+  ring  4, along  7: 4800
+  ring  5, along  5: 16320
+  ring  5, along  6: 247
+  ring  5, along  7: 16
+  ring  6, along  6: 144
+  ring  6, along  7: 848
+
+per mille of the rows reading each offset (dx right, dy up; '.' never):
+
+        -5   -4   -3   -2   -1    0    1    2    3    4    5
+    5    .    .    .   23    .    0    .    .    .    .    .
+    4    .    .   15  143  354  260   38    5    .    .    .
+    3    .   15  408  870  941  912  780  292    0    .    .
+    2   23  143  870  999 1000 1000 1000  887  292    5    .
+    1    .  354  941 1000 1000 1000 1000 1000  778   38    .
+    0    0  260  912 1000 1000 1000 1000 1000  912  260    0
+   -1    .   38  780 1000 1000 1000 1000 1000  941  354    .
+   -2    .    5  292  887 1000 1000 1000  999  870  143   23
+   -3    .    .    0  292  777  912  941  870  408   15    .
+   -4    .    .    .    5   38  260  354  143   15    .    .
+   -5    .    .    .    .    .    0    .   23    .    .    .
+
+rows with a nonzero read outside |dx + dy| <= ring and |dx - dy| <= along:
+
+  ring 5, along 4: 49 diagonals, 49144 rows (1.00e0)
+  ring 5, along 5: 61 diagonals, 27952 rows (5.69e-1)
+  ring 6, along 4: 59 diagonals, 49144 rows (1.00e0)
+  ring 6, along 5: 71 diagonals, 27952 rows (5.69e-1)
+  ring 6, along 6: 85 diagonals, 5664 rows (1.15e-1)
+  ring 7, along 5: 83 diagonals, 27952 rows (5.69e-1)
+  ring 7, along 7: 113 diagonals, 0 rows (0.00e0)
+  ring 8, along 8: 145 diagonals, 0 rows (0.00e0)
+nside 64: 0.3 s
+
+## nside 256, kernel 5, L = 4: 786432 rows, 314572800 entries (5553808 with a zero weight)
+
+reads without an offset within 12: 0; offsets not leading back: 0; reverse max-norm differs: 0
+
+distinct offsets used (nonzero weight): 81 over all rows and gauges; per gauge [77, 67, 77, 67]
+distinct cells per (row, gauge): 39.03 mean, 29..45 (with zero weights 39.03, 31..45); per row over the 4 gauges: 44.11, 37..49
+
+rows by class (cells read on other faces), max-norm of the offsets:
+
+| class | rows | fraction | max-norm histogram |
+|---|---|---|---|
+| interior | 745384 | 9.478e-1 | 3: 81696, 4: 620632, 5: 43056 |
+| edge | 40336 | 5.129e-2 | 3: 6288, 4: 22592, 5: 11456 |
+| corner (4 faces) | 360 | 4.578e-4 | 4: 360 |
+| corner (3 faces) | 352 | 4.476e-4 | 4: 136, 5: 216 |
+
+rows by (max |dx + dy|, max |dx - dy|) of their nonzero reads:
+
+  ring  3, along  7: 32
+  ring  4, along  4: 8
+  ring  4, along  5: 92152
+  ring  4, along  6: 363152
+  ring  4, along  7: 75944
+  ring  5, along  5: 250656
+  ring  5, along  6: 408
+  ring  5, along  7: 16
+  ring  6, along  6: 144
+  ring  6, along  7: 3920
+
+per mille of the rows reading each offset (dx right, dy up; '.' never):
+
+        -5   -4   -3   -2   -1    0    1    2    3    4    5
+    5    .    .    .   30    .    0    .    .    .    .    .
+    4    .    .   14  147  360  258   35    1    .    .    .
+    3    .   14  428  882  938  906  772  284    0    .    .
+    2   30  147  882 1000 1000 1000 1000  875  284    1    .
+    1    .  360  938 1000 1000 1000 1000 1000  772   35    .
+    0    0  258  906 1000 1000 1000 1000 1000  906  258    0
+   -1    .   35  772 1000 1000 1000 1000 1000  938  360    .
+   -2    .    1  284  875 1000 1000 1000 1000  882  147   30
+   -3    .    .    0  284  772  906  938  882  428   14    .
+   -4    .    .    .    1   35  258  360  147   14    .    .
+   -5    .    .    .    .    .    0    .   30    .    .    .
+
+rows with a nonzero read outside |dx + dy| <= ring and |dx - dy| <= along:
+
+  ring 5, along 4: 49 diagonals, 786424 rows (1.00e0)
+  ring 5, along 5: 61 diagonals, 443616 rows (5.64e-1)
+  ring 6, along 4: 59 diagonals, 786424 rows (1.00e0)
+  ring 6, along 5: 71 diagonals, 443616 rows (5.64e-1)
+  ring 6, along 6: 85 diagonals, 79912 rows (1.02e-1)
+  ring 7, along 5: 83 diagonals, 443616 rows (5.64e-1)
+  ring 7, along 7: 113 diagonals, 0 rows (0.00e0)
+  ring 8, along 8: 145 diagonals, 0 rows (0.00e0)
+nside 256: 4.1 s
