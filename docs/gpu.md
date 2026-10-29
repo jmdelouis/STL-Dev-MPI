@@ -328,6 +328,25 @@ keeps the masks of all blocks (16 bytes per row) and only recomputes
 coefficients, and its convolutions are 1.6-2 x faster (`forward` 59.6
 against 170.4 s, `reverse` 46.9 against 127.1 s over the run).
 
+hpc, one A100-SXM4-80GB (job 2353875, `tools/hpc/synth_dia.slurm`), same
+settings, one member; reports in `benchmarks/dia/a100_synth/`:
+
+| nside | geometry | s / evaluation | cache kept | peak GB | geometry built / recomputed (s, whole run) | forward / reverse (s, whole run) | blocks (level 0) |
+|---|---|---|---|---|---|---|---|
+| 1024 | bound stencils | 4.873 | transposition, 45.3 GB | 62.0 | 4.4 / 9.3 | 12.0 / 7.3 | 12 |
+| 1024 | DIA | 3.035 | masks of all blocks + whole geometries, 50.1 GB | 61.0 | 3.6 / 0.8 | 5.3 / 3.8 | 12 |
+| 2048 | bound stencils | 46.25 | transposition, 33.0 GB (part of the blocks) | 67.4 | 159.9 / 8.2 | 113.1 / 77.4 | 58 |
+| 2048 | DIA | 17.93 | masks of all blocks + whole geometries, 34.5 GB | 63.2 | 18.0 / 23.6 | 36.8 / 20.7 | 48 |
+
+The DIA is 1.6 x faster at nside 1024 and 2.6 x at nside 2048; the loss
+values agree to 1.8e-15 relative. The peak is set by the cache budget,
+which fills the device in both forms: the DIA keeps more of the geometry
+in it rather than lowering it. At nside 2048 the bound stencils rebuild
+most blocks with their sort at every sweep (160 of the 185 s), the DIA
+only recomputes coefficients (24 s). The CPU setup (topology, target
+statistics: 77 s at nside 1024, 320 s at nside 2048) is the same in both
+forms and not counted per evaluation.
+
 ### 5.1 Ensembles with the kappa term (`--kappa-table`)
 
 One engine per rank for all the objectives (§2.7) against c15e8ec (one
@@ -363,8 +382,9 @@ free at start-up in both builds).
   data-centre GPU (A100, H100) removes most of it. The DIA geometry
   (`--gpu-conv dia`, §2.3, §5.0) merges the entries of a row that read
   the same cell and drops the transposition (3 x less memory whole, 100 x
-  less between sweeps); it should become the default once measured on
-  the A100.
+  less between sweeps); measured 2.5-2.7 x faster per evaluation on the
+  T4 and 1.6-2.6 x on the A100 (§5.0), it is the candidate for the
+  default.
 - **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
   for nside 2048 on one rank): nside 2048 needs two T4s. They could be
   computed on the device per sweep instead of stored.

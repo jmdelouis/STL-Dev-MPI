@@ -306,10 +306,15 @@ Measured in the engine (`stl-synth --gpu --gpu-conv dia`, one T4, `L =
 4`, `gpu.md` §5.0): nside 256, 1.246 -> 0.505 s per evaluation and peak
 9.8 -> 4.2 GB (the whole DIA geometry fits, 3.5 GB); nside 1024, 61.4 ->
 22.9 s per evaluation (2.7 x) with the same cache budget, loss values
-equal to 2e-15.
+equal to 2e-15. On one A100 (`gpu.md` §5.0, one member): nside 1024,
+4.873 -> 3.035 s per evaluation (1.6 x); nside 2048, 46.25 -> 17.93 s
+(2.6 x), the geometry time over the run falling from 168 to 42 s (the
+bound stencils rebuild most blocks with their sort at every sweep, the
+DIA keeps the masks of all blocks and recomputes coefficients); loss
+values equal to 1.8e-15.
 
-What it should change on the A100 (estimates from the per-row figures
-above, to be measured):
+What it should change in the production configurations (estimates from
+the per-row figures above, still to be measured):
 
 - A100, nside 1024, 10 members (`--kappa-table`, 252 260-row blocks):
   today a 28.4 GB transposition cache (1608 bytes x 17.7 M rows) and the
