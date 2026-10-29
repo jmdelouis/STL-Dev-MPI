@@ -105,12 +105,22 @@ until they are redrawn in the paper's style.
 - GPU: `docs/gpu.md`; H200 numbers from the run reports on hpc
   (`~/stl-mpi/ens/runs/*/syn.json`) and from
   `notebooks/takahashi_nside2048_results.ipynb` (nside 4096 on 2 H200).
-  Shared engine on A100 (Table `tab:gpu`, footnote d, and the paragraph
-  "One engine per rank"): hpc job 2285199, A100-SXM4-80GB, nside 1024,
-  10 members, kappa terms, 3 evaluations, no cache cap (preliminary);
-  code on branch `claude/musing-elgamal-9897d9`, commits badc63b and
-  f083c4a; memory formula in `docs/gpu.md` section 2.7. The capped H200
-  case before the change (16 GB cap, 98 GB peak) is in `docs/gpu.md`.
+  Shared engine against one engine per objective (Table `tab:gpu`,
+  footnotes c and d, the paragraph "One engine per rank" and the
+  conclusions): `docs/gpu.md` section 5.1 at commit fa2e742 of branch
+  `claude/musing-elgamal-9897d9` (engine badc63b, on main; memory formula
+  in section 2.7): hpc, one rank, A100-SXM4-80GB, gaussianised Takahashi
+  kappa target, L = 4, `--weights ergodic --scatter-weight 1 --kappa-table
+  knots --kappa-weight 0.1`, level-power and marginal weights 10 and 10000
+  at nside 1024, 5 and 5000 at 2048, 3 evaluations, 6 host threads (16 on
+  the H200). nside 1024 x 10: c15e8ec out of memory uncapped, 86.6 s,
+  setup 156 s, peak 70.2 GB with `STL_GPU_CACHE_MB=6000`; shared engine
+  uncapped 64.4 s, setup 86 s, peak 62.8 GB (cache 28.4 GB; job 2285199).
+  nside 2048 x 5, shared engine: 394.7 s, setup 446 s, peak 77.7 GB (cache
+  8.6 GB). H200 c15e8ec: 1024 x 10 capped at 16000 MB (44.5 s in the
+  3-evaluation test, peak 98.0 GB; the table keeps the 54.3 s of the
+  production ensemble), 2048 x 5 capped at 6000 MB (156.7 s, 139.2 GB,
+  test 1977934).
   Diagonal (DIA) form of the convolution (paragraph after "Performance" in
   the GPU section, Table `tab:gpu` footnote e): PR jmdelouis/STL-Dev-MPI#3,
   branch `claude/great-moore-0f5dae` (engine at 74c0b0e, option
