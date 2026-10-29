@@ -5,6 +5,7 @@
 //! See `docs/gpu.md`.
 
 pub mod device;
+pub mod dia;
 pub mod engine;
 pub mod geometry;
 pub mod topology;
