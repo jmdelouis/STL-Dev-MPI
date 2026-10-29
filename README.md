@@ -123,9 +123,12 @@ until they are redrawn in the paper's style.
   test 1977934).
   Diagonal (DIA) form of the convolution (paragraph after "Performance" in
   the GPU section, Table `tab:gpu` footnote e): PR jmdelouis/STL-Dev-MPI#3,
-  branch `claude/great-moore-0f5dae` (engine at 74c0b0e, option
-  `stl-synth --gpu --gpu-conv dia`, default still `stencils`), method and
-  per-row bytes in `docs/dia_convolution.md`; A100 stencils against DIA:
+  merged into main as 8120aec (30 Oct): DIA is the default of
+  `stl-synth --gpu`, `--gpu-conv stencils` / `STL_GPU_CONV=stencils` gives
+  the bound stencils back; DIA against stencils on the fixtures: 5.3e-17
+  (statistics) and 5.3e-15 (gradients) relative. Method and per-row bytes
+  in `docs/dia_convolution.md`; A100 stencils against DIA (measured with
+  the engine at 74c0b0e, before the merge):
   hpc job 2353875, one A100-SXM4-80GB, nside 1024 and 2048, one map,
   L = 4, 3 L-BFGS iterations (4 evaluations) from white noise on a
   lognormal target, cache `auto` (transposition), reports
