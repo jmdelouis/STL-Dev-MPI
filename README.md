@@ -124,13 +124,19 @@ until they are redrawn in the paper's style.
   (28 Oct; not used in production).
 - Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
   garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
-  (preliminary: loss still decreasing). Continued by 300 iterations on
-  Datarmor with the same setting (commit 39d2f60, Minkowski and tail terms
-  off): job 7775548, 400 ranks in 10 groups of 40 on 16 nodes (448 cores),
-  Intel MPI, 259 s per evaluation, loss 2.46 to 1.42 after 185 evaluations
-  (29 Oct, running); then the 2048 ensemble, jobs 7775549 and 7775550
-  (100 + 100 iterations). The Irene jobs 6090002 and 6090003 were cancelled
-  on 29 Oct (they duplicated the Datarmor chain).
+  (300 iterations). Continued by 300 iterations on Datarmor with the same
+  setting (commit 39d2f60, Minkowski and tail terms off, INIT_NOISE=0):
+  job 7775548, 400 ranks in 10 groups of 40 on 16 nodes (448 cores), Intel
+  MPI, 311 evaluations at 258 s, 22.4 h, loss 2.46 to 0.802 (finished
+  29 Oct); members histogram-matched to kappa (`tools/gaussianize.py
+  match`), judged against r000-r009 (files from `runs/` of the main checkout):
+  `figures/cv10_n1024_datarmor.txt`, `figures/mf_levels_n1024_datarmor.txt`
+  (Irene 300 it and Datarmor 600 it side by side; preliminary until the
+  2048 analysis). Then the 2048 ensemble from these members, jobs 7775549
+  (100 iterations, about 1070 s per evaluation on the same 448 cores,
+  started 29 Oct 17:50) and 7775550 (100 iterations). The Irene jobs
+  6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
+  Datarmor chain).
 - Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
 - Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
   `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).
