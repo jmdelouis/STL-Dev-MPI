@@ -3,17 +3,20 @@
 //! The cell a row reads on diagonal `d` is found from the row's face
 //! coordinates and the offset `off_d` (`ext_pix`), so no position is
 //! stored; the kernel and the bound bilinear weights are folded into
-//! coefficients `coef[((g * 2 + o) * D + d) * K + k]` (rows fastest).  The
-//! adjoint gathers, for each grid cell, the rows at the opposite offsets:
-//! no transposition, no sort.  What is kept is the coefficients (`2 G D`
+//! coefficients `coef[((d * K + k) * G + g) * 2 + o]` (the gauges and
+//! channels of a row together, rows next).  The adjoint gathers, for each
+//! grid cell, the rows at the opposite offsets: no transposition, no sort;
+//! the cotangents are first copied row by row (`dia_gin_t`, a transient of
+//! the size of the cotangents) so that a row's values are contiguous.  What is kept is the coefficients (`2 G D`
 //! doubles per row) and the list of the cells the rows reach (`dest`, 4
 //! bytes per cell), which [`DiaGeometry::strip`] keeps alone.
 //!
 //! Summation orders: the coefficient of a diagonal adds the taps then the
 //! bilinear neighbours reading its cell; the forward adds the diagonals in
-//! increasing order; the adjoint adds, per cell, the rows of the window
-//! `[-W, W]^2` (`vy` then `vx` increasing), each summed over gauges and
-//! channels first.  The same orders as `stl_core::dia::DiaGeometry`.
+//! increasing order (as `stl_core::dia::DiaGeometry`); the adjoint sums,
+//! per cell, each row of the window `[-W, W]^2` over gauges and channels,
+//! then the rows by [`lanes`] lane-strided partial sums combined by a fixed
+//! shuffle tree (the CPU adds them in window order, as one lane does).
 
 use crate::device::{Arg, Gpu};
 use crate::geometry::{Grid, Spec};
@@ -25,6 +28,13 @@ use stl_core::stencil::{local_kernel_grid, Gauge};
 /// Input rows and gauges per thread (`RC`, `GB` in kernels.cu).
 const RC: usize = 4;
 const GB: usize = 4;
+
+/// Lanes per cell of the adjoint (`STL_DIA_LANES`, a power of two <= 32).
+pub fn lanes() -> usize {
+    let l = std::env::var("STL_DIA_LANES").ok().and_then(|v| v.parse().ok()).unwrap_or(4usize);
+    assert!(l.is_power_of_two() && l <= 32, "STL_DIA_LANES must be a power of two <= 32");
+    l
+}
 
 /// The diagonals on the device: offsets `(dx, dy)` and the index of the
 /// window `[-w, w]^2`.
@@ -291,9 +301,13 @@ impl DiaGeometry {
         out_stride: usize,
         accumulate: bool,
     ) {
+        let rg2 = rows_in * self.g * 2;
+        let gt = gpu.zeros::<f64>(n * rg2);
+        gpu.launch1("dia_gin_t", n * rg2, &[gin, gin_stride.into(), (rg2 as i32).into(), n.into(), gpu.a(&gt)]);
+        let lpc = lanes();
         gpu.launch1(
             "dia_adj",
-            self.n_dest * rows_in.div_ceil(RC),
+            lpc * self.n_dest * rows_in.div_ceil(RC),
             &[
                 gpu.a(&self.dest),
                 self.n_dest.into(),
@@ -310,8 +324,7 @@ impl DiaGeometry {
                 Arg::I64(self.own.f0),
                 self.nside.into(),
                 (self.order as i32).into(),
-                gin,
-                gin_stride.into(),
+                gpu.a(&gt),
                 (rows_in as i32).into(),
                 row0.into(),
                 n.into(),
@@ -319,6 +332,7 @@ impl DiaGeometry {
                 out,
                 out_stride.into(),
                 (accumulate as i32).into(),
+                (lpc as i32).into(),
             ],
         );
     }

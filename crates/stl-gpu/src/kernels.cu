@@ -619,7 +619,7 @@ extern "C" __global__ void conv_adj(
 // DIA convolution (port of stl_core::dia): the cells of a row are found
 // from its face coordinates and a fixed set of D offsets (diagonals); the
 // kernel and the bound bilinear weights are folded into per-row
-// coefficients coef[((g * 2 + o) * D + d) * K + k]; the adjoint gathers the
+// coefficients coef[((d * K + k) * G + g) * 2 + o]; the adjoint gathers the
 // rows at the opposite offsets, so there is no transposition.
 // ---------------------------------------------------------------------------
 
@@ -728,8 +728,7 @@ extern "C" __global__ void dia_build(
     nest2xyf(row, order, &x, &y, &f);
     const double* k0 = ker + ((i64)g * 2 + 0) * P;
     const double* k1 = ker + ((i64)g * 2 + 1) * P;
-    double* c0 = coef + ((i64)g * 2 + 0) * D * K + k;
-    double* c1 = coef + ((i64)g * 2 + 1) * D * K + k;
+    double* cg = coef + ((i64)k * G + g) * 2;
     for (int p = 0; p < P; p++) {
         i64 ix[4], found[4];
         double w[4];
@@ -741,8 +740,8 @@ extern "C" __global__ void dia_build(
                 atomicAdd(&errors[0], 1u);
                 continue;
             }
-            c0[(i64)d * K] += k0[p] * w[n];
-            c1[(i64)d * K] += k1[p] * w[n];
+            cg[(i64)d * K * G * 2] += k0[p] * w[n];
+            cg[(i64)d * K * G * 2 + 1] += k1[p] * w[n];
         }
     }
 }
@@ -790,8 +789,8 @@ extern "C" __global__ void dia_fwd(
 #pragma unroll
         for (int gb = 0; gb < GB; gb++) {
             if (gb < ng) {
-                const double* cg = coef + (((i64)(g0 + gb) * 2) * D + d) * K + k;
-                double c0 = cg[0], c1 = cg[(i64)D * K];
+                const double* cg = coef + (((i64)d * K + k) * G + g0 + gb) * 2;
+                double c0 = cg[0], c1 = cg[1];
 #pragma unroll
                 for (int j = 0; j < RC; j++) {
                     s[gb][0][j] += c0 * xv[j];
@@ -823,45 +822,66 @@ __device__ __forceinline__ i64 row_find(const i64* rows, i64 K, i64 blk_start, i
     return (lo < K && rows[lo] == id) ? lo : -1;
 }
 
-// Adjoint of dia_fwd for the rows k in [row0, row0 + n_rows) (gin `[R, G,
-// 2, gin_stride]` at k - row0), gathered per grid cell dest[s]: the rows at
-// the offsets v of the window [-W, W]^2 in the cell's extended frame (vy
-// then vx increasing), each through the diagonal on which it reads the
-// cell, summed over gauges and channels then added (DiaGeometry::adjoint).
-// The result goes to out[r * out_stride + dmap(dest[s])] (dmap null:
+// gt[i * (R G 2) + (r G + g) 2 + o] = gin[((r G + g) 2 + o) gin_stride + i]
+// for the rows i < n_rows: the cotangents of a row together (dia_adj).
+extern "C" __global__ void dia_gin_t(const double* gin, i64 gin_stride, int RG2, i64 n_rows, double* gt) {
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n_rows * (i64)RG2) return;
+    i64 i = t / RG2;
+    int c = (int)(t - i * RG2);
+    gt[t] = gin[(i64)c * gin_stride + i];
+}
+
+// Adjoint of dia_fwd for the rows k in [row0, row0 + n_rows) (gt from
+// dia_gin_t: `[n_rows, R, G, 2]` at k - row0), gathered per grid cell
+// dest[s] over the rows at the offsets v of the window [-W, W]^2 in the
+// cell's extended frame, each through the diagonal on which it reads the
+// cell.  The result goes to out[r * out_stride + dmap(dest[s])] (dmap null:
 // dest[s]; -1: dropped), added when `accumulate`; cells without a row in
-// range are left alone.  One thread per (cell, RC input rows).
+// range are left alone.
+//
+// `lpc` lanes (a power of two <= 32) per (cell, RC input rows): lane l
+// takes the offsets l, l + lpc, ... of the window (vy then vx increasing),
+// each row summed over gauges and channels then added to the lane's sum;
+// the lane sums are combined by a fixed shuffle tree (deterministic; with
+// lpc = 1 the order of DiaGeometry::adjoint on the CPU).
 extern "C" __global__ void dia_adj(
     const u32* dest, i64 n_dest, const i64* grid,
     const double* coef, int G, i64 K, int D, const int* dindex, int W,
     const i64* rows, i64 blk_start, i64 blk_len, i64 blk_f0, i64 nside, int order,
-    const double* gin, i64 gin_stride, int R, i64 row0, i64 n_rows,
-    const int* dmap, double* out, i64 out_stride, int accumulate)
+    const double* gt, int R, i64 row0, i64 n_rows,
+    const int* dmap, double* out, i64 out_stride, int accumulate, int lpc)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+    int sub = lane & (lpc - 1);
+    i64 unit = t / lpc;
     int n_rc = (R + RC - 1) / RC;
-    if (t >= n_dest * (i64)n_rc) return;
-    i64 s = t % n_dest;
-    int r0 = (int)(t / n_dest) * RC;
+    bool valid = unit < n_dest * (i64)n_rc;
+    i64 s = valid ? unit % n_dest : 0;
+    int r0 = valid ? (int)(unit / n_dest) * RC : 0;
     int nr = R - r0 < RC ? R - r0 : RC;
-    u32 j = dest[s];
-    i64 dst = dmap ? (i64)dmap[j] : (i64)j;
-    if (dst < 0) return;
-    i64 q = grid[j];
-    i64 xq, yq, fq;
-    nest2xyf(q, order, &xq, &yq, &fq);
+    u32 j = valid ? dest[s] : 0;
+    i64 dst = !valid ? -1 : (dmap ? (i64)dmap[j] : (i64)j);
+    valid = valid && dst >= 0;
+    int side = 2 * W + 1;
+    int RG2 = R * G * 2;
     double acc[RC];
 #pragma unroll
     for (int jj = 0; jj < RC; jj++) acc[jj] = 0.0;
     bool any = false;
-    for (int vy = -W; vy <= W; vy++) {
-        for (int vx = -W; vx <= W; vx++) {
+    if (valid) {
+        i64 q = grid[j];
+        i64 xq, yq, fq;
+        nest2xyf(q, order, &xq, &yq, &fq);
+        for (int vi = sub; vi < side * side; vi += lpc) {
+            int vy = vi / side - W, vx = vi - (vi / side) * side - W;
             i64 ex = xq + vx, ey = yq + vy;
             bool inside = ex >= 0 && ex < nside && ey >= 0 && ey < nside;
             int d = -1;
             if (inside) {
                 // Same face: the row reads the cell at the opposite offset.
-                d = dindex[(-vy + W) * (2 * W + 1) - vx + W];
+                d = dindex[(-vy + W) * side - vx + W];
                 if (d < 0) continue;
             }
             i64 rid = ext_pix(fq, ex, ey, nside, order);
@@ -876,19 +896,30 @@ extern "C" __global__ void dia_adj(
                 if (d < 0) continue;
             }
             any = true;
+            // The row's coefficients and cotangents are contiguous; per
+            // input row the gauges and channels in order.
+            const double* cr = coef + ((i64)d * K + k) * G * 2;
+            const double* gr = gt + ri * RG2 + (i64)r0 * G * 2;
+            double sj[RC];
 #pragma unroll
-            for (int jj = 0; jj < RC; jj++) {
-                if (jj < nr) {
-                    double sj = 0.0;
-                    for (int g = 0; g < G; g++)
-                        for (int o = 0; o < 2; o++)
-                            sj += coef[(((i64)g * 2 + o) * D + d) * K + k] * gin[(((i64)(r0 + jj) * G + g) * 2 + o) * gin_stride + ri];
-                    acc[jj] += sj;
-                }
+            for (int jj = 0; jj < RC; jj++) sj[jj] = 0.0;
+            for (int go = 0; go < G * 2; go++) {
+                double c = cr[go];
+#pragma unroll
+                for (int jj = 0; jj < RC; jj++)
+                    if (jj < nr) sj[jj] += c * gr[jj * G * 2 + go];
             }
+#pragma unroll
+            for (int jj = 0; jj < RC; jj++) acc[jj] += sj[jj];
         }
     }
-    if (!any) return;
+    unsigned ballot = __ballot_sync(0xffffffffu, any);
+    unsigned group = lpc == 32 ? 0xffffffffu : ((1u << lpc) - 1u) << (lane & ~(lpc - 1));
+    any = (ballot & group) != 0u;
+#pragma unroll
+    for (int jj = 0; jj < RC; jj++)
+        for (int off = lpc >> 1; off > 0; off >>= 1) acc[jj] += __shfl_down_sync(0xffffffffu, acc[jj], off, lpc);
+    if (!valid || !any || sub != 0) return;
 #pragma unroll
     for (int jj = 0; jj < RC; jj++) {
         if (jj < nr) {
@@ -897,6 +928,41 @@ extern "C" __global__ void dia_adj(
         }
     }
 }
+
+// Upper bound only, not the operator (bench_kernels): a constant
+// kernel_sz^2 complex kernel per gauge on face images (no rotation, no
+// interpolation, zero outside the face), out[((r G + g) 2 + o) n + i] for
+// the first n pixels i of the faces (raster order, x fastest).
+#define FACE_CONV(NAME, T)                                                                         \
+    extern "C" __global__ void NAME(const T* x, i64 npix, int R, i64 nside, int G, int ksz,        \
+                                    const T* ker, i64 n, T* out) {                                 \
+        i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;                                        \
+        if (t >= n * R) return;                                                                    \
+        i64 i = t % n;                                                                             \
+        int r = (int)(t / n);                                                                      \
+        i64 f = i / (nside * nside), loc = i - f * nside * nside;                                  \
+        i64 y = loc / nside, xx = loc - y * nside;                                                 \
+        int h = ksz / 2, P = ksz * ksz;                                                            \
+        const T* xs = x + (i64)r * npix + f * nside * nside;                                       \
+        for (int g = 0; g < G; g++) {                                                              \
+            T s0 = 0, s1 = 0;                                                                      \
+            for (int ty = 0; ty < ksz; ty++) {                                                     \
+                i64 yy = y + ty - h;                                                               \
+                if (yy < 0 || yy >= nside) continue;                                               \
+                for (int tx = 0; tx < ksz; tx++) {                                                 \
+                    i64 x2 = xx + tx - h;                                                          \
+                    if (x2 < 0 || x2 >= nside) continue;                                           \
+                    T v = xs[yy * nside + x2];                                                     \
+                    s0 += ker[(g * 2) * P + ty * ksz + tx] * v;                                    \
+                    s1 += ker[(g * 2 + 1) * P + ty * ksz + tx] * v;                                \
+                }                                                                                  \
+            }                                                                                      \
+            out[(((i64)r * G + g) * 2) * n + i] = s0;                                              \
+            out[(((i64)r * G + g) * 2 + 1) * n + i] = s1;                                          \
+        }                                                                                          \
+    }
+FACE_CONV(face_conv_f32, float)
+FACE_CONV(face_conv_f64, double)
 
 // ---------------------------------------------------------------------------
 // Sparse rows (decimation and its transpose)

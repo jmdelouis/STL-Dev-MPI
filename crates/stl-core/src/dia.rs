@@ -179,9 +179,10 @@ impl Diagonals {
 }
 
 /// The convolution of [`ConvGeometry`] in DIA form, on the CPU (reference
-/// of the device kernels): coefficients `coef[((g * C_out + o) * D + d) *
-/// K + k]` of output row `k`, gauge `g`, output channel `o` and diagonal
-/// `d`; the cell of a row on a diagonal is found from the NESTED ids.
+/// of the device kernels): coefficients `coef[((d * K + k) * G + g) *
+/// C_out + o]` of output row `k`, gauge `g`, output channel `o` and
+/// diagonal `d` (the gauges and channels of a row together); the cell of a
+/// row on a diagonal is found from the NESTED ids.
 #[derive(Clone, Debug)]
 pub struct DiaGeometry {
     pub nside: i64,
@@ -217,7 +218,7 @@ impl DiaGeometry {
                         let (dx, dy) = rel_offset(row, cell, geo.nside, order)?;
                         let d = diagonals.find(dx, dy)?;
                         for o in 0..co {
-                            coef[((g * co + o) * dd + d) * kk + k] += ker.at(g, 0, o, p) * geo.w[a];
+                            coef[((d * kk + k) * gg + g) * co + o] += ker.at(g, 0, o, p) * geo.w[a];
                         }
                     }
                 }
@@ -248,7 +249,7 @@ impl DiaGeometry {
                     let mut s = 0.0;
                     for (d, p) in pos.iter().enumerate() {
                         if let Some(p) = p {
-                            s += self.coef[(go * dd + d) * kk + k] * x[b * ni + p];
+                            s += self.coef[(d * kk + k) * gg * co + go] * x[b * ni + p];
                         }
                     }
                     out[(b * gg * co + go) * kk + k] = s;
@@ -278,7 +279,7 @@ impl DiaGeometry {
                     for b in 0..batch {
                         let mut s = 0.0;
                         for go in 0..gg * co {
-                            s += self.coef[(go * dd + d) * kk + k] * gy[(b * gg * co + go) * kk + k];
+                            s += self.coef[(d * kk + k) * gg * co + go] * gy[(b * gg * co + go) * kk + k];
                         }
                         out[b * ni + j] += s;
                     }
