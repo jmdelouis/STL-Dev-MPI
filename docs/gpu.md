@@ -305,6 +305,52 @@ configurations (fixed device blocks; with blocks sized from the device
 memory the block boundaries, hence the last bits, depend on the memory
 free at start-up in both builds).
 
+hpc, Takahashi kappa ensemble (gaussianised target, `L = 4`, one rank,
+`--weights ergodic --scatter-weight 1 --kappa-table knots.npy
+--kappa-weight 0.1`, level-power and marginal weights 10 and 10000 at
+nside 1024, 5 and 5000 at nside 2048, start from the syntheses of the
+previous nside, 2 L-BFGS iterations = 3 evaluations), device blocks and
+cache sized from the free memory. Peak: whole device, CUDA context
+included (GB = 1e9 bytes); cache: policy chosen by `auto`, then its final
+size (`geometry_cache_used_bytes_per_rank`) or, for c15e8ec, the budget of
+each engine. Host threads of the setup: 16 on the H200, 6 on the A100
+(`STL_GPU_THREADS`, the CPUs free on the A100 node). The H200 runs (26
+October) started from earlier syntheses than the A100 ones, so their
+losses differ.
+
+| Device | nside x members | Build | `STL_GPU_CACHE_MB` | s / evaluation | setup s | peak GB | cache |
+|---|---|---|---|---|---|---|---|
+| H200 (141 GB) | 1024 x 10 | c15e8ec | unset | out of device memory | | | |
+| H200 | 1024 x 10 | c15e8ec | 16000 | 44.5 | 108 | 98.0 | budget 16.8 GB per engine |
+| H200 | 2048 x 5 | c15e8ec | 6000 | 156.7 | 521 | 139.2 | budget 6.3 GB per engine |
+| A100 (80 GB) | 1024 x 10 | c15e8ec | unset | out of device memory | | | |
+| A100 | 1024 x 10 | c15e8ec | 6000 | 86.6 | 156 | 70.2 | transposition, budget 6.3 GB per engine |
+| A100 | 1024 x 10 | shared engine | unset | 64.4 | 86 | 62.8 | transposition, 28.4 GB |
+| A100 | 2048 x 5 | shared engine | unset | 394.7 | 446 | 77.7 | transposition, 8.6 GB |
+
+On the same A100 at nside 1024 the shared engine runs without a cap,
+takes 26 % less time per evaluation and 45 % less setup (one topology
+instead of one per engine), with a peak 7.4 GB lower although its one
+cache (28.4 GB) is larger than the 6.3 GB budgets of all of c15e8ec's
+engines together; its losses are c15e8ec's to 3e-16 (different block
+boundaries). The device is busy 18 % of the time on average (`nvidia-smi`
+every 20 s; 28 % for c15e8ec): its phase timers add up to 55 s of the
+193 s of the three evaluations, the rest is host work with the 6 threads
+of this node. Its 62.8 GB are the fields of the 10 members (27.7 GB,
+§2.7), the decimation rows and topology (~3.4 GB), one block's transients
+(252 260 rows, ~2.4 GB) and the cache, which takes the rest. At nside
+2048 the 5 members fit on the A100 (c15e8ec needed 139 GB on the H200):
+their fields (55.5 GB) and the decimation rows (~13 GB) leave 8.6 GB to
+the cache, a small part of the geometry's transposition (~108 GB), so
+the geometry is rebuilt for every block at every sweep (527 blocks at
+level 0): 924 s of the device phase timers, against 73 s for the
+convolutions, adjoints, decimations and coefficients together (the
+device is busy 33 % of the time on average). Ten members at nside 2048
+do not fit on one 80 GB device: their fields alone are 111 GB. `z_n` and
+`|z_n|` with the reverse chain are 77 % of the fields (2 x 10.7 of the
+27.6 doubles per pixel and member at `L = 4`), the maps 10 %, the stored
+moduli 13 %.
+
 ## 6. Limitations and next steps
 
 - **FP64 throughput.** On the T4 the stencil kernel (interpolation of
@@ -316,7 +362,11 @@ free at start-up in both builds).
   transposition ~2.8 x smaller, so the whole geometry fits more often).
 - **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
   for nside 2048 on one rank): nside 2048 needs two T4s. They could be
-  computed on the device per sweep instead of stored.
+  computed on the device per sweep instead of stored. The level fields
+  are dominated by `z_n` and `|z_n|` (77 % at `L = 4`, §5.1): computing
+  `|z_n|` per block from `z_n`, and `z_n` of the reverse sweep per block
+  from the maps (one more convolution per block), would bring 10 members
+  at nside 2048 within an 80 GB device and leave the geometry cache room.
 - **Exchanges** copy whole level fields between device and host (MPI is
   not CUDA-aware on garoupe): packing only the halo cells on the device
   would cut the transfers by the halo fraction.
