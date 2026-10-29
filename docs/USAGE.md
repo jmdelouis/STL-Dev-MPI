@@ -340,9 +340,10 @@ nside 256.  Two terms fix it:
   histogram matching then puts the target's largest kappa on whatever
   pixels rank first; a term on `kappa = f(g)` never sees them.  Same sort
   as `--marginal-weight`.  At nside 512, 0.1 per member with K = 30 brings
-  the kurtosis of kappa back at the cost of a 10-30 % slower descent of the
-  level power.  1 per member with K = 100 stalls it.  The weight scales as
-  1/N (`kappa_power_spectrum.md` §6, §8.6).
+  the kurtosis of kappa back (+0.1 cosmic sigma after 600 iterations).  The
+  level power then lags by about 150 iterations.  1 per member with K = 100
+  stalls it.  The weight scales as 1/N (`kappa_power_spectrum.md` §6,
+  §8.6).
 
 With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
 over l = 31-767, with every gaussianised family still at 1 sigma per member.

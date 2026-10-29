@@ -39,9 +39,10 @@ kappa at 512 rises to +4 cosmic sigma (control +1 to +2), as when the term
 is added to a converged ensemble (§8).  That excess sits in the few largest
 values of g, which the histogram term leaves free.  Holding them
 (`--marginal-tail-weight 0.1 B --marginal-tail 30` at nside 512) brings the
-kurtosis back to +0.7 cosmic sigma.  Peaks and C_l are unchanged.  The
-level variances of g lag by about 1 cosmic sigma.  Ten times stronger, the
-term stalls the level power (§8.6).
+kurtosis back to +0.1 cosmic sigma after 600 iterations (control +1.1).
+Peaks and C_l are unchanged.  The level variances of g lag the control's by
+about 150 iterations.  Ten times stronger, the term stalls the level power
+(§8.6).
 
 ## 1. Diagnosis: a Gaussian copula at small scales
 
@@ -228,8 +229,10 @@ python tools/gaussianize.py match table.npz ens_m000_synthesis_nested.npy ens_m0
 - Optional, when the kurtosis of kappa at the finest level matters:
   `--marginal-tail-weight X --marginal-tail K` with X = 0.1 B (512 /
   NSIDE)^2 and K = 30 (NSIDE / 512)^2 (tested at 512 only).  It brings that
-  kurtosis from +4 to +0.7 cosmic sigma at 512.  It slows the descent of the
-  level power by 10-30 % (§8.6).  Ten times stronger, it stalls it.
+  kurtosis at 512 from +4 to +0.7 cosmic sigma after 450 iterations, and to
+  +0.1 after 600 (control +2.3 and +1.1).  The level variances of g lag the
+  control's by about 150 iterations (§8.6).  Ten times stronger, it stalls
+  the level power.
 
 Open points:
 
@@ -241,10 +244,10 @@ Open points:
 - The V1, V2 of the kappa levels keep maxima of 4-6 cosmic sigma at 64-256
   with or without the Minkowski term; its 3 x 3 stencil does not see the
   pixel scale of each level (§8.2, §8.4, §8.5).
-- Without the tail term, the kurtosis of kappa at the finest level is +2
-  to +4 cosmic sigma high.  It comes from the few largest values of g, and
-  holding them slows the level power (§8.6).  The tail above nside 512 is
-  untested.
+- Without the tail term, the kurtosis of kappa at the finest level is +1
+  to +4 cosmic sigma high.  It comes from the few largest values of g.
+  Holding them costs about 150 iterations of level-power descent at 512
+  (§8.6).  The tail above nside 512 is untested.
 - Not yet tested at nside 1024 and 2048.  The 256 knots hold the tail there.
   On r000 the excess kurtosis of the finest details through the knots is
   1325 against 1330 at 1024, and 1834 against 1832 at 2048.
@@ -795,6 +798,72 @@ So the soft tail fixes the kurtosis of kappa at the finest level without
 cost to the peaks, the C_l or the statistics of the loss.  It costs a slower
 descent of the level power, worth about 1 cosmic sigma in the level
 variances of g after 450 iterations, and slightly larger V1, V2 maxima at
-64-256.  The strong tail is not to be used.  Untested: whether 150 more
-iterations close the level-power gap (the control's level variances moved
-by 1-2 cosmic sigma in its +150 iterations), and the tail above nside 512.
+64-256.  The strong tail is not to be used.
+
+The soft tail is continued for 150 more iterations with the same flags, as
+the control was in §8.4 (`--init-noise 0`, a fresh L-BFGS history).  At 600
+iterations:
+
+| level, functional | r001-r009 | control, 600 it | soft tail, 450 it | soft tail, 600 it |
+|---|---|---|---|---|
+| 64 V0 | 0.91 / 2.93 / 0.90 | 0.85 / 2.94 / 1.10 | 0.46 / 3.36 / 0.87 | 0.47 / 3.00 / 0.82 |
+| 64 V1 | 1.05 / 3.45 / 1.09 | 1.27 / 5.26 / 1.53 | 1.38 / 5.17 / 1.58 | 1.35 / 4.92 / 1.56 |
+| 64 V2 | 1.06 / 3.52 / 1.11 | 0.93 / 4.56 / 1.31 | 1.12 / 5.40 / 1.36 | 1.07 / 4.68 / 1.44 |
+| 128 V0 | 1.49 / 3.61 / 1.63 | 1.67 / 3.53 / 1.97 | 0.70 / 2.65 / 0.99 | 0.79 / 2.47 / 1.03 |
+| 128 V1 | 1.14 / 3.63 / 1.17 | 1.88 / 6.16 / 2.29 | 1.33 / 5.51 / 1.72 | 1.42 / 5.08 / 1.70 |
+| 128 V2 | 0.94 / 3.55 / 1.11 | 1.73 / 5.41 / 1.97 | 1.35 / 6.19 / 1.73 | 1.34 / 5.64 / 1.68 |
+| 256 V0 | 1.93 / 3.63 / 2.00 | 3.08 / 3.91 / 2.90 | 0.58 / 1.95 / 0.96 | 0.88 / 1.83 / 0.97 |
+| 256 V1 | 1.20 / 3.76 / 1.31 | 1.55 / 5.29 / 2.21 | 1.90 / 5.07 / 1.99 | 1.72 / 4.29 / 1.75 |
+| 256 V2 | 1.10 / 3.69 / 1.18 | 2.13 / 5.38 / 2.31 | 1.96 / 6.74 / 2.17 | 1.79 / 5.76 / 1.96 |
+| 512 V1 | 1.15 / 3.70 / 1.18 | 1.33 / 3.08 / 1.41 | 1.06 / 2.34 / 1.21 | 1.12 / 2.66 / 1.23 |
+| 512 V2 | 0.94 / 3.45 / 0.96 | 1.52 / 6.70 / 2.25 | 0.90 / 5.19 / 1.78 | 0.95 / 5.04 / 1.78 |
+
+| | control, 600 it | soft tail, 600 it |
+|---|---|---|
+| loss at evaluation 1 / 80 / 150 of the +150 | 1.718 / 1.365 / 1.194 | 2.025 / 1.687 / 1.494 |
+| loss after 600 it; Minkowski and tail terms | 1.157; - | 1.484; 0.024, 0.0024 |
+| largest deviation of the top 3 ranks (standardised) | 0.29 | 0.02 |
+| excess kurtosis of the finest kappa details, knots / matched (r000 855) | 816-898 / 901-1133 | 847-882 / 847-903 |
+| mean, var of g | 0.73, 1.01 | 0.44, 3.90 |
+| S1 S2 S3 S4, rms | 2.08 2.06 1.15 0.71 | 2.36 2.48 1.15 0.71 |
+| kappa term; mean of kappa | 0.0029; 0.43 | 0.0032; 0.65 |
+| level power term; finest level / 256 variance over the target's | 0.496; 0.82 / 1.05 | 0.779; 0.77 / 1.09 |
+| var of the levels of g, 128 / 256 / 512 (cv10) | +4.7 / +2.6 / -6.4 | +5.8 / +4.4 / -7.9 |
+| var of kappa, 256 / 512 (cv10) | -1.3 / +0.8 | +0.2 / -1.2 |
+| kurtosis of kappa at 64 / 128 / 256 / 512 (cv10) | -0.0 / +0.1 / +0.6 / +1.1 | +0.0 / +0.1 / +0.1 / +0.1 |
+| peaks above 3 / 5 / 10 sigma (cv10) | -0.1 / 0.0 / -0.9 | -0.6 / -0.2 / -0.4 |
+| C_l, l >= 31: median / max abs z (cv10) | 0.3 / 0.6 | 0.2 / 0.6 |
+| term's estimator, max abs z of V1 / V2 at 256; at 512 | 6.6 / 19.8; 3.3 / 13.4 | 1.4 / 0.6; 0.9 / 0.6 |
+| s / eval (2 T4) | 40.8 | 48.2 |
+
+- **The kurtosis of kappa reaches the reference.**  It is +0.1 cosmic
+  sigma at 256 and at 512, every member within +0.4, against +0.6 and +1.1
+  for the control.  The matched excess of the finest details is 847-903
+  (r000 855), and the top three ranks are within 0.02 of the target's.  The
+  control's 150 iterations lower its kurtosis too (from +2.3 to +1.1), but
+  its top ranks stay up to 0.3 off.
+- **The level-power lag does not close.**  Over the 150 iterations both
+  losses fall by about the same amount (0.54 and 0.56), and the gap stays
+  at about 0.3.
+  The level power is 0.28 of it (0.78 against 0.50).  The level variances of
+  g at 600 iterations are those of the control at 450 (+5.8 / +4.4 / -7.9
+  against +6.0 / +4.8 / -7.8).  That is 1.1-1.8 cosmic sigma further from
+  r000 than the control at 600.  The variance of g is 3.9 ergodic sigma off
+  (control 1.0), and S1, S2 are 2.4, 2.5 (control 2.1).
+- **The Minkowski functionals follow the iterations.**  V0 stays within
+  cosmic variance at every level, and V1 at 512 too.  The V1, V2 maxima at
+  64-256 fall from 5.1-6.7 to 4.3-5.8 (control at 600: 4.6-6.2).  The V1
+  maxima are below the control's.  The V2 maxima are 0.1-0.4 above.  The
+  V1, V2 medians at 256 are 1.7-1.8, against 1.6-2.1 for the control
+  (reference 1.1-1.2), and V0 at 256 is 0.9 (control 3.1).  The maximum of V2
+  at 512 is 5.0 (control 6.7).  The term's own
+  estimator is within 1.5 at every level (control 19.8).
+- Peaks and C_l stay within cosmic variance (-0.6 / -0.2 / -0.4; 0.2 /
+  0.6).  The variance of kappa at 512 is -1.2 (control +0.8).
+
+So after 600 iterations the soft tail passes the kurtosis of kappa, the
+peaks and the C_l.  Its V0, V1, V2 are as close as the control's or closer,
+apart from the V1, V2 maxima of 4-6 at 64-256 that no recipe brings down
+(reference 3.5-3.8).  It costs about 150 iterations of level-power descent:
+its level variances of g at 600 iterations are the control's at 450.
+Untested: the tail above nside 512.
