@@ -211,7 +211,26 @@ of every row, half of them unused, whatever `L`, hence the masked layout.
 
 ### 5.2 Masked DIA
 
-Tesla T4: pending (garoupe unreachable at the time of writing; see 5.1 for the plain DIA on the T4).
+Tesla T4 (garoupe), same block as 5.1, ms; nside 256 and 2048 within 3 %
+of nside 1024 (raw outputs `benchmarks/dia/t4_masked/`):
+
+| kernel | `L = 4` old | `L = 4` masked DIA | ratio | `L = 2` old | `L = 2` masked DIA | ratio |
+|---|---|---|---|---|---|---|
+| build | 362.5 | 191.2 | 1.90 | 178.5 | 89.3 | 2.00 |
+| weights / coefficients recomputed | 108.9 | 105.8 | 1.03 | 53.0 | 51.7 | 1.02 |
+| forward, 1 input row | 12.1 | 7.5 | 1.60 | 6.0 | 6.8 | 0.89 |
+| forward, 4 input rows | 12.8 | 8.2 | 1.57 | 6.3 | 7.2 | 0.88 |
+| forward, 16 input rows | 54.5 | 31.2 | 1.75 | 27.1 | 27.7 | 0.98 |
+| adjoint, 1 input row | 26.3 | 12.9 | 2.03 | 14.9 | 6.1 | 2.46 |
+| adjoint, 4 input rows | 27.8 | 15.7 | 1.77 | 15.7 | 7.1 | 2.23 |
+| adjoint, 16 input rows | 112.9 | 65.8 | 1.72 | 63.2 | 28.5 | 2.22 |
+| kept, everything (MB) | 2638 | 866 | 3.05 | 1320 | 400 | 3.30 |
+| kept between sweeps (MB) | 442 | 4.4 | 100 | 222 | 4.4 | 50 |
+
+On the T4 the coefficient rebuild costs what the weight refresh costs
+(both are the FP64 interpolation of `4 G P` taps per row, at 1/32 of the
+FP32 rate); everything else is faster, and the first build no longer
+sorts.
 
 RTX A1000 laptop (WSL, sm_86, 1/64 FP64), nside 128, the whole sky as
 one block (196 608 rows, no halo), ms:
@@ -242,11 +261,11 @@ pixel of a face image, no rotation, no interpolation, zero outside the
 face (orientations tied to the face axes: a different operator), same
 262 144 output rows, T4, `L = 4`:
 
-| input rows | DIA forward (exact operator, FP64) | constant kernel FP64 | constant kernel FP32 |
-|---|---|---|---|
-| 1 | 14.3 ms | 1.02 ms | 0.12 ms |
-| 4 | 15.0 ms | 3.95 ms | 0.46 ms |
-| 16 | 56.7 ms | 15.7 ms | 1.80 ms |
+| input rows | current `conv_fwd` | masked DIA forward (exact operator, FP64) | constant kernel FP64 | constant kernel FP32 |
+|---|---|---|---|---|
+| 1 | 12.1 ms | 7.5 ms | 1.02 ms | 0.12 ms |
+| 4 | 12.8 ms | 8.2 ms | 3.95 ms | 0.46 ms |
+| 16 | 54.5 ms | 31.2 ms | 15.7 ms | 1.80 ms |
 
 This is where "very large speedups" come from: the coefficients are the
 same for every row (registers or shared memory) and FP32 runs 32 x faster
@@ -272,11 +291,12 @@ rounding, and it dominates the current geometry on every axis measured:
   (the dense coefficients, 5440 bytes per row, instead of ~11 200 for the
   entries, transposition and sort indices), so device blocks can be
   larger.
-- **Time.** No transposition and no sort: the first build is 1.4 x
-  (masked) to 2.6 x (plain) faster; rebuilds from the kept masks 1.2 x
-  faster than today's weight refresh; forward 1.6 x and adjoint 1.8-2.1 x
-  faster at `L = 4` (laptop; T4 in 5.2). At `L = 2` the forward is
-  unchanged and the adjoint 2.1-2.5 x faster.
+- **Time.** No transposition and no sort: the first build is 1.9 x
+  faster (T4; 1.4 x on the laptop); rebuilds from the kept masks cost
+  what today's weight refresh costs (1.03 x on the T4, 1.2 x on the
+  laptop); forward 1.6-1.75 x and adjoint 1.7-2.0 x faster at `L = 4`
+  (T4, same on the laptop). At `L = 2` the forward is 0.9-1.0 x and the
+  adjoint 2.0-2.5 x.
 - **Determinism and exactness** are those of the current kernels (fixed
   summation orders, `--fmad=false`; differences from `conv_fwd` /
   `conv_adj` at 1e-16), validated against the STL-Dev fixtures through
@@ -294,10 +314,11 @@ above, to be measured after the integration):
   the convolutions run ~1.7 x faster.
 - A100, nside 2048 (the fields leave ~10 GB): today the transposition of
   ~70 M rows (112 GB) cannot be kept, so almost every block is rebuilt
-  with its transposition at every sweep (3.3 x the cost of a weight
-  refresh on the T4). With the masked DIA all masks and cells fit (1.1
-  GB) and every sweep only recomputes coefficients: about 3.5-4 x less
-  geometry time per sweep, and no cache to size.
+  with its transposition at every sweep (362 ms per 262 144-row block on
+  the T4, 3.3 x a weight refresh). With the masked DIA all masks and
+  cells fit (1.1 GB) and every sweep only recomputes coefficients (106
+  ms): about 3.4 x less geometry time per sweep, convolutions ~1.7 x
+  faster, and no cache to size.
 
 Integration (a follow-up, not done here): `GpuEngine::take_geometry` /
 `put_geometry` build a `DiaGeometry` (`OwnRows` from the topology's

@@ -1,0 +1,22 @@
+Tesla T4 (0), nside 1024, L 4: 274576 rows, 287296 grid cells, 85 diagonals
+  1 input rows: forward max |old - DIA| 1.9e-16, adjoint 2.7e-16 relative
+  4 input rows: forward max |old - DIA| 1.9e-16, adjoint 2.7e-16 relative
+  16 input rows: forward max |old - DIA| 2.2e-16, adjoint 2.7e-16 relative
+constant kernel on face images (262144 rows; not the operator), ms: 
+  1 input rows: FP64 1.02, FP32 0.12
+  4 input rows: FP64 3.96, FP32 0.46
+  16 input rows: FP64 15.67, FP32 1.80
+| kernel | bound stencils + transposition (ms) | DIA (ms) | ratio |
+|---|---|---|---|
+| build | 362.45 | 191.23 | 1.90 |
+| weights / coefficients recomputed | 108.90 | 105.75 | 1.03 |
+| forward, 1 input rows | 12.09 | 7.54 | 1.60 |
+| adjoint, 1 input rows | 26.26 | 12.93 | 2.03 |
+| forward, 4 input rows | 12.82 | 8.19 | 1.57 |
+| adjoint, 4 input rows | 27.80 | 15.73 | 1.77 |
+| forward, 16 input rows | 54.53 | 31.16 | 1.75 |
+| adjoint, 16 input rows | 112.89 | 65.78 | 1.72 |
+| kept on the device | bound stencils + transposition | DIA |
+|---|---|---|
+| everything | 2638.2 MB (9608 B / row) | 865.5 MB (3152 B / row) |
+| between sweeps when stripped | 441.6 MB (1608 B / row) | 4.4 MB (16.2 B / row) |
