@@ -133,7 +133,18 @@ until they are redrawn in the paper's style.
   L = 4, 3 L-BFGS iterations (4 evaluations) from white noise on a
   lognormal target, cache `auto` (transposition), reports
   `benchmarks/dia/a100_synth/synth_n{1024,2048}_L4_{stencils,dia}.json`
-  (preliminary, one run per case); T4 figures in `docs/gpu.md` section 5.0.
+  (one run per case); T4 figures (one T4, garoupe, against a bound-stencil
+  run of the same series) and the A100 ones in `docs/gpu.md` section 5.0,
+  kernel ratios in `docs/dia_convolution.md` section 5.2. Every other GPU
+  figure of the paper (Table `tab:gpu`, Fig. `scaling` (c), the T4 times
+  of `tab:mink512` and `tab:runs`) was measured with the bound stencils;
+  the text says so and gives, for each, the DIA effect measured or
+  expected (expected: per-row sizes of `docs/dia_convolution.md` and the
+  A100 runs). nside 4096 on two H200s: hpc job 1700256 (test, 3
+  evaluations, 60.2 s per evaluation, peak 124.5 GB, `gpu_geometry` 185 s
+  on rank 0 against 181 s for the evaluations; the timers include the
+  target statistics of the setup), report `~/stl-gpu/runs/1700256/test.json`
+  on hpc.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
