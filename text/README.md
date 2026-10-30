@@ -164,6 +164,21 @@ until they are redrawn in the paper's style.
   94.5 GB), recompute 332.8 s, setup 341 s, peak 67.5 GB = fields 30.1 +
   cache 22.3 + rows 11.9 + 3.2, device busy 11 %; losses of the two modes
   equal to 2.7e-15, 2048 x 5 keep against the bound-stencil run 2.3e-15.
+  Objective's terms on the device (paragraph "The objective on the
+  device", Table `tab:gpu` footnote i, conclusions; preliminary): same
+  branch, commits 96c6bf1, 2c51bd9, cceca63 (`--gpu-terms device`, the
+  default with one rank per group; L-BFGS vector operations threaded),
+  `docs/gpu.md` sections 2.6b and 5.3 at 27134fe, reports
+  `benchmarks/terms/t4/n1024_B10_{host_f65ce8e,device_96c6bf1,device_cceca63}.json`.
+  garoupe, one T4, nside 1024 x 10, production terms (kappa table
+  knots1024, kurtosis 32-1024, level power 10, marginal 10000, scatter 1,
+  kappa weight 0.1, L = 4), fields recomputed, 4 evaluations, 12 host
+  threads: host terms 205.1 s, peak 13.47 GB; device terms 107.5 s, peak
+  13.61 GB (fields 7.52 GB, rows 2.98 GB, cache 2.17 GB); losses equal to
+  1e-15; marginal 35.1 -> 1.2 s, kurtosis + kappa transform + level power
+  24.5 -> 0.3 s, copies and transfers 19.0 -> 1.7 s, L-BFGS 4.8 -> 1.2 s,
+  device busy 42 -> 65 % (setup included). The comparison with Irene
+  (128.4 s on 640 cores, job 6087067) is per evaluation of the same terms.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
