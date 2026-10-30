@@ -46,10 +46,16 @@ run time: the crate builds without a CUDA toolkit.
 ### 2.2 Fields and blocks
 
 Every level's fields live on the device over the rank's layout (owned
-cells + halo, the `Partition` of `stl-mpi`): maps, wavelet fields `z_n` and
-moduli `|z_n|` (kept from the forward sweep for the reverse one), stored
-moduli `m[d][n]`, and in the reverse sweep their cotangents `gm[d][n]` and
-the map cotangents. A level is processed by **device blocks**: contiguous
+cells + halo, the `Partition` of `stl-mpi`): maps, stored moduli
+`m[d][n]`, and in the reverse sweep their cotangents `gm[d][n]` and the map
+cotangents. The wavelet fields `z_n` and moduli `|z_n|` are either kept
+over the layout from the forward sweep for the reverse one
+(`--gpu-fields keep`), or recomputed by every block of the reverse sweep
+from the level's map, as the CPU engine does (`--gpu-fields recompute`:
+the forward sweep then holds `|z_n|` of the level it is on only, for its
+decimations to the coarser levels); `auto`, the default, keeps them when
+that takes at most half of the free device memory (§2.7). Both give the
+same values to the bit. A level is processed by **device blocks**: contiguous
 ranges of owned cells (up to 2^20, sized from the free memory), each with
 its convolution rows `a1` = block + one convolution halo, as on the CPU but
 hundreds of times larger. The layouts do not depend on the block size
@@ -58,11 +64,16 @@ halo as the CPU blocks.
 
 Per block, forward: `z` on `a1` (one convolution reading the level's map),
 `|z|`, the second wavelets on the block for the levels its coefficients
-need, the coefficient partial sums. Reverse: the coefficient cotangents
-(accumulated per target in plan order), the adjoints of the second
-wavelets into the modulus cotangents on `a1`, the modulus VJP, the
-stored-moduli cotangents, the chain from the coarser levels, the wavelet
-adjoint into the map cotangent.
+need, the coefficient partial sums. Reverse: with `recompute`, `z` and
+`|z|` on `a1` again (the second wavelet of `|z_n|` reads the block's own
+copy through the map from grid cells to `a1` rows that its adjoint already
+uses); the coefficient cotangents (accumulated per target in plan order),
+the adjoints of the second wavelets into the modulus cotangents on `a1`,
+the modulus VJP, the stored-moduli cotangents, the chain from the coarser
+levels (the last transposed decimation applied to the block's own rows),
+the wavelet adjoint into the map cotangent. A row of `z` or `|z|` is the
+same whichever block computes it (its geometry and summation order do not
+depend on the block), hence the identity of `keep` and `recompute`.
 
 ### 2.3 Convolution geometry on the device
 
@@ -164,23 +175,37 @@ reuse the cached geometry.
 Level fields (`B` members, `C` channels, `L` orientations, `H_n` held
 cells of level `n`), doubles per held cell of level `n`:
 
-| Field | Doubles | Plans |
-|---|---|---|
-| maps and map cotangents | `2 B C` | all |
-| `z_n` (complex) | `2 B C L` | all |
-| `\|z_n\|`, and the chain of the reverse sweep (transient) | `2 B C L` | with S3 or S4 |
-| stored moduli `m[d][n]` and cotangents `gm[d][n]` | `2 n B C L` | with S3 or S4 |
+| Field | Doubles | Plans | Held |
+|---|---|---|---|
+| maps and map cotangents | `2 B C` | all | maps always, cotangents in the reverse sweep |
+| stored moduli `m[d][n]` and cotangents `gm[d][n]` | `2 n B C L` | with S3 or S4 | `m` always, `gm` in the reverse sweep |
+| `z_n` (complex) | `2 B C L` | all | `keep` only |
+| `\|z_n\|` | `B C L` | with S3 or S4 | `keep`; `recompute`: level `n` while the forward sweep is on it |
+| chain of the reverse sweep | `B C L` on levels 1 and 2 | with S3 or S4 | transient |
 
 A plan without S3 or S4 (the default kappa families `mean,var,S1,S2`)
 reads neither `|z_n|` nor the stored moduli: its sweeps neither compute
 them (no modulus decimation chain, no reverse chain) nor allocate them.
 Over the pyramid (`H_n ~ 4^-n H_0`, `sum H_n = 4/3 H_0`, `sum n H_n =
-4/9 H_0`) the full plan needs `8 B C H_0 (8/3 + 56 L / 9)` bytes: 220
-bytes per pixel and member at `L = 4`, 2.8 GB per member at nside 1024,
-11.1 GB at nside 2048 (one rank). The decimation rows and block topology
+4/9 H_0`) the full plan needs at its peak (the reverse sweep)
+
+- `keep`: `8 B C H_0 (8/3 + L (4 + 8/9 + 5/16))` bytes, 188 bytes per
+  pixel and member at `L = 4`: 2.4 GB per member at nside 1024, 9.5 GB at
+  nside 2048 (one rank);
+- `recompute`: `8 B C H_0 (8/3 + L (8/9 + 5/16))` bytes, 60 bytes per pixel
+  and member at `L = 4` (the forward sweep peaks a little lower, `8 B C H_0
+  (4/3 + 13 L / 9)`, with `|z_0|`): 0.75 GB per member at nside 1024, 3.0
+  GB at nside 2048, a third of `keep`.
+
+Until the reverse chain was applied per block it was held on all the owned
+cells of a level, `B C L H_0` more doubles at level 0, which made `keep`
+220 bytes per pixel and member. The decimation rows and block topology
 add about 200 bytes per held cell (independent of `B`), the transients of
 one block (its geometry while built, second wavelets and their
-cotangents) are sized by the block, which is sized from the free memory.
+cotangents, with `recompute` its `z` and `|z|`) are sized by the block,
+which is sized from the free memory. The report gives the field estimate
+(`gpu.field_bytes_estimate`) and the decimation rows on the device
+(`gpu.decimation_rows_bytes`).
 The geometry cache then takes 4/5 of what is free after all that
 (`STL_GPU_CACHE_MB` overrides it): the device peak in the report
 (`gpu.memory_peak_bytes_per_rank`, whole device, CUDA context included)
@@ -233,7 +258,9 @@ directory; `bench.sh` runs the benchmarks below.
 
 Options: `--gpu-block-rows N` (owned cells per device block),
 `--gpu-conv dia|stencils` (form of the convolution geometry, default
-`STL_GPU_CONV` else `dia`),
+`STL_GPU_CONV` else `dia`), `--gpu-fields auto|keep|recompute` (wavelet
+fields kept between the sweeps or recomputed per block, default
+`STL_GPU_FIELDS` else `auto`, §2.7),
 `--gpu-cache auto|full|transposition|none`, `STL_GPU_CACHE_MB` (cache
 budget), `STL_GPU_THREADS` (host threads of the setup per rank),
 `STL_GPU_DEVICE`, `STL_GPU_SYNC=1` (synchronise after every kernel, to
