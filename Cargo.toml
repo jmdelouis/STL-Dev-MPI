@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/stl-core", "crates/stl-mpi", "crates/stl-cli", "crates/stl-gpu"]
+members = ["crates/stl-core", "crates/stl-mpi", "crates/stl-cli", "crates/stl-gpu", "crates/stl-bridge"]
 
 [workspace.package]
 version = "0.1.0"

@@ -347,6 +347,28 @@ const R_S1X_B: i32 = 5;
 const R_GA: i32 = 6;
 const R_GB: i32 = 7;
 
+/// Host copy of the fields of a forward sweep that the reverse sweep reads
+/// ([`GpuEngine::checkpoint_forward`]): maps run through one engine one after
+/// the other keep their forward state on the host until their reverse sweep.
+pub struct HostForwardState {
+    pub maps: Vec<Vec<f64>>,
+    pub m: BTreeMap<(usize, usize), Vec<f64>>,
+    /// `|z_n|` and `z_n` (`Keep`; empty with `Recompute`).
+    pub absz: Vec<Vec<f64>>,
+    pub z: Vec<Vec<f64>>,
+    batch: usize,
+    channels: usize,
+    held: Vec<usize>,
+}
+
+impl HostForwardState {
+    /// Bytes of host memory.
+    pub fn bytes(&self) -> usize {
+        let n: usize = self.maps.iter().chain(self.m.values()).chain(&self.absz).chain(&self.z).map(Vec::len).sum();
+        8 * n
+    }
+}
+
 /// One process's sweeps on its device.
 pub struct GpuEngine<'a> {
     pub gpu: Arc<Gpu>,
@@ -797,9 +819,18 @@ impl<'a> GpuEngine<'a> {
 
     /// Loads the level-0 field `x` `[B, C, |layout 0|]` (owned cells read),
     /// exchanges its halo and decimates it to every level.
+    /// The maps of the previous load are reused (no new pyramid per map when
+    /// maps are streamed through the engine one after the other).
     pub fn load(&mut self, ex: &dyn Exchange, x: &[f64]) {
         let started = Instant::now();
-        let x0 = self.gpu.upload(x);
+        let x0 = match self.maps.first_mut() {
+            Some(m0) if m0.len() == x.len() => {
+                let mut m0 = std::mem::replace(m0, self.gpu.zeros::<f64>(0));
+                self.gpu.copy_in(x, &mut m0);
+                m0
+            }
+            _ => self.gpu.upload(x),
+        };
         self.tick("gpu_load", started);
         self.load_device(ex, x0);
     }
@@ -811,9 +842,17 @@ impl<'a> GpuEngine<'a> {
         let bc = self.batch * self.channels;
         assert_eq!(x0.len(), bc * self.held(0));
         self.halo(ex, 0, &mut x0, bc);
-        self.maps = vec![x0];
+        let mut old = std::mem::replace(&mut self.maps, vec![x0]);
         for d in 0..self.levels() - 1 {
-            let mut next = self.gpu.zeros::<f64>(bc * self.held(d + 1));
+            let len = bc * self.held(d + 1);
+            let mut next = match old.get_mut(d + 1) {
+                Some(v) if v.len() == len => {
+                    let mut v = std::mem::replace(v, self.gpu.zeros::<f64>(0));
+                    self.gpu.clear(&mut v);
+                    v
+                }
+                _ => self.gpu.zeros::<f64>(len),
+            };
             self.down[d].apply(
                 &self.gpu,
                 self.gpu.a(&self.maps[d]),
@@ -843,6 +882,44 @@ impl<'a> GpuEngine<'a> {
 
     pub fn m_host(&self, d: usize, n: usize) -> Vec<f64> {
         self.gpu.download(&self.m[&(d, n)])
+    }
+
+    /// Host copy of what the reverse sweep reads of the last forward sweep:
+    /// the maps, the stored moduli and, with `Keep`, `z` and `|z|` (with
+    /// `Recompute` the reverse sweep rebuilds them from the maps).
+    pub fn checkpoint_forward(&self) -> HostForwardState {
+        let host = |v: &[CudaSlice<f64>]| v.iter().map(|s| self.gpu.download(s)).collect();
+        HostForwardState {
+            maps: host(&self.maps),
+            m: self.m.iter().map(|(&k, v)| (k, self.gpu.download(v))).collect(),
+            absz: host(&self.absz),
+            z: host(&self.z),
+            batch: self.batch,
+            channels: self.channels,
+            held: (0..self.levels()).map(|n| self.held(n)).collect(),
+        }
+    }
+
+    /// Restores a [`checkpoint_forward`](Self::checkpoint_forward) of this
+    /// engine into its existing fields (no allocation): a reverse sweep may
+    /// follow.  The geometry and its cache are untouched.
+    pub fn restore_forward(&mut self, s: &HostForwardState) {
+        assert_eq!((s.batch, s.channels), (self.batch, self.channels), "checkpoint batch or channels");
+        assert_eq!(s.held, (0..self.levels()).map(|n| self.held(n)).collect::<Vec<_>>(), "checkpoint layout");
+        let restore = |gpu: &Gpu, dst: &mut [CudaSlice<f64>], src: &[Vec<f64>]| {
+            assert_eq!(dst.len(), src.len(), "checkpoint fields");
+            for (d, h) in dst.iter_mut().zip(src) {
+                gpu.copy_in(h, d);
+            }
+        };
+        restore(&self.gpu, &mut self.maps, &s.maps);
+        restore(&self.gpu, &mut self.absz, &s.absz);
+        restore(&self.gpu, &mut self.z, &s.z);
+        assert!(s.m.keys().eq(self.m.keys()), "checkpoint stored moduli");
+        for (k, h) in &s.m {
+            self.gpu.copy_in(h, self.m.get_mut(k).unwrap());
+        }
+        self.gpu.sync();
     }
 
     // -- operands -------------------------------------------------------------------

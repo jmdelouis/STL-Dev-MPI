@@ -1,0 +1,24 @@
+[package]
+name = "stl-bridge"
+description = "C ABI over the native engines and L-BFGS, for the Python ensemble driver (python/stl_ensemble)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# cdylib for ctypes; rlib for the Rust tests.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+gpu = ["dep:stl-gpu"]
+
+[dependencies]
+stl-core = { path = "../stl-core" }
+stl-gpu = { path = "../stl-gpu", optional = true }
+num-complex.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+npyz.workspace = true

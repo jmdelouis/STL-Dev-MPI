@@ -888,6 +888,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stl-bridge"
+version = "0.1.0"
+dependencies = [
+ "npyz",
+ "num-complex",
+ "serde_json",
+ "stl-core",
+ "stl-gpu",
+]
+
+[[package]]
 name = "stl-cli"
 version = "0.1.0"
 dependencies = [
