@@ -654,8 +654,8 @@ wavelet fields recomputed (`auto`), job 2423067 (4d10f1f):
 The evaluation is 5.4 times faster and the device busy 91 % of the time
 instead of 16 %; the losses agree to 1e-15 relative and the peak memory
 is the same (the engine's budget, hence its cache, is unchanged). The
-host terms' work, about 270 s per evaluation, becomes 3 s; the engine's sweeps (31 +
-39 s of the 62 s) are what is left. Setup (topology, target statistics,
+host terms' work, about 270 s per evaluation, becomes 3 s; the engine's
+sweeps (synthesis and kappa) take the rest of the 62 s. Setup (topology, target statistics,
 initial maps) takes 330 s in both, once per run.
 
 ## 6. Limitations and next steps
