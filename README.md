@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 24 pages, with Appendix B (the
+comes from TeX Live. The draft builds to 25 pages, with Appendix B (the
 learned prior for the finest levels), with no warning (abstract under the
 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
@@ -204,6 +204,24 @@ until they are redrawn in the paper's style.
   transform 23.3, kurtosis 11.3, level power 9.3), losses equal to 1e-15,
   setup 330 s. The "17 times" against Datarmor uses the approximate
   1070 s per evaluation of job 7775549 (Table `tab:runs`).
+- Objective with several reference maps (P. Campeti's five blocks;
+  paragraphs "Several reference maps" and "Harmonic terms on the device",
+  preliminary): `docs/campeti_merge.md` on branch `claude/ensemble-gpu-terms`
+  (cfccb47, not merged on 31 Oct; based on the merge PR head 5391d45 of
+  `claude/campeti-merge-19032c`). Section 2.3: the blocks. Section 8.3:
+  Rust against his Python (`tools/dump_ensemble_reference.py`,
+  `fixtures/ensemble`, nside 16): SHT 7e-14, blocks 1.3e-13, gradient
+  9e-14. Section 8.5: full run at nside 128 on garoupe
+  (`/tmp/jmdeloui-campeti/runs/full128`, revision 5c925f4, 3 T4, 5 groups
+  of 2, harmonic terms on the host): 2 h 34 min, 2869 evaluations at
+  3.10 s, loss 61.81 -> 0.625; references r000-r009 block-averaged to 128
+  (`cal128.json`). Section 9: host profile (`host_profile`, 4 threads:
+  0.65 / 20.1 / 133 s at 128 / 512 / 1024, SHT 57 / 79 / 87 %), exactness
+  (`GpuSht` 2.9e-15, blocks 1.5e-13, gradient 9.0e-14), device profile
+  (`device_profile`, one T4: 0.092 / 1.86 / 11.2 s), full evaluations at
+  128 x 10 (6 evaluations: 1 T4 6.04 -> 3.17 s, host user time 183 ->
+  39 s; 3 T4 3.10 -> 1.24 s), and the unmeasured extrapolation to 2048
+  (section 9.4).
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
