@@ -2,7 +2,27 @@
 
 Merge plan for `STL_ensemble_GH200_v2_variance_ratio.zip` (P. Campeti, version
 `2026-10-29-v2-variance-ratio`, 142 files) and the current STL-Dev-MPI.
-Status: plan only. Nothing of his package is in the repository yet.
+
+## 0. Status (30 Oct 2026)
+
+Decisions of J.-M. Delouis on the plan below: base branch
+`claude/musing-elgamal-9897d9` (option B of section 7); then **everything in
+Rust**, with a HEALPix SHT written in Rust for the harmonic terms (section 6
+is superseded).  Branch `claude/campeti-merge-19032c`:
+
+| Commit | What |
+|---|---|
+| ccc44f6 | merge of `claude/musing-elgamal-9897d9` (22cefc6) on main 4f651b1 |
+| 79d2fee | his `native.patch` ported (section 5) and `crates/stl-bridge` |
+| 244c99c | `python/stl_ensemble`: his Python as delivered (the reference) |
+| 4f3668c | `stl-core::sht` and `fixtures/ensemble` (his Python on the CPU bridge) |
+| 82189c2 | `stl-ensemble`: his objective in Rust (`crates/stl-cli/src/ensemble`) |
+
+`stl-ensemble` (section 8 of this note: usage, validation, timings) runs his
+method without Python: `calibrate` builds the LUT and the targets from any
+list of reference maps, `run` minimises the ten members with the native
+L-BFGS.  The Python package and the bridge stay in the repository as the
+reference the Rust is tested against (`tools/dump_ensemble_reference.py`).
 
 ## 1. His base and his patch
 
@@ -221,29 +241,92 @@ Into Rust, in this order:
 Recommendation: **B**. The tail term does not touch the bridge; it can come
 with the merge of musing-elgamal into main.
 
-## 8. Work plan
+## 8. `stl-ensemble`: his method in Rust
 
-1. Branch `claude/campeti-merge-19032c` from the chosen base.
-2. `crates/stl-bridge`: his crate, ported (section 5), tests in Rust:
-   CPU vs GPU, resident vs stream vs checkpoint, VJP vs finite differences,
-   on fixtures at nside 8-32.
-3. `python/stl_ensemble/`: his `stl_port`, `tests`, `configs`, the
-   validation scripts and docs; `reference/` and `provenance/` left out
-   unless wanted. Changes: options `conv` and `fields`, revision pins,
-   resident allowed above 128 behind an explicit memory check.
-4. garoupe (one T4, after `nvidia-smi`): his `validate` stage (pytest,
-   `native_smoke`, `validate_sc_ratio_native`, `validate_modes` at nside 8,
-   both physical scales) on his exact source and on the port; then a
-   nside-128 benchmark (memory, s/eval per mode) and a short L-BFGS run,
-   both sources, from the same synthetic 54-map population (TRAIN54 is not
-   available here).
-5. Report: differences to the bit or to rounding, memory and time per
-   evaluation per mode, the nside-2048 estimate and what remains to measure
-   on the GH200.
+### 8.1 Usage
 
-## 9. Open questions
+    # targets from the reference maps (NESTED, any nside >= N; here the ten
+    # Takahashi realisations r000-r009 at nside 2048, block-averaged to 128)
+    stl-ensemble calibrate --references r000.npy ... r009.npy --nside 128 --out cal128.json [--gpu]
+    # ten members, one device engine for the SC of g and of kappa
+    stl-ensemble run --calibration cal128.json --niter 2500 --max-eval 50000 --gpu --out ens
+    # two GPUs: two MPI groups of five members
+    mpirun -n 2 stl-ensemble run --calibration cal128.json ... --gpu --groups 2 --out ens
 
-- TRAIN54: which simulations (Takahashi zs?) and where; the nside-128
-  comparison with his GH200 run needs them, or his cache.
-- The 2048 C_l variance cutoff (`ps_variance_upper`) is still unresolved
-  in his config.
+Outputs: `ens.json` (loss and five blocks per evaluation, seconds per
+evaluation, timers, peak memory), `ens_mMMM_gaussian_nested.npy` (the
+variable g) and `ens_mMMM_physical_nested.npy` (kappa = f(g) - mean) per
+member.  `stl-ensemble --help` lists the options.
+
+### 8.2 Python module -> Rust
+
+| `stl_port` | Rust |
+|---|---|
+| `lut.py` (`PooledLUT`, `probability_grid`, `source_ppf`) | `ensemble/lut.rs` (numpy `quantile` and `linspace` replicated; `erfinv` to double precision) |
+| `losses.py`, `sc_variance.py`, `sc_normalization.py` | `ensemble/losses.rs` |
+| `harmonics.py` (`FullSkySHT`, DUCC) | `stl-core/src/sht.rs` |
+| `pdf.py`, `minkowski.py`, `lp_windows` | `ensemble/fields.rs` |
+| `calibration.py` | `ensemble/calibration.rs` |
+| `ensemble.py` (`EnsembleObjective`) | `ensemble/objective.rs` |
+| `driver.py`, `native.py`, the bridge | `ensemble/cli.rs`, `bin/stl-ensemble.rs`; the engines and L-BFGS directly |
+
+The execution modes of section 2.4 disappear: the ten members are one
+batch of the engine (or B / G per MPI group), so each SC block is one
+forward and one reverse sweep per evaluation, on the shared device engine
+(DIA geometry, recomputed fields when they do not fit).
+
+### 8.3 Validation against his Python
+
+`tools/dump_ensemble_reference.py` runs his package (with ducc0, healpy and
+the CPU bridge) on nside 16, 12 synthetic reference maps, 10 members, and
+writes `fixtures/ensemble`; `crates/stl-cli/tests/ensemble.rs` compares:
+
+| Quantity | Largest relative difference |
+|---|---|
+| SHT against DUCC: analysis, C_l, synthesis, analysis cotangent, five derivative maps, their cotangent | 7e-14 |
+| LUT: probability grid, physical knots | 0 (bitwise) |
+| LUT: Gaussian knots (`f32` of erfinv) | at most 2 knots differ by one `f32` ulp |
+| calibration targets (SC of g and kappa: means, variances, sigmas; C_l, PDF, Minkowski) | 3e-14 |
+| loss, each of the five blocks | 1.3e-13 |
+| gradient of the ten members | 9e-14 |
+
+Finite differences agree with the gradient (and with his) only to 1.5e-3:
+the curvature floor of the Minkowski functionals is held fixed in the
+cotangent, as in his code, and the CIC PDF has kinks.
+
+### 8.4 What differs from his package
+
+- References: any list of maps instead of the 54 TRAIN54 files; the target
+  of the means is the mean of a given draw (`--bootstrap-ids`), all the
+  references when there are as many as members (r000-r009 for ten members),
+  else a seeded draw with replacement (not numpy's).  The population
+  variances are over all the references (ten instead of 54: noisier).
+- Preprocessing: the references are block-averaged in `f64` to nside 512,
+  rounded to `f32`, then to the target nside, rounded to `f32` (his:
+  `hp.ud_grade` then a `float32` mean); maps read as NESTED `.npy`/FITS.
+- Initial fields: Gaussian random fields with the same C_l (mean C_l of the
+  drawn Gaussian references, C_0 = 0, plus the first drawn reference's
+  mean), drawn with the package's counter-based normal generator, not
+  numpy's: the same law, other numbers.
+- Sums: in other orders (chunked, threads) than numpy's pairwise sums:
+  differences at the 1e-16 level, see 8.3.
+- His guards (54 maps, nside 128 or 2048 only, pinned revisions, cache
+  hashes) are not reproduced; the calibration records its references and
+  draw.
+
+### 8.5 Timings on garoupe (Tesla T4)
+
+See below (section 8.6, filled from the runs of 30 Oct).
+
+### 8.6 What remains
+
+- nside 2048: the host terms gather whole maps (every rank of a group holds
+  its members' maps) and the SHT is `O(lmax^3)`: about 15 transforms per
+  member and evaluation.  To measure on the GH200 or an A100; then move
+  the Minkowski thresholds (and possibly the SHT) to the device.
+- Several ranks per group compute the host terms redundantly (no gain for
+  them); with one rank per group (one GPU per group) nothing is redundant.
+- The 2048 C_l variance cutoff (`--ps-variance-upper`) is still a choice
+  to make (383 at 128 in his configuration).
+- TRAIN54 itself (Takahashi zs1, r000-r053) for a like-for-like comparison
+  with his GH200 runs.
