@@ -394,6 +394,8 @@ pub struct GpuEngine<'a> {
     peak_used: usize,
     /// The evaluator whose forward sweep the fields hold (`GpuEvaluator::id`).
     holder: usize,
+    /// Synchronise at the end of every phase (`STL_GPU_PHASE_SYNC`, default 1).
+    phase_sync: bool,
 }
 
 impl<'a> GpuEngine<'a> {
@@ -522,6 +524,7 @@ impl<'a> GpuEngine<'a> {
             block_rows,
             peak_used: 0,
             holder: 0,
+            phase_sync: std::env::var("STL_GPU_PHASE_SYNC").map_or(true, |v| v != "0"),
         }
     }
 
@@ -604,8 +607,13 @@ impl<'a> GpuEngine<'a> {
         (self.cache_mode, self.cache_bytes, self.cached_bytes)
     }
 
+    /// Ends a phase: synchronises the stream (unless `STL_GPU_PHASE_SYNC=0`:
+    /// the host then prepares the next phase while the device runs, and the
+    /// phase timers count launches only), adds its time, samples the memory.
     fn tick(&mut self, name: &'static str, since: Instant) {
-        self.gpu.sync();
+        if self.phase_sync {
+            self.gpu.sync();
+        }
         *self.timers.entry(name).or_default() += since.elapsed().as_secs_f64();
         let (free, total) = self.gpu.memory();
         self.peak_used = self.peak_used.max(total - free);

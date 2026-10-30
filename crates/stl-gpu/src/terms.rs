@@ -267,3 +267,14 @@ pub fn add_product(gpu: &Gpu, g: &mut CudaSlice<f64>, a: &CudaSlice<f64>, b: Opt
     assert_eq!(g.len(), a.len());
     gpu.launch1("add_product", g.len(), &[gpu.a(g), gpu.a(a), b.map_or(NULL, |b| gpu.a(b)), g.len().into()]);
 }
+
+/// `dst[r d_stride + d_off + i] = src[r s_stride + s_off + i]`, `i < n`, `r <
+/// rows` (rows between a rank's owned slice and the engine's layout).
+#[allow(clippy::too_many_arguments)]
+pub fn copy_rows(gpu: &Gpu, src: &CudaSlice<f64>, s_stride: usize, s_off: usize, dst: &mut CudaSlice<f64>, d_stride: usize, d_off: usize, n: usize, rows: usize) {
+    gpu.launch1(
+        "gather_copy",
+        n * rows,
+        &[gpu.a(src), s_stride.into(), s_off.into(), NULL, gpu.a(dst), d_stride.into(), d_off.into(), NULL, n.into(), (rows as i32).into()],
+    );
+}

@@ -481,7 +481,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     #[cfg(feature = "gpu")]
     let device_terms = args.gpu
         && !args.gpu_terms_host
-        && device_terms::applies(gcomm.size(), args.minkowski_weight > 0.0, args.freeze_nside.is_some());
+        && device_terms::applies(args.minkowski_weight > 0.0, args.freeze_nside.is_some());
     #[cfg(feature = "gpu")]
     let device = if args.gpu {
         let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members)?;
