@@ -5,7 +5,7 @@
 //! `--fmad=false` and IEEE division / square root, so that the arithmetic
 //! of every kernel is the one of its Rust counterpart in stl-core.
 
-use cudarc::driver::{result, sys, CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, ValidAsZeroBits};
+use cudarc::driver::{result, sys, CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, PinnedHostSlice, ValidAsZeroBits};
 use cudarc::nvrtc::{result as nvrtc_result, sys as nvrtc_sys, Ptx};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -123,6 +123,22 @@ impl From<f64> for Arg {
 /// The null device pointer, for optional arrays.
 pub const NULL: Arg = Arg::Ptr(0);
 
+/// `dst.copy_from_slice(src)` on the host threads (`STL_THREADS`, else the
+/// available CPUs).
+fn par_copy(dst: &mut [f64], src: &[f64]) {
+    let threads = std::env::var("STL_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .max(1);
+    let per = src.len().div_ceil(threads).max(1 << 16);
+    std::thread::scope(|s| {
+        for (d, c) in dst.chunks_mut(per).zip(src.chunks(per)) {
+            s.spawn(move || d.copy_from_slice(c));
+        }
+    });
+}
+
 pub struct Gpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -208,6 +224,35 @@ impl Gpu {
         if !v.is_empty() {
             self.stream.memcpy_htod(v, s).expect("host to device copy");
         }
+    }
+
+    /// Page-locked host memory for `n` values (staged transfers).
+    pub fn pinned(&self, n: usize) -> PinnedHostSlice<f64> {
+        unsafe { self.ctx.alloc_pinned_with_flags::<f64>(n, 0) }.expect("page-locked host allocation")
+    }
+
+    /// `x` to a new device buffer through the page-locked `stage` of the
+    /// same length: a copy on the host threads, then one transfer.  (With
+    /// the event tracking off, the stream is synchronised before the stage
+    /// is written or read again.)
+    pub fn upload_staged(&self, x: &[f64], stage: &mut PinnedHostSlice<f64>) -> CudaSlice<f64> {
+        assert_eq!(stage.len(), x.len());
+        self.sync();
+        par_copy(stage.as_mut_slice().unwrap(), x);
+        let mut d = self.zeros::<f64>(x.len());
+        self.stream.memcpy_htod(stage, &mut d).expect("host to device copy");
+        d
+    }
+
+    /// `s` to the host through the page-locked `stage` of the same length.
+    pub fn download_staged(&self, s: &CudaSlice<f64>, stage: &mut PinnedHostSlice<f64>) -> Vec<f64> {
+        assert_eq!(stage.len(), s.len());
+        self.sync();
+        self.stream.memcpy_dtoh(s, stage).expect("device to host copy");
+        self.sync();
+        let mut out = vec![0.0; s.len()];
+        par_copy(&mut out, stage.as_slice().unwrap());
+        out
     }
 
     pub fn zeros<T: DeviceRepr + ValidAsZeroBits>(&self, n: usize) -> CudaSlice<T> {

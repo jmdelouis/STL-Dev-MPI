@@ -209,11 +209,6 @@ impl RadixSort {
         }
     }
 
-    /// Bytes on the device for rows of `n` values.
-    pub fn bytes(n: usize) -> usize {
-        n * 24 + 256 * n.div_ceil(TILE) * 4 * 2
-    }
-
     fn scan(&self, gpu: &Gpu, a: &CudaSlice<u32>, n: usize, depth: usize) {
         let blocks = n.div_ceil(1024);
         if blocks == 1 {

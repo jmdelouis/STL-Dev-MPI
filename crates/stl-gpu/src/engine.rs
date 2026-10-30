@@ -173,9 +173,6 @@ pub struct GpuOptions {
     pub cache_bytes: usize,
     /// Host threads for the setup.
     pub threads: usize,
-    /// Device bytes left to the caller (its own buffers, e.g. the terms of
-    /// the objective on the device), outside the blocks and the cache.
-    pub reserve_bytes: usize,
 }
 
 impl Default for GpuOptions {
@@ -193,7 +190,6 @@ impl Default for GpuOptions {
             cache: GeometryCache::Auto,
             cache_bytes: 0,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
-            reserve_bytes: 0,
         }
     }
 }
@@ -419,7 +415,7 @@ impl<'a> GpuEngine<'a> {
         // Held cells of the levels with a decimation: about 30 + 7.5 nonzero
         // weights (12 bytes) per coarse / fine row, plus the block topology.
         let csr_bytes: usize =
-            held[..levels - 1].iter().sum::<usize>() * 200 + held.iter().sum::<usize>() * 32 + (512 << 20) + opts.reserve_bytes;
+            held[..levels - 1].iter().sum::<usize>() * 200 + held.iter().sum::<usize>() * 32 + (512 << 20);
         let fields = match opts.fields {
             FieldStore::Auto if Self::field_doubles(&held, bc, l, FieldStore::Keep) * 8 + csr_bytes <= free / 2 => FieldStore::Keep,
             FieldStore::Auto => FieldStore::Recompute,
@@ -483,7 +479,7 @@ impl<'a> GpuEngine<'a> {
             opts.cache_bytes
         } else {
             let (free_now, _) = gpu.memory();
-            free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20) + opts.reserve_bytes) * 4 / 5
+            free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20)) * 4 / 5
         };
         let cache_mode = match opts.cache {
             GeometryCache::Auto if whole_total <= cache_bytes => GeometryCache::Full,

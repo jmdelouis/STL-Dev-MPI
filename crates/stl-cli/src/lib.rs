@@ -477,16 +477,14 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // by every objective (target statistics, synthesis, kappa term): one
     // topology, geometry cache and set of level fields on the device.
     // The objective's terms on the device too (`--gpu-terms device`), when
-    // they apply; the device keeps room for their buffers.
+    // they apply.
     #[cfg(feature = "gpu")]
     let device_terms = args.gpu
         && !args.gpu_terms_host
         && device_terms::applies(gcomm.size(), args.minkowski_weight > 0.0, args.freeze_nside.is_some());
     #[cfg(feature = "gpu")]
     let device = if args.gpu {
-        let (s, e) = probe.owned();
-        let reserve = if device_terms { device_terms::reserve_bytes(local_members, (e - s) as usize) } else { 0 };
-        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members, reserve)?;
+        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members)?;
         probe.set_evaluator(Box::new(ev.share(&plan, 1)));
         gpu_info = info;
         Some(ev)
@@ -1143,7 +1141,6 @@ mod gpu {
     /// batch it evaluates), as the evaluator of `plan` at that batch (other
     /// plans and batches: `GpuEvaluator::share`), and a description for
     /// the report.
-    #[allow(clippy::too_many_arguments)]
     pub fn evaluator<'a>(
         args: &Args,
         geo: &'a LocalGeometry,
@@ -1152,11 +1149,10 @@ mod gpu {
         part: &Partition,
         rank: usize,
         batch: usize,
-        reserve_bytes: usize,
     ) -> Result<(GpuEvaluator<'a>, serde_json::Value), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, reserve_bytes, ..Default::default() };
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }

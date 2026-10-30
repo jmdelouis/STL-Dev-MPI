@@ -11,6 +11,6 @@ pub mod geometry;
 pub mod terms;
 pub mod topology;
 
-pub use cudarc::driver::CudaSlice;
+pub use cudarc::driver::{CudaSlice, PinnedHostSlice};
 pub use device::Gpu;
 pub use engine::{ConvForm, FieldStore, GeometryCache, GpuEngine, GpuEvaluator, GpuOptions};

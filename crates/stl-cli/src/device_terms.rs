@@ -1,14 +1,21 @@
-//! The objective of `stl-synth --gpu` evaluated on the device: the members'
-//! maps go up once per evaluation, the synthesis and kappa sweeps read and
-//! leave their maps and gradients on the device, and the level power, the
-//! pixel marginal, the kappa transform and the kurtosis per level run there
-//! too (`stl_gpu::terms`); the gradient comes down once.  The host keeps the
+//! The objective of `stl-synth --gpu` evaluated on the device: the synthesis
+//! and kappa sweeps read and leave their maps and gradients on the device,
+//! and the level power, the pixel marginal, the kappa transform and the
+//! kurtosis per level run there too (`stl_gpu::terms`).  The host keeps the
 //! statistics' losses, the reductions of the terms' sums over pixels and
-//! their communicators.  The same objective as the host closure of
-//! `run`: element-wise expressions in the host's order, sums over pixels by
-//! chunks in a fixed tree (equal to the host's sequential sums to
-//! rounding).  For one rank per group of members (the marginal sorts the
-//! whole sky of a member on its device), without `--minkowski-weight` or
+//! their communicators.  The same objective as the host closure of `run`:
+//! element-wise expressions in the host's order, sums over pixels by chunks
+//! in a fixed tree (equal to the host's sequential sums to rounding).
+//!
+//! Nothing but the engine's fields is on the device during a sweep, so the
+//! engine's memory budget is the host path's: the synthesis gradient waits
+//! on the host during the kappa sweep, then the maps go up again for
+//! kappa's derivative (recomputed, the same values).  Transfers go through
+//! a page-locked buffer: maps up twice, the gradient down twice and up once
+//! per evaluation with the kappa statistics, else up once and down once.
+//!
+//! For one rank per group of members (the marginal sorts the whole sky of
+//! a member on its device), without `--minkowski-weight` or
 //! `--freeze-nside`.
 
 use crate::kappa::Transform;
@@ -18,7 +25,7 @@ use crate::marginal::Marginal;
 use std::sync::Arc;
 use std::time::Instant;
 use stl_gpu::terms::{add_product, marginal_row, DeviceTable, Pyramid, RadixSort};
-use stl_gpu::{CudaSlice, Gpu, GpuEvaluator};
+use stl_gpu::{CudaSlice, Gpu, GpuEvaluator, PinnedHostSlice};
 use stl_mpi::synthesis::{Ensemble, Objective};
 use stl_mpi::Comm;
 
@@ -37,23 +44,20 @@ pub struct DeviceObjective<'o, 's, 'k, 'a, C: Comm> {
     synthesis: GpuEvaluator<'a>,
     kappa: Option<(KappaPart<'o, 'k, 'a, C>, DeviceTable)>,
     level_power: Option<&'o LevelPower>,
-    marginal: Option<(&'o Marginal, CudaSlice<f64>, RadixSort)>,
+    /// The marginal term and the sorted target on the device.
+    marginal: Option<(&'o Marginal, CudaSlice<f64>)>,
     kurtosis: Option<&'o Kurtosis>,
     cross: Option<&'o C>,
     rows: usize,
     len: usize,
+    /// Page-locked buffer of the members' maps for the transfers.
+    stage: PinnedHostSlice<f64>,
 }
 
 /// Whether the device objective applies: one rank per group of members, no
 /// Minkowski term, no frozen scales.
 pub fn applies(group_ranks: usize, minkowski: bool, freeze: bool) -> bool {
     group_ranks == 1 && !minkowski && !freeze
-}
-
-/// Device bytes besides the engine's: the gradient and kappa's derivative
-/// over the members' maps, one pyramid, the sort of one map.
-pub fn reserve_bytes(rows: usize, len: usize) -> usize {
-    (2 * rows * len + rows * len / 3) * 8 + RadixSort::bytes(len) + (64 << 20)
 }
 
 impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
@@ -79,9 +83,10 @@ impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
         });
         let marginal = marginal.map(|m| {
             assert_eq!(m.chunk.len(), len, "the device marginal needs one rank per group");
-            (m, gpu.upload(&m.chunk), RadixSort::new(&gpu, len))
+            (m, gpu.upload(&m.chunk))
         });
-        DeviceObjective { gpu, obj, ens, synthesis, kappa, level_power, marginal, kurtosis, cross, rows: obj.batch, len }
+        let stage = gpu.pinned(obj.batch * len);
+        DeviceObjective { gpu, obj, ens, synthesis, kappa, level_power, marginal, kurtosis, cross, rows: obj.batch, len, stage }
     }
 
     fn cross_sum(&self, v: f64) -> f64 {
@@ -101,8 +106,8 @@ impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
         let comm = obj.comm;
         let (rows, len) = (self.rows, self.len);
         let t = Instant::now();
-        let x = gpu.upload(p);
-        tick("device_upload", t);
+        let x = gpu.upload_staged(p, &mut self.stage);
+        tick("device_transfers", t);
 
         // Synthesis statistics and their gradient.
         let t = Instant::now();
@@ -139,11 +144,12 @@ impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
             tick("host_level_power", t);
         }
 
-        if let Some((mg, sorted, sorter)) = &mut self.marginal {
+        if let Some((mg, sorted)) = &self.marginal {
             let t = Instant::now();
             let n = mg.npix as f64;
             let w = mg.weight / mg.members as f64;
             let coef = 2.0 * w / n;
+            let mut sorter = RadixSort::new(&gpu, len);
             let mut sum = 0.0;
             for row in 0..rows {
                 let perm = sorter.sort(&gpu, gpu.at(&x, row * len));
@@ -156,22 +162,38 @@ impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
         }
 
         // Terms on kappa = f(g): cotangent on kappa, chained by f'(g).
-        let t = Instant::now();
-        let kd = self.kappa.as_ref().map(|(k, table)| table.apply(&gpu, &x, k.transform.g, k.transform.kappa));
-        tick("host_kappa_transform", t);
-        let (source, dk) = match kd {
-            Some((k, dk)) => {
-                drop(x);
-                let mut k = k;
-                if let Some((KappaPart { ensemble: Some(ens), evaluator: Some(ev), .. }, _)) = &mut self.kappa {
+        let (source, dk) = match &mut self.kappa {
+            Some((part, table)) => {
+                let t = Instant::now();
+                let (tg, tk) = (part.transform.g, part.transform.kappa);
+                let (mut k, mut dk) = table.apply(&gpu, &x, tg, tk);
+                tick("host_kappa_transform", t);
+                if let (Some(ens), Some(ev)) = (part.ensemble, part.evaluator.as_mut()) {
+                    // The kappa sweep with nothing else on the device: the
+                    // gradient waits on the host, x and dk are dropped.
+                    let t = Instant::now();
+                    drop((x, dk));
+                    let g_host = gpu.download_staged(&g, &mut self.stage);
+                    drop(g);
+                    tick("device_transfers", t);
                     let t = Instant::now();
                     let (values, _) = ev.forward_device(ex, k, false);
                     let (lk, cotangent) = ens.loss_cotangent(&values);
                     let gk = ev.gradient_device(ex, &cotangent);
                     k = ev.take_map();
-                    add_product(&gpu, &mut g, &gk, Some(&dk));
                     loss += lk;
                     tick("host_kappa_objective", t);
+                    let t = Instant::now();
+                    let x = gpu.upload_staged(p, &mut self.stage);
+                    g = gpu.upload_staged(&g_host, &mut self.stage);
+                    drop(g_host);
+                    tick("device_transfers", t);
+                    let t = Instant::now();
+                    dk = table.apply(&gpu, &x, tg, tk).1;
+                    add_product(&gpu, &mut g, &gk, Some(&dk));
+                    tick("host_kappa_transform", t);
+                } else {
+                    drop(x);
                 }
                 (k, Some(dk))
             }
@@ -210,8 +232,8 @@ impl<'o, 's, 'k, 'a, C: Comm> DeviceObjective<'o, 's, 'k, 'a, C> {
         drop((source, dk));
 
         let t = Instant::now();
-        let out = gpu.download(&g);
-        tick("device_download", t);
+        let out = gpu.download_staged(&g, &mut self.stage);
+        tick("device_transfers", t);
         (loss, out)
     }
 }

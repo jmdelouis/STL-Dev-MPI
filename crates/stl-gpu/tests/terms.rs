@@ -178,3 +178,22 @@ fn marginal_matches_host() {
     assert!((got_loss - loss).abs() <= 1e-13 * loss, "{got_loss} vs {loss}");
     assert_eq!(gpu.download(&dg), want);
 }
+
+/// Transfers through one page-locked buffer, used several times in a row.
+#[test]
+fn staged_transfers_round_trip() {
+    let Some(gpu) = gpu() else { return };
+    let n = 3 * (1 << 16) + 17;
+    let mut stage = gpu.pinned(n);
+    let (a, b) = (noise(1, n), noise(2, n));
+    let da = gpu.upload_staged(&a, &mut stage);
+    let db = gpu.upload_staged(&b, &mut stage);
+    assert_eq!(gpu.download(&da), a);
+    assert_eq!(gpu.download(&db), b);
+    let ha = gpu.download_staged(&da, &mut stage);
+    let dc = gpu.upload_staged(&ha, &mut stage);
+    let hb = gpu.download_staged(&db, &mut stage);
+    assert_eq!(ha, a);
+    assert_eq!(hb, b);
+    assert_eq!(gpu.download(&dc), a);
+}
