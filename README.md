@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 20 pages with no warning (abstract
+comes from TeX Live. The draft builds to 21 pages with no warning (abstract
 under the 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
 editorial system, not printed), no ORCID, `[longauth]` only for long author
@@ -145,6 +145,25 @@ until they are redrawn in the paper's style.
   on rank 0 against 181 s for the evaluations; the timers include the
   target statistics of the setup), report `~/stl-gpu/runs/1700256/test.json`
   on hpc.
+  Recomputed wavelet fields (paragraph "Recomputed wavelet fields", Table
+  `tab:gpu` footnotes g and h, the 2048 x 5 DIA sentence of "One engine per
+  rank", Sect. 2 memory, discussion, conclusions; preliminary): branch
+  `claude/musing-elgamal-9897d9`, engine 13ae057 / 3177d9c
+  (`--gpu-fields keep|recompute|auto`, reverse chain per block), not merged
+  into main on 30 Oct; `docs/gpu.md` sections 2.2, 2.7 and 5.2 at 47c515e,
+  reports in `benchmarks/fields/` of that branch. Field formulas: keep
+  `8BCH0(8/3 + L(4 + 8/9 + 5/16))` = 188 B, recompute
+  `8BCH0(8/3 + L(8/9 + 5/16))` = 60 B per pixel and member at L = 4 (220 B
+  before the per-block chain). garoupe T4, nside 1024, DIA, lognormal
+  target, 4 evaluations: keep / recompute 22.56 / 23.14 s (1 member),
+  30.56 / 30.42 s (2), 48.91 / 46.18 s and peak 14.54 / 11.93 GB (4).
+  hpc job 2404157, A100-SXM4-80GB, Takahashi kappa ensemble of section 5.1
+  at nside 2048, DIA, 3 evaluations, 6 threads: 5 members keep 163.2 s,
+  peak 75.1 GB (fields 47.3, cache 13.1, rows 11.9); recompute 162.6 s,
+  63.8 GB (fields 15.0, cache 30.9); 10 members keep does not fit (fields
+  94.5 GB), recompute 332.8 s, setup 341 s, peak 67.5 GB = fields 30.1 +
+  cache 22.3 + rows 11.9 + 3.2, device busy 11 %; losses of the two modes
+  equal to 2.7e-15, 2048 x 5 keep against the bound-stencil run 2.3e-15.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
