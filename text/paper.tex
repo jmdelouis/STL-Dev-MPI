@@ -72,7 +72,7 @@ Generative models based on scattering transforms \citep{mallat2012,bruna2013} an
 
 The obstacle to larger maps is memory. The synthesis needs the gradient of the statistics with respect to every pixel. With automatic differentiation the computational graph keeps every intermediate field: on the sphere, the wavelet transforms of every scale and orientation, their moduli, and the second wavelet transforms of the moduli. The Python engine of STL-Dev\footnote{\url{https://github.com/STL-Proj/STL-Dev}} \citep{stldev} replaced the graph by an explicit, pyramidal and block-wise gradient, and synthesises an $\nside=2048$ map on one 24\,GB GPU. Beyond that size, and for several channels or for time sequences, one device is not enough, whatever the implementation.
 
-This paper presents STL-Dev-MPI, a port of that engine to distributed-memory machines: Rust for the core, MPI for the decomposition of the sky between processes, and CUDA for one device per process. The memory of each process is bounded by its share of the sky; the wall-clock time per evaluation drops with the number of processes; and every rank count gives the same result to the last digits. We describe the method (Sect.~\ref{sec:method}), its parallel implementation on CPUs (Sect.~\ref{sec:mpi}) and GPUs (Sect.~\ref{sec:gpu}), and the terms we had to add to the loss to synthesise the weak-lensing convergence, a field whose information sits in rare, extended peaks (Sect.~\ref{sec:kappa}). We then test ensembles of ten syntheses of the \citet{takahashi2017} convergence map against the scatter of ten independent realisations of the same simulation suite, with statistics that are not in the loss: the angular power spectrum, the per-level variance and kurtosis, the peak counts, the one-point PDF and the Minkowski functionals (Sect.~\ref{sec:experiment}). Section~\ref{sec:outlook} discusses what the distributed implementation opens, in particular for climate and ocean data.
+This paper presents STL-Dev-MPI, a port of that engine to distributed-memory machines: Rust for the core, MPI for the decomposition of the sky between processes, and CUDA for one device per process. The memory of each process is bounded by its share of the sky; the wall-clock time per evaluation drops with the number of processes; and every rank count gives the same result to the last digits. We describe the method (Sect.~\ref{sec:method}), its parallel implementation on CPUs (Sect.~\ref{sec:mpi}) and GPUs (Sect.~\ref{sec:gpu}), and the terms we had to add to the loss to synthesise the weak-lensing convergence, a field whose information sits in rare, extended peaks (Sect.~\ref{sec:kappa}). We then test ensembles of ten syntheses of the \citet{takahashi2017} convergence map against the scatter of ten independent realisations of the same simulation suite, with statistics that are not in the loss: the angular power spectrum, the per-level variance and kurtosis, the peak counts, the one-point PDF and the Minkowski functionals (Sect.~\ref{sec:experiment}). Section~\ref{sec:outlook} discusses what the distributed implementation opens, in particular for climate and ocean data. Appendix~\ref{app:diffusion} explores a hybrid in which a learned multi-scale diffusion model draws the finest levels that the statistics leave loose, and the synthesis corrects it.
 
 %======================================================================
 \section{Method: a pyramidal, block-wise explicit gradient}
@@ -627,5 +627,89 @@ V_2 = \frac{\tau\,\nu\,e^{-\nu^2/2}}{(2\pi)^{3/2}},
 and $\tau = \sum_\ell (2\ell+1)\ell(\ell+1)C_\ell \big/ \left(2\sum_\ell(2\ell+1)C_\ell\right)$.
 
 \texttt{tools/minkowski.py} computes the derivatives in harmonic space: \texttt{healpy.alm2map\_der1} gives $x_{;\theta}$ and $x_{;\phi}$ from the harmonic coefficients of the (optionally smoothed) map, and applied to the harmonic coefficients of these two maps it gives the second derivatives. The Dirac distribution is estimated by the fraction of pixels in bins of width $\Delta\nu=0.2$. The test of the tool (\texttt{tools/test\_minkowski.py}) draws Gaussian random fields at $\nside=256$ with a white spectrum smoothed over 4 pixels and compares them with the expressions above, for the $\tau$ measured on each field. The largest deviation per field is 0.2, 1.1 and 3.1\% of the maximum of $V_0$, $V_1$ and $V_2$; for the mean of four fields 0.1, 0.4 and 1.3\%; the measured $\tau$ agrees with the spectrum's to 0.06\%. A lognormal field of the same spectrum is flagged (deviations of 71\% and 100\% of the maxima of $V_1$ and $V_2$). For the convergence maps we use thresholds $-3\le\nu\le6$ after a Gaussian smoothing over 4 pixels of the map's resolution and over 30\,arcmin.
+
+%======================================================================
+\section{A learned prior for the finest levels (preliminary)}
+\label{app:diffusion}
+
+The scattering statistics constrain the finest scale only loosely (Sect.~\ref{sec:kappa}). The level-power term restores the variance of the finest details but not their shape: in a synthesis from noise they are nearly Gaussian (excess kurtosis 0.07 to 0.13 against 0.37 for the target at $\nside=256$, Table~\ref{tab:diff256}). A learned conditional model of the pyramid sets the finest details by construction; the minimisation can then correct, through the statistics, what the model gets wrong. We tested this hybrid on the gaussianised \citet{takahashi2017} map $g$ with the loss of Eqs.~(\ref{eq:ensemble}) and (\ref{eq:scatter}) and the level-power term only, without the terms on $\kappa$ of Sect.~\ref{sec:kappa}. Levels are named by their $\nside$, as in Sect.~\ref{sec:kappa}.
+
+\subsection{Multi-scale conditional diffusion}
+
+Write $x_k$ for the map at level $k$ (NESTED means of four children, $\nside/2^k$) and $\delta_k = x_k - U x_{k+1}$ for its details, $U$ copying each parent on its four children. The law of a map factorises over the pyramid,
+\begin{equation}
+p(x_0) = p(x_K)\prod_{k<K} p(\delta_k \mid x_{k+1}),
+\end{equation}
+and each conditional law is learned by a score-based diffusion model \citep{ho2020,song2021} whose denoiser receives $x_{k+1}$ as an extra input \citep{guth2022,kadkhodaie2023}; a sample is drawn from coarse to fine. Two properties make this tractable: the whitened conditional details are close to white noise, so a few tens of denoising steps suffice \citep{guth2022}, and their law is local, so a denoiser with a receptive field of a few tens of pixels is enough, the long-range dependence being carried by $x_{k+1}$ \citep{kadkhodaie2023}. Local models also need far less training data than global ones, which is what makes training on one sky possible.
+
+The three degrees of freedom of the details of a parent are its orthonormal Haar coefficients on the parent grid, so that the children average to their parent exactly; each Haar channel and the coarse map are whitened by their rms over the sky. NESTED indices are the Morton order of the 12 base faces: a level is 12 square images in which the parent is the $2\times2$ average pooling, and two-dimensional convolutional networks apply without interpolation. Each level has its own denoiser, a U-Net \citep{ronneberger2015} with three resolutions (64, 128 and 128 channels, $5.5\times10^6$ parameters, dropout 0.1) trained with the preconditioning and loss of \citet{karras2022}, and sampled with their second-order (Heun) sampler in 32 steps (63 denoiser evaluations). A sample is drawn face by face, each face padded by 48 pixels of its neighbours; across the polar edges, where the frames of adjacent faces are rotated or flipped, the Haar channels of the padding are re-oriented.
+
+Only one realisation is used. The models are trained on random crops (at most $64\times64$ parent pixels) with the eight symmetries of the square; two faces (one equatorial, one polar) are held out, and the weights with the lowest held-out loss are kept. A level with fewer than about $10^4$ parent pixels is memorised: given the target's own parent map, two draws of the details of level 32 or 64 correlate at 0.7 on the training faces, more with the truth than with each other, while at level 256 two draws correlate at 0.18 on the training and held-out faces alike, as they do with the truth, with the target's variance. The coarse levels are therefore taken from a scattering-covariance synthesis, and a hybrid synthesis has three steps: (i) an ensemble of $B$ coarse maps (Sect.~\ref{sec:ensembles}, with $w_D=1$ and the level-power term, $w_P=10$); (ii) the finer levels of each member drawn by the diffusion models, conditioned on that member; (iii) the ensemble minimisation at full resolution starting from these maps, without added noise.
+
+\subsection{Results at $\nside=256$}
+
+Eight members (Table~\ref{tab:diff256}, Fig.~\ref{fig:diff256}): coarse ensemble at $\nside=64$, diffusion of levels 128 and 256, 300 iterations at $\nside=256$. The control starts the same minimisation from the same coarse members, replicated on the children, plus white noise. On the three T4 GPUs of garoupe the three steps take 74\,s, 97\,s and 15 minutes. Both minimised ensembles are ergodic for the statistics, every member 0.93 to 1.00$\sigma$ from the target with a scatter between members of 0.93 to 1.10 times the ergodic variance, so the statistics cannot tell them apart. The pyramid can: the control piles 1.46 times the target's variance into level 64, leaves 0.56 in level 128 and ends with nearly Gaussian finest details, while the hybrid has every level within 3\% of the target and the skewness and kurtosis of the two finest levels. The hybrid also converges faster, and its members are independent of each other and of the target (correlation of the finest details 0.001, the level of the pixel noise). A single synthesis from noise with the level-power term (STL\_lp10 in Fig.~\ref{fig:diff256}) has the right variance at every level but, like the control, too little kurtosis in the finest details.
+
+\begin{table*}
+\caption{Hybrid and control ensembles at $\nside=256$ (8 members, 300 iterations).}
+\label{tab:diff256}
+\centering\small
+\begin{tabular}{lccc}
+\hline\hline
+ & target & hybrid & control \\
+\hline
+Detail variance, levels 256, 128 & 1, 1 & 1.02, 0.97 & 0.89, 0.56 \\
+Detail variance, levels 64, 32, 16 & 1, 1, 1 & 0.99, 1.01, 1.00 & 1.46, 1.23, 1.06 \\
+Detail kurtosis, levels 256, 128 & 0.37, 0.27 & 0.38, 0.24 & 0.07, 0.14 \\
+Members vs target ($\sigma$) & & 0.93--1.00 & 0.93--1.00 \\
+Scatter / ergodic variance & & 0.94--1.09 & 0.93--1.10 \\
+Evaluations to $\mathcal{L}<1$, $<0.3$ & & 62, 156 & 116, 213 \\
+Final loss & & 0.190 & 0.211 \\
+\hline
+\end{tabular}
+\tablefoot{Detail variance: over the target's, mean of the members; kurtosis: excess kurtosis of the details. Members vs target: rms residual of each of $S_1$ to $S_4$ per member; scatter: variance of the statistics between members over the ergodic variance $\sigma_i^2$, per family. The hybrid before the minimisation has detail variances 1.00, 0.95, 1.00, 1.00, 1.00 and kurtoses 0.35, 0.15.}
+\end{table*}
+
+\begin{figure*}
+\centering
+\figfile{figures/diffusion_n256.png}{\textwidth}
+\caption{Hybrid synthesis at $\nside=256$ (gaussianised map, 8 members; mean and standard error over the members). \emph{polished}: the hybrid after the ensemble minimisation; \emph{hybrid\_init}: before it; \emph{control}: the same coarse members plus white noise, same minimisation; \emph{STL\_lp10}, \emph{STL\_none}: single syntheses from noise with and without the level-power term. Panels: detail variance per level over the target's; $C_\ell$ over the target's, with the 1$\sigma$ scatter between two independent skies (grey); histogram of the finest map; skewness and excess kurtosis of the details per level; excess kurtosis of the map at each level.}
+\label{fig:diff256}
+\end{figure*}
+
+\subsection{Results at $\nside=2048$}
+
+The diffusion models of levels 512, 1024 and 2048 were trained on the target at $\nside=2048$ (0.8 to $12.6\times10^6$ parent pixels per level, 1\,h\,45 each on one T4); their held-out loss follows the training loss: no memorisation. A coarse ensemble of eight members was synthesised at $\nside=64$, then at 256 (43 minutes on three T4), and four members were carried to $\nside=2048$ by diffusion (15.5 minutes per map on one T4). Before the minimisation the diffused levels are 8 to 18\% over-dispersed (Table~\ref{tab:diff2048}). The models themselves are calibrated: conditioned on the target's own parent map, levels 512 and 1024 have 1.01 times the target's variance. The excess comes from the coarse maps, whose level-256 details are less non-Gaussian than the target's (kurtosis 0.31 against 0.61), and since the ergodic $\sigma_i$ at $\nside=2048$ are 8 times smaller than at 256, these few percent make an initial loss of $1.1\times10^4$.
+
+The minimisation ran on one GPU with the bound stencils: 279 evaluations on an H200 (58\,s per evaluation of the four members, 68\,GB), then 161 more with the level-power term ($w_P=10$) on an 80\,GB A100 (125\,s, 71\,GB). It removes the over-dispersion and keeps the non-Gaussianity of the diffused levels (Table~\ref{tab:diff2048}, Fig.~\ref{fig:diff2048}): every family ends at about $1\sigma$ per member, every level within 2.2\% of the target except level 256 (0.93), the finest-level kurtosis at 0.89 against 0.92, and the $C_\ell$ within 4\% from $\ell=724$ to 4096. The face edges leave no seam: the variance of the details on the first rows of pixels along the edges is 0.99 to 1.03 times that of the face interiors. What remains comes from the coarse maps: the level-256 deficit, also visible in the $C_\ell$ (1.10 and 0.90 in the bands starting at $\ell=362$ and 512), too little kurtosis in the details of levels 128 and 256, and too much in the map itself (0.46 to 0.48 at $\nside=128$ and 256 against 0.27 and 0.20).
+
+\begin{table*}
+\caption{Hybrid ensemble at $\nside=2048$ (4 members).}
+\label{tab:diff2048}
+\centering\small
+\begin{tabular}{lccc}
+\hline\hline
+ & Detail variance & Detail kurtosis & Members vs \\
+ & 2048, 1024, 512, 256 & 2048, 1024, 512, 256 & target ($\sigma$) \\
+\hline
+Target & 1, 1, 1, 1 & 0.92, 0.52, 0.57, 0.61 & \\
+Hybrid & 1.08, 1.13, 1.18, 0.98 & 0.80, 0.38, 0.46, 0.31 & \\
+279 eval. & 1.02, 0.99, 1.02, 0.89 & 0.88, 0.51, 0.71, 0.43 & 1.0--3.4 \\
++161 eval. & 1.02, 1.00, 0.99, 0.93 & 0.89, 0.51, 0.72, 0.43 & 0.9--1.2 \\
+\hline
+\end{tabular}
+\tablefoot{As Table~\ref{tab:diff256}. Members vs target: rms residual per member of $S_1$, $S_2$, $S_3$, $S_4$ and the variance, 1.90, 1.71, 1.06, 1.00, 3.39 after 279 evaluations and 1.19, 0.99, 0.96, 0.92, 1.01 after the 161 with the level-power term.}
+\end{table*}
+
+\begin{figure*}
+\centering
+\figfile{figures/diffusion_n2048.png}{\textwidth}
+\caption{As Fig.~\ref{fig:diff256} at $\nside=2048$, 4 members: \emph{hybrid\_init} before the minimisation, \emph{polished\_279} after 279 evaluations, \emph{polished\_lp10} after 161 more with the level-power term.}
+\label{fig:diff2048}
+\end{figure*}
+
+\subsection{Outlook}
+
+The learned prior sets what the statistics leave free, and the statistics correct what a model trained on one sky gets wrong: a few percent at every level, which the full-sky ergodic $\sigma_i$ turn into tens of $\sigma$. Independent realisations (the \citet{takahashi2017} suite has 108) would let the coarse levels be learned too and the scatter of the ensembles be validated. A variant of the denoiser that knows nothing of the faces, with the stencils of the engine (Sect.~\ref{sec:stats}; here $3\times3$, one gauge) on regions made of a NESTED cell and two rings of its HEALPix neighbours, replaces the face-image model of level 256 with the same ensemble statistics and slightly smaller seams along the equatorial edges, at five times the sampling cost. Its regions are the blocks and halos of Sect.~\ref{sec:blocks}, so a distributed sampler could share the decomposition of the minimisation.
 
 \end{document}
