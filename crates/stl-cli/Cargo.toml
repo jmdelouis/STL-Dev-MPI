@@ -18,6 +18,7 @@ stl-mpi = { path = "../stl-mpi" }
 stl-gpu = { path = "../stl-gpu", optional = true }
 num-complex.workspace = true
 serde_json.workspace = true
+libm = "0.2"
 mpi = { workspace = true, optional = true }
 
 [[bin]]
@@ -27,3 +28,7 @@ path = "src/bin/stl-synth.rs"
 [[bin]]
 name = "stl-minkowski"
 path = "src/bin/stl-minkowski.rs"
+
+[[bin]]
+name = "stl-ensemble"
+path = "src/bin/stl-ensemble.rs"

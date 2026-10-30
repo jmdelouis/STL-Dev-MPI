@@ -23,6 +23,7 @@ mod kurtosis;
 mod level_power;
 mod marginal;
 pub mod minkowski;
+pub mod ensemble;
 use kappa::Transform;
 use kurtosis::Kurtosis;
 use level_power::LevelPower;

@@ -14,7 +14,8 @@
 //!   counts once): the transpose of the synthesis is `mult Y*`, that of the
 //!   analysis `Omega Y(c / mult)`, `mult = 1` for `m = 0`, 2 otherwise.
 //!
-//! Rings: the Legendre functions come from the normalised recursion in `l`
+//! Rings: the Legendre functions (Condon-Shortley phase, as healpy) come
+//! from the normalised recursion in `l`
 //! at fixed `m`, scaled by powers of `2^600` while they are below double
 //! range (they are then negligible and skipped), north and south rings
 //! together (`Y_lm(pi - theta) = (-1)^(l+m) Y_lm(theta)`); the sums over `l`
@@ -197,7 +198,8 @@ impl Sht {
         let log = self.log_mm[m] + m as f64 * sin.ln();
         let mut k: i32 = if log > -650.0 * std::f64::consts::LN_2 { 0 } else { ((log - 300.0 * std::f64::consts::LN_2) / LN_SCALE).ceil() as i32 };
         let mut prev = 0.0;
-        let mut cur = (log - k as f64 * LN_SCALE).exp();
+        // Condon-Shortley phase (healpy, DUCC).
+        let mut cur = (log - k as f64 * LN_SCALE).exp() * if m % 2 == 1 { -1.0 } else { 1.0 };
         if k == 0 {
             f(m, cur, m as f64 * cos * cur);
         }
@@ -522,10 +524,10 @@ mod tests {
         let x = sht.synthesis(&alm);
         for (p, v) in x.iter().enumerate() {
             let (t, ph) = pix2ang_nest(p as i64, nside as i64);
-            // Unsigned normalised Legendre functions (no Condon-Shortley phase).
+            // Normalised Legendre functions with the Condon-Shortley phase.
             let y00 = (1.0 / (4.0 * pi)).sqrt();
             let y10 = (3.0 / (4.0 * pi)).sqrt() * t.cos();
-            let y11 = (3.0 / (8.0 * pi)).sqrt() * t.sin();
+            let y11 = -(3.0 / (8.0 * pi)).sqrt() * t.sin();
             let y20 = (5.0 / (16.0 * pi)).sqrt() * (3.0 * t.cos() * t.cos() - 1.0);
             let e = 0.3 * y00 - 0.7 * y10 + 2.0 * (C64::new(0.2, 0.5) * C64::from_polar(y11, ph)).re + 1.1 * y20;
             assert!((v - e).abs() < 1e-13, "pixel {p}: {v} vs {e}");
@@ -574,7 +576,7 @@ mod tests {
         let field = |t: f64, p: f64| {
             let (x, s) = (t.cos(), t.sin());
             let y20 = (5.0 / (16.0 * pi)).sqrt() * (3.0 * x * x - 1.0);
-            let y21 = (15.0 / (8.0 * pi)).sqrt() * s * x;
+            let y21 = -(15.0 / (8.0 * pi)).sqrt() * s * x;
             let y32 = (105.0 / (32.0 * pi)).sqrt() * s * s * x;
             0.8 * y20 + 2.0 * (C64::new(0.3, -0.4) * C64::from_polar(y21, p)).re + 2.0 * (C64::new(-0.2, 0.1) * C64::from_polar(y32, 2.0 * p)).re
         };
@@ -612,7 +614,7 @@ mod tests {
             if let Some((l, lam)) = first {
                 if l == m {
                     let expect = (sht.log_mm[m] + m as f64 * ring.sin.ln()).exp();
-                    assert!((lam - expect).abs() <= 1e-12 * expect, "m {m}");
+                    assert!((lam.abs() - expect).abs() <= 1e-12 * expect, "m {m}");
                 }
             }
         }
