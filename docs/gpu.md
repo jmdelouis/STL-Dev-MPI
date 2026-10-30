@@ -157,6 +157,49 @@ functions of the geometry; the decimation chain (whole rows instead of
 pieces) and its Horner reverse; the convolution adjoint (lane-strided);
 the coefficient partial sums (chunked tree); block boundaries.
 
+### 2.6b The objective's terms on the device (`--gpu-terms device`)
+
+With one rank per group of members (the case of every single-device
+run), `stl-synth --gpu` evaluates the whole objective on the device
+(`stl-cli/src/device_terms.rs`, kernels in `stl_gpu::terms`), not only
+the statistics' sweeps:
+
+- the synthesis sweep reads the members' maps from the device and leaves
+  its gradient there (`GpuEvaluator::forward_device`, `gradient_device`,
+  `take_map`);
+- the level power and the kurtosis per level build the 4-children pyramid
+  of the maps (or of kappa) on the device, its moments by chunks, and add
+  their gradients there;
+- the pixel marginal sorts every member on the device (a stable LSD radix
+  sort on the `f64::total_cmp` order of the values, the pixel index as
+  payload: the order of the host's sort by value then pixel) and adds
+  `coef (x - t)` at the sorted positions;
+- the kappa transform (PCHIP of the table) and its derivative are
+  computed there, and the kappa sweep and kurtosis read kappa from the
+  device.
+
+The host keeps the losses on the statistics, the reductions of the
+terms' sums over pixels (small vectors, with the communicators) and
+L-BFGS. Every element-wise expression is the host's, in its order, so
+the pyramid, the gradients of the level power and kurtosis, the marginal
+and the kappa transform are identical to the bit; the sums over pixels
+go by chunks of 65 536 cells reduced in a fixed tree and added in chunk
+order (the loss and gradient agree with the host path to 2e-16 relative,
+§3). During a sweep nothing but the engine's fields is on the device: the
+synthesis gradient waits on the host during the kappa sweep, the maps go
+up again for kappa's derivative afterwards, and the sort's buffers live
+between the sweeps; the engine's memory budget, hence its cache, is the
+host path's. Transfers go through a page-locked buffer (maps up twice,
+gradient down twice and up once per evaluation with the kappa
+statistics). `--gpu-terms host`, several ranks per group, `--minkowski-weight`
+or `--freeze-nside` keep the host path.
+
+L-BFGS (`stl_core::lbfgs`) runs its vector operations (dot products,
+axpy, the line points, copies) on the host threads by chunks of 65 536
+elements; a dot product adds its chunks' sums in chunk order, independent
+of the number of threads (`STL_THREADS`, else the available CPUs), and a
+slice of one chunk is summed sequentially as before.
+
 ### 2.7 Memory per rank
 
 **One engine per rank.** A `GpuEngine` evaluates any plan and batch on
@@ -238,6 +281,8 @@ All tests run on both devices above with identical results.
 | `stats`: one engine shared by the full plan and a mean / var / S1 / S2 plan at batches 1 and 2 (target statistics, then alternated evaluations, as `stl-synth --kappa-table`) vs one engine each; the plan without S3 / S4 vs the full plan restricted to it (laptop) | identical to the bit (values, variances, gradients) |
 | `stats`: wavelet fields recomputed per block vs kept (`--gpu-fields`), the 8 fixtures, both geometry forms, 1 to 333 device blocks per level, the full plan and a mean / var / S1 / S2 plan, three evaluations (laptop) | identical to the bit (values, variances, stored moduli, map cotangents of every level) |
 | the whole `stl-gpu` suite with `STL_GPU_FIELDS=keep` and `=recompute` (laptop) | all pass |
+| `terms`: the device radix sort vs a host sort by value then index (sizes 1 to 2^20 around the tile and scan boundaries, ties, signed zeros, extremes); pyramid, level-power and kurtosis gradients (with and without the kappa chain), marginal, `g += a b` vs the host expressions; staged transfers (laptop) | sort: the same permutation; gradients and marginal identical to the bit; moments and marginal loss <= 1e-13 relative |
+| `stl-cli` `device_objective_matches_host_terms`: the device objective vs the host terms on the same sweeps, nside 64, 2 members, every term (ensemble with scatter, level power, marginal, kappa statistics, kurtosis of kappa), two maps (laptop) | kappa transform identical to the bit; loss identical at 16 digits, gradient <= 1.9e-16 of its maximum |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
 | `synthesis`: WebSky kappa nside 64, 20 L-BFGS iterations (25 evaluations), `STL_RANKS` 1, 2, 3 | 25 / 25 loss values identical to STL-Dev at the printed precision, max relative difference 1.5e-12 to 1.8e-11 |
@@ -262,7 +307,8 @@ Options: `--gpu-block-rows N` (owned cells per device block),
 `--gpu-conv dia|stencils` (form of the convolution geometry, default
 `STL_GPU_CONV` else `dia`), `--gpu-fields auto|keep|recompute` (wavelet
 fields kept between the sweeps or recomputed per block, default
-`STL_GPU_FIELDS` else `auto`, §2.7),
+`STL_GPU_FIELDS` else `auto`, §2.7), `--gpu-terms device|host` (the
+objective's terms on the device, the default, or on the host, §2.6b),
 `--gpu-cache auto|full|transposition|none`, `STL_GPU_CACHE_MB` (cache
 budget), `STL_GPU_THREADS` (host threads of the setup per rank),
 `STL_GPU_DEVICE`, `STL_GPU_SYNC=1` (synchronise after every kernel, to
@@ -511,7 +557,44 @@ members', but the device is busy 11 % of the time: the engine's phases
 (target statistics, synthesis and kappa sweeps) add up to 70 s per
 evaluation, the rest is host work of the objective (ensemble, level-power,
 marginal and kappa terms, L-BFGS) on 10 maps of 50 M pixels with 6
-threads.
+threads. §5.3 moves that work to the device.
+
+### 5.3 The objective's terms on the device (`--gpu-terms`)
+
+The terms of the production recipe at nside 1024 on garoupe, one T4:
+target the nside-2048 gaussianised Takahashi map averaged over groups of
+4 children, 10 members from the nside-256 ensemble (`--init-noise` auto),
+`--L 4 --weights ergodic --scatter-weight 1 --level-power-weight 10
+--marginal-weight 10000 --kappa-table knots1024.npy --kappa-weight 0.1
+--kurtosis-weight 1.0 --kurtosis-nside 32-1024`, 3 iterations (4
+evaluations), wavelet fields recomputed (`auto`), 12 host threads. The
+timers (`timers_seconds`, per evaluation) are wall times of the
+evaluation's parts: the objectives with their sweeps, the terms with
+their gradient sums, L-BFGS the rest of the run. Reports in
+`benchmarks/terms/t4/`.
+
+| | host terms (f65ce8e) | device terms, room reserved (96c6bf1) | device terms (cceca63) |
+|---|---|---|---|
+| s / evaluation | 205.1 | 129.6 | 107.5 |
+| device busy (whole run, setup included) | 42 % | 67 % | 65 % |
+| synthesis objective (sweeps + copies) | 93.7 | 85.6 | 76.2 |
+| kappa objective | 46.7 | 35.3 | 26.9 |
+| marginal | 35.1 | 1.2 | 1.2 |
+| kurtosis | 8.8 | 0.07 | 0.23 |
+| kappa transform | 8.5 | 0.01 | 0.08 |
+| level power | 7.2 | 0.02 | 0.02 |
+| copies to and from the engine's layout, transfers | 19.0 | 1.8 | 1.7 |
+| L-BFGS | 4.8 | 5.6 | 1.2 |
+
+The losses of the three runs agree to 1e-15 relative at every evaluation.
+The host work (terms, copies, L-BFGS) took 83 s of the 205 s, the
+marginal's sorts 35 s of them; on the device the terms take 1.5 s.
+Keeping room for the terms' buffers on the device (96c6bf1) took it from
+the geometry cache and cost the sweeps about 20 s per evaluation (DIA
+coefficients recomputed more often on the T4); with nothing but the
+engine's fields during the sweeps (cceca63) they get the host path's
+cache again. L-BFGS on 12 threads takes a quarter of its single-thread
+time. What is left, 100 s of the 107 s, is the engine's sweeps.
 
 ## 6. Limitations and next steps
 
@@ -532,9 +615,14 @@ threads.
   H_0` doubles); pushing each block's moduli down the decimation chain as
   the CPU pieces do would remove it, and freeing `m[d][n]` once the
   reverse sweep has passed level `n` would lower the reverse peak too.
-- **Host work.** At nside 2048 the A100 is busy 11 to 14 % of the time
-  (§5.2): the objective's host terms and L-BFGS on the members' maps, with
-  6 threads, take three quarters of an evaluation.
+- **Host work.** At nside 2048 the A100 was busy 11 to 14 % of the time
+  with the objective's terms on the host (§5.2); they now run on the
+  device (§5.3). L-BFGS stays on the host (its history, 2 x 10 x 4 GB at
+  nside 2048 x 10, does not fit next to the fields): its two-loop
+  recursion reads the history twice per iteration on the host threads.
+  The engine's own host work (contribution lists of the coefficient
+  cotangents per block, partial sums brought back per block) and its
+  synchronisation at the end of every phase are the next.
 - **Exchanges** copy whole level fields between device and host (MPI is
   not CUDA-aware on garoupe): packing only the halo cells on the device
   would cut the transfers by the halo fraction.
