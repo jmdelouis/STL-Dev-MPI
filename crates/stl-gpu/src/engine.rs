@@ -1065,6 +1065,7 @@ impl<'a> GpuEngine<'a> {
                             items.push(ForwardItem { kind, pad: 0, a, b: bo });
                         }
                     }
+                    *self.timers.entry("gpu_host_lists").or_default() += t.elapsed().as_secs_f64();
                     let sums = self.partial_sums(&items, nf, moments);
                     for (k, &i) in idx.iter().enumerate() {
                         for bi in 0..self.batch {
@@ -1328,6 +1329,9 @@ impl<'a> GpuEngine<'a> {
                         flat_c.extend_from_slice(cs);
                         flat_t.push(Target { ptr: *ptr, im_off: *im, start, end: flat_c.len() as u32 });
                     }
+                    // Host time building the contribution lists (no sync).
+                    let lists = t.elapsed().as_secs_f64();
+                    *self.timers.entry("gpu_host_lists").or_default() += lists;
                     let dc = self.gpu.upload(&flat_c);
                     for part in flat_t.chunks(65535) {
                         let dt = self.gpu.upload(part);
