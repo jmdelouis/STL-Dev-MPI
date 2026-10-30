@@ -179,6 +179,18 @@ until they are redrawn in the paper's style.
   24.5 -> 0.3 s, copies and transfers 19.0 -> 1.7 s, L-BFGS 4.8 -> 1.2 s,
   device busy 42 -> 65 % (setup included). The comparison with Irene
   (128.4 s on 640 cores, job 6087067) is per evaluation of the same terms.
+  Several ranks per group and occupancy (feb832c, `docs/gpu.md` sections
+  2.6b and 5.3 at 4d10f1f, reports `benchmarks/terms/t4/*_feb832c.json`,
+  occupancy by `nvidia-smi` every 2 s, setup excluded): 1024 x 10 on one
+  T4, 107.6 s, busy 95.4 % (106.1 s and 95.7 % without the per-phase
+  synchronisation); 2048 x 5 on the three T4 (3 ranks, one T4 each, 4 host
+  threads per rank, `--kurtosis-nside 32-2048`, `knots2048.npy`, 4
+  evaluations): host terms 184.7 s, device terms 134.6 s, peak per T4
+  13.30-13.51 GB in the reports (fields 5.19 GB, rows 3.98 GB, cache 3.0 GB
+  per rank), busy 49.5 -> 68.7 %, marginal 30.1 -> 16.9 s (merge of the
+  ranks' orders on the host), halo exchanges 24 s per evaluation (11.6 +
+  8.2 + 4.6), losses identical; device objective against host terms on 1
+  and 3 ranks: same loss, gradient within 1.2e-16 of its maximum.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
