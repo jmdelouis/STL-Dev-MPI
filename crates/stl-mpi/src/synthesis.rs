@@ -181,8 +181,13 @@ impl<'a, C: Comm> Objective<'a, C> {
         engine.forward_moments(self.plan)
     }
 
+    /// The halo and ghost exchanges of this objective's partition.
+    pub fn exchange(&self) -> &dyn stl_core::engine::Exchange {
+        &self.halo
+    }
+
     /// Loss and its cotangent on the statistics.
-    fn loss_cotangent(&self, values: &[Complex64]) -> (f64, Vec<Complex64>) {
+    pub fn loss_cotangent(&self, values: &[Complex64]) -> (f64, Vec<Complex64>) {
         let n = self.plan.len();
         let mut loss = 0.0;
         let cotangent: Vec<Complex64> = values
@@ -385,39 +390,43 @@ impl<C: Comm> Ensemble<'_, '_, C> {
 
     /// Loss and owned slice of the gradient of this group's members.
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
-        self.obj.loss_and_grad_with(x, |values| {
-            let n = self.obj.plan.len();
-            let mean = self.mean(values);
-            let b = self.members as f64;
-            let mut loss = 0.0;
-            let one: Vec<Complex64> = mean
-                .iter()
-                .zip(self.target)
-                .zip(&self.obj.weights)
-                .map(|((m, t), w)| {
-                    let residual = m - t;
-                    loss += w * residual.norm_sqr();
-                    2.0 * w * residual / b
+        self.obj.loss_and_grad_with(x, |values| self.loss_cotangent(values))
+    }
+
+    /// Loss and its cotangent on the statistics `[b, len(plan)]` of this
+    /// group's members.
+    pub fn loss_cotangent(&self, values: &[Complex64]) -> (f64, Vec<Complex64>) {
+        let n = self.obj.plan.len();
+        let mean = self.mean(values);
+        let b = self.members as f64;
+        let mut loss = 0.0;
+        let one: Vec<Complex64> = mean
+            .iter()
+            .zip(self.target)
+            .zip(&self.obj.weights)
+            .map(|((m, t), w)| {
+                let residual = m - t;
+                loss += w * residual.norm_sqr();
+                2.0 * w * residual / b
+            })
+            .collect();
+        let mut cotangent = one.repeat(self.obj.batch);
+        if let (Some((lambda, sigma2)), true) = (self.scatter, self.members > 1) {
+            let d = self.scatter(values, &mean);
+            let nf = n as f64;
+            let coef: Vec<f64> = (0..n)
+                .map(|i| {
+                    let r = d[i] / sigma2[i] - 1.0;
+                    loss += lambda / nf * r * r;
+                    4.0 * lambda / nf * r / sigma2[i] / (b - 1.0)
                 })
                 .collect();
-            let mut cotangent = one.repeat(self.obj.batch);
-            if let (Some((lambda, sigma2)), true) = (self.scatter, self.members > 1) {
-                let d = self.scatter(values, &mean);
-                let nf = n as f64;
-                let coef: Vec<f64> = (0..n)
-                    .map(|i| {
-                        let r = d[i] / sigma2[i] - 1.0;
-                        loss += lambda / nf * r * r;
-                        4.0 * lambda / nf * r / sigma2[i] / (b - 1.0)
-                    })
-                    .collect();
-                for (member, cot) in values.chunks(n).zip(cotangent.chunks_mut(n)) {
-                    for i in 0..n {
-                        cot[i] += coef[i] * (member[i] - mean[i]);
-                    }
+            for (member, cot) in values.chunks(n).zip(cotangent.chunks_mut(n)) {
+                for i in 0..n {
+                    cot[i] += coef[i] * (member[i] - mean[i]);
                 }
             }
-            (loss, cotangent)
-        })
+        }
+        (loss, cotangent)
     }
 }

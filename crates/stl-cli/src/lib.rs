@@ -16,6 +16,8 @@ use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
 use stl_mpi::synthesis::{ergodic_weights, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
+#[cfg(feature = "gpu")]
+mod device_terms;
 mod kappa;
 mod kurtosis;
 mod level_power;
@@ -114,6 +116,10 @@ stl-synth --target MAP [options]
                         the reverse one) or 'recompute' (per block in the reverse sweep, as the CPU
                         engine; ~3 L doubles less per pixel and map), or 'auto': keep when it takes
                         at most half of the free device memory; default STL_GPU_FIELDS, else auto
+  --gpu-terms T         where the objective's terms run with --gpu: 'device' (default: the members'
+                        maps go to the device once per evaluation; level power, marginal, kappa
+                        transform, kurtosis and the gradient sums run there; one rank per group,
+                        no Minkowski term or frozen scales, else 'host') or 'host'
   --quiet               no line per evaluation
 ";
 
@@ -186,6 +192,8 @@ pub struct Args {
     pub gpu_conv: Option<String>,
     /// `--gpu-fields` (`None`: `STL_GPU_FIELDS`, else auto).
     pub gpu_fields: Option<String>,
+    /// `--gpu-terms host`: the objective's terms on the host.
+    pub gpu_terms_host: bool,
 }
 
 impl Args {
@@ -232,6 +240,7 @@ impl Args {
             gpu_cache: "auto".into(),
             gpu_conv: None,
             gpu_fields: None,
+            gpu_terms_host: false,
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -351,6 +360,13 @@ impl Args {
                         _ => return Err("--gpu-fields is 'auto', 'keep' or 'recompute'".into()),
                     }
                 }
+                "--gpu-terms" => {
+                    a.gpu_terms_host = match it.next().map(String::as_str) {
+                        Some("device") => false,
+                        Some("host") => true,
+                        _ => return Err("--gpu-terms is 'device' or 'host'".into()),
+                    }
+                }
                 "-h" | "--help" => return Err(USAGE.into()),
                 other => return Err(format!("unknown option {other}\n\n{USAGE}")),
             }
@@ -460,9 +476,17 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // One device engine per rank, sized for this group's members and shared
     // by every objective (target statistics, synthesis, kappa term): one
     // topology, geometry cache and set of level fields on the device.
+    // The objective's terms on the device too (`--gpu-terms device`), when
+    // they apply; the device keeps room for their buffers.
+    #[cfg(feature = "gpu")]
+    let device_terms = args.gpu
+        && !args.gpu_terms_host
+        && device_terms::applies(gcomm.size(), args.minkowski_weight > 0.0, args.freeze_nside.is_some());
     #[cfg(feature = "gpu")]
     let device = if args.gpu {
-        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members)?;
+        let (s, e) = probe.owned();
+        let reserve = if device_terms { device_terms::reserve_bytes(local_members, (e - s) as usize) } else { 0 };
+        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members, reserve)?;
         probe.set_evaluator(Box::new(ev.share(&plan, 1)));
         gpu_info = info;
         Some(ev)
@@ -711,7 +735,38 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // gradient accumulation, the objectives with their device sweeps).
     let host_timers: std::cell::RefCell<std::collections::BTreeMap<&'static str, f64>> = Default::default();
     let tick = |name: &'static str, since: Instant| *host_timers.borrow_mut().entry(name).or_default() += since.elapsed().as_secs_f64();
-    let history = if args.niter == 0 {
+    // The whole objective on the device (--gpu-terms device): its own
+    // evaluators on the shared engine.
+    #[allow(unused_mut)]
+    let mut device_history: Option<Vec<f64>> = None;
+    #[cfg(feature = "gpu")]
+    if let (Some(dev), true, true) = (&device, device_terms, args.niter > 0) {
+        let kappa = kappa_tf.as_ref().filter(|_| kens.is_some() || kurtosis.is_some()).map(|tf| device_terms::KappaPart {
+            transform: tf,
+            ensemble: kens.as_ref(),
+            evaluator: kens.as_ref().map(|_| dev.share(&kplan, local_members)),
+        });
+        let mut dobj = device_terms::DeviceObjective::new(
+            &obj,
+            (members > 1).then_some(&ens),
+            dev.share(&plan, local_members),
+            kappa,
+            level_power.as_ref(),
+            marginal.as_ref(),
+            kurtosis.as_ref(),
+            cross.as_ref(),
+        );
+        let f = |p: &[f64]| {
+            let t = Instant::now();
+            let out = dobj.loss_and_grad(p, &tick);
+            tick("host_evaluations", t);
+            out
+        };
+        device_history = Some(run_lbfgs_with(comm, &mut x, &opts, f, print));
+    }
+    let history = if let Some(h) = device_history {
+        h
+    } else if args.niter == 0 {
         Vec::new()
     } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() && freeze.is_none() {
         let f = |p: &[f64]| {
@@ -1088,6 +1143,7 @@ mod gpu {
     /// batch it evaluates), as the evaluator of `plan` at that batch (other
     /// plans and batches: `GpuEvaluator::share`), and a description for
     /// the report.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluator<'a>(
         args: &Args,
         geo: &'a LocalGeometry,
@@ -1096,10 +1152,11 @@ mod gpu {
         part: &Partition,
         rank: usize,
         batch: usize,
+        reserve_bytes: usize,
     ) -> Result<(GpuEvaluator<'a>, serde_json::Value), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, reserve_bytes, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }

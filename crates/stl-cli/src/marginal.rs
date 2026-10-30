@@ -38,10 +38,10 @@ pub struct Marginal {
     pub weight: f64,
     /// This rank's part of the sorted target values (standardised) and the
     /// global position of its first one, for every rank.
-    chunk: Vec<f64>,
+    pub(crate) chunk: Vec<f64>,
     chunk_starts: Vec<usize>,
-    npix: usize,
-    members: usize,
+    pub(crate) npix: usize,
+    pub(crate) members: usize,
 }
 
 impl Marginal {

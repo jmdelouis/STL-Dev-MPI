@@ -173,6 +173,9 @@ pub struct GpuOptions {
     pub cache_bytes: usize,
     /// Host threads for the setup.
     pub threads: usize,
+    /// Device bytes left to the caller (its own buffers, e.g. the terms of
+    /// the objective on the device), outside the blocks and the cache.
+    pub reserve_bytes: usize,
 }
 
 impl Default for GpuOptions {
@@ -190,6 +193,7 @@ impl Default for GpuOptions {
             cache: GeometryCache::Auto,
             cache_bytes: 0,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+            reserve_bytes: 0,
         }
     }
 }
@@ -414,7 +418,8 @@ impl<'a> GpuEngine<'a> {
         let (free, _total) = gpu.memory();
         // Held cells of the levels with a decimation: about 30 + 7.5 nonzero
         // weights (12 bytes) per coarse / fine row, plus the block topology.
-        let csr_bytes: usize = held[..levels - 1].iter().sum::<usize>() * 200 + held.iter().sum::<usize>() * 32 + (512 << 20);
+        let csr_bytes: usize =
+            held[..levels - 1].iter().sum::<usize>() * 200 + held.iter().sum::<usize>() * 32 + (512 << 20) + opts.reserve_bytes;
         let fields = match opts.fields {
             FieldStore::Auto if Self::field_doubles(&held, bc, l, FieldStore::Keep) * 8 + csr_bytes <= free / 2 => FieldStore::Keep,
             FieldStore::Auto => FieldStore::Recompute,
@@ -478,7 +483,7 @@ impl<'a> GpuEngine<'a> {
             opts.cache_bytes
         } else {
             let (free_now, _) = gpu.memory();
-            free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20)) * 4 / 5
+            free_now.saturating_sub(field_doubles * 8 + largest * per_row + (512 << 20) + opts.reserve_bytes) * 4 / 5
         };
         let cache_mode = match opts.cache {
             GeometryCache::Auto if whole_total <= cache_bytes => GeometryCache::Full,
@@ -790,9 +795,17 @@ impl<'a> GpuEngine<'a> {
     /// exchanges its halo and decimates it to every level.
     pub fn load(&mut self, ex: &dyn Exchange, x: &[f64]) {
         let started = Instant::now();
+        let x0 = self.gpu.upload(x);
+        self.tick("gpu_load", started);
+        self.load_device(ex, x0);
+    }
+
+    /// [`load`](Self::load) of a field already on the device, which becomes
+    /// the level-0 map (see [`take_map`](Self::take_map)).
+    pub fn load_device(&mut self, ex: &dyn Exchange, mut x0: CudaSlice<f64>) {
+        let started = Instant::now();
         let bc = self.batch * self.channels;
-        assert_eq!(x.len(), bc * self.held(0));
-        let mut x0 = self.gpu.upload(x);
+        assert_eq!(x0.len(), bc * self.held(0));
         self.halo(ex, 0, &mut x0, bc);
         self.maps = vec![x0];
         for d in 0..self.levels() - 1 {
@@ -811,6 +824,12 @@ impl<'a> GpuEngine<'a> {
             self.maps.push(next);
         }
         self.tick("gpu_load", started);
+    }
+
+    /// The level-0 map of the last load, taken from the engine (a later
+    /// sweep needs a new load).
+    pub fn take_map(&mut self) -> CudaSlice<f64> {
+        std::mem::replace(&mut self.maps[0], self.gpu.zeros::<f64>(0))
     }
 
     /// `maps[n]` on the host.
@@ -1547,6 +1566,39 @@ impl<'a> GpuEvaluator<'a> {
     /// The engine (shared with the other evaluators made by [`share`](Self::share)).
     pub fn engine(&self) -> std::cell::Ref<'_, GpuEngine<'a>> {
         self.engine.borrow()
+    }
+
+    /// The engine's device.
+    pub fn gpu(&self) -> Arc<Gpu> {
+        self.engine.borrow().gpu.clone()
+    }
+
+    /// [`Evaluator::forward`] of maps already on the device (`[B, C, |layout
+    /// 0|]`), which the engine keeps as its level-0 map until
+    /// [`take_map`](Self::take_map).
+    pub fn forward_device(&mut self, ex: &dyn Exchange, x: CudaSlice<f64>, moments: bool) -> (Vec<Complex64>, Vec<f64>) {
+        let mut e = self.engine.borrow_mut();
+        e.set_batch(self.batch);
+        e.holder = self.id;
+        e.load_device(ex, x);
+        e.forward(ex, &self.plan, moments)
+    }
+
+    /// [`Evaluator::gradient`] left on the device: the level-0 cotangent
+    /// over the layout (owned cells valid).
+    pub fn gradient_device(&mut self, ex: &dyn Exchange, cotangent: &[Complex64]) -> CudaSlice<f64> {
+        let mut e = self.engine.borrow_mut();
+        assert_eq!(e.holder, self.id, "gradient without the forward sweep of this evaluator");
+        let mg = e.reverse(ex, &self.plan, cotangent);
+        e.analysis_vjp(ex, mg)
+    }
+
+    /// The level-0 map of this evaluator's last forward sweep, back from the
+    /// engine (after its gradient).
+    pub fn take_map(&mut self) -> CudaSlice<f64> {
+        let mut e = self.engine.borrow_mut();
+        assert_eq!(e.holder, self.id, "map of another evaluator's sweep");
+        e.take_map()
     }
 }
 

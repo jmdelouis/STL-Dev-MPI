@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = include_str!("kernels.cu");
 
-const KERNELS: [&str; 31] = [
+const KERNELS: [&str; 43] = [
     "ring_thetas",
     "geom_build",
     "geom_pack",
@@ -45,6 +45,18 @@ const KERNELS: [&str; 31] = [
     "unpack_rows",
     "coef_partial",
     "coef_reverse",
+    "kappa_pchip",
+    "quad_mean",
+    "detail_moments",
+    "level_power_grad",
+    "kurtosis_grad",
+    "add_product",
+    "marginal_row",
+    "rs_init",
+    "rs_hist",
+    "scan_block",
+    "scan_add",
+    "rs_scatter",
 ];
 
 /// Compiles the kernels to a native binary for the device (`sm_XY`): a

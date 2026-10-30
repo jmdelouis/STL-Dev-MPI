@@ -14,9 +14,9 @@ use stl_mpi::Comm;
 /// (A constant extrapolation leaves the pixels pushed beyond the last knot
 /// without any gradient from the kappa term: they pile up at the maximum.)
 pub struct Monotone {
-    x: Vec<f64>,
-    y: Vec<f64>,
-    d: Vec<f64>,
+    pub(crate) x: Vec<f64>,
+    pub(crate) y: Vec<f64>,
+    pub(crate) d: Vec<f64>,
 }
 
 impl Monotone {
@@ -75,9 +75,9 @@ impl Monotone {
 
 /// `x` (standardised g) -> standardised `kappa = f(x std_g + mean_g)`.
 pub struct Transform {
-    f: Monotone,
-    g: (f64, f64),
-    kappa: (f64, f64),
+    pub(crate) f: Monotone,
+    pub(crate) g: (f64, f64),
+    pub(crate) kappa: (f64, f64),
 }
 
 impl Transform {

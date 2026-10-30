@@ -1419,3 +1419,270 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
     d[i] = dre;
     if (t.im_off >= 0) d[t.im_off + i] = dim;
 }
+
+// ---------------------------------------------------------------------------
+// Terms of the synthesis objective on the members' maps (stl-cli): kappa
+// transform, 4-children pyramid (level power, kurtosis per level), pixel
+// marginal (stable radix sort), gradient sums.  Rows are members, the pixel
+// axis last; the element-wise expressions are those of stl-cli, the sums by
+// chunks of a fixed size reduced in a fixed tree, chunks added in order on
+// the host.
+// ---------------------------------------------------------------------------
+
+// Standardised kappa = (f(x gs + gm) - km) / ks and its derivative dk = f'
+// gs / ks, f the monotone cubic of the knots (kx, ky, kd), linear beyond the
+// ends (kappa::Monotone::eval, kappa::Transform::apply).
+extern "C" __global__ void kappa_pchip(
+    const double* x, i64 n, const double* kx, const double* ky, const double* kd, int nk,
+    double gm, double gs, double km, double ks, double* k, double* dk)
+{
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double t = x[i] * gs + gm;
+    double v, dv;
+    if (t <= kx[0]) {
+        v = ky[0] + kd[0] * (t - kx[0]);
+        dv = kd[0];
+    } else if (t >= kx[nk - 1]) {
+        v = ky[nk - 1] + kd[nk - 1] * (t - kx[nk - 1]);
+        dv = kd[nk - 1];
+    } else {
+        int lo = 0, hi = nk;
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
+            if (kx[mid] <= t) lo = mid + 1; else hi = mid;
+        }
+        int j = lo - 1;
+        double h = kx[j + 1] - kx[j];
+        double u = (t - kx[j]) / h;
+        double y0 = ky[j], y1 = ky[j + 1], d0 = kd[j] * h, d1 = kd[j + 1] * h;
+        double u2 = u * u, u3 = u * u * u;
+        v = (2.0 * u3 - 3.0 * u2 + 1.0) * y0 + (u3 - 2.0 * u2 + u) * d0 + (3.0 * u2 - 2.0 * u3) * y1 + (u3 - u2) * d1;
+        double w = (6.0 * u2 - 6.0 * u) * (y0 - y1) + (3.0 * u2 - 4.0 * u + 1.0) * d0 + (3.0 * u2 - 2.0 * u) * d1;
+        dv = w / h;
+    }
+    k[i] = (v - km) / ks;
+    dk[i] = dv * gs / ks;
+}
+
+// Parents of a pyramid level: out[r * n + j] = (c0 + c1 + c2 + c3) / 4 over
+// the children x[r * x_stride + 4 j + .] (level_power::pyramid).
+extern "C" __global__ void quad_mean(const double* x, i64 x_stride, i64 n, int R, double* out) {
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * (i64)R) return;
+    i64 j = t % n;
+    int r = (int)(t / n);
+    const double* c = x + (i64)r * x_stride + 4 * j;
+    out[t] = (c[0] + c[1] + c[2] + c[3]) / 4.0;
+}
+
+// Partial sums of the details d_j = xn[r, j] - xp[r, j / 4] of one level
+// over chunks of `chunk` cells: out[(r * n_chunks + c) * 2 + {0, 1}] =
+// (sum d^2, sum d^4) over chunk c of row r, in a fixed tree.  Grid (n_chunks, R).
+extern "C" __global__ void detail_moments(
+    const double* xn, i64 xn_stride, const double* xp, i64 xp_stride, i64 n, i64 chunk, double* out)
+{
+    __shared__ double s2[256], s4[256];
+    int r = blockIdx.y;
+    i64 c = blockIdx.x, n_chunks = gridDim.x;
+    i64 lo = c * chunk, hi = lo + chunk < n ? lo + chunk : n;
+    const double* a = xn + (i64)r * xn_stride;
+    const double* p = xp + (i64)r * xp_stride;
+    double t2 = 0.0, t4 = 0.0;
+    for (i64 j = lo + threadIdx.x; j < hi; j += blockDim.x) {
+        double d = a[j] - p[j >> 2];
+        t2 += d * d;
+        t4 += d * d * d * d;
+    }
+    s2[threadIdx.x] = t2;
+    s4[threadIdx.x] = t4;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            s2[threadIdx.x] += s2[threadIdx.x + s];
+            s4[threadIdx.x] += s4[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out[((i64)r * n_chunks + c) * 2] = s2[0];
+        out[((i64)r * n_chunks + c) * 2 + 1] = s4[0];
+    }
+}
+
+// Level-power gradient: g[r, i] += sum_{n < L} coef[r L + n] (lv[n][r, i >> 2n]
+// - lv[n + 1][r, i >> 2(n + 1)]), summed from 0 in level order (the gradient
+// of level_power::loss_and_grad, then added to g).  lv: L + 1 level
+// addresses (lv[0] the map), ls their row strides.
+extern "C" __global__ void level_power_grad(const u64* lv, const i64* ls, int L, const double* coef, i64 len, int R, double* g) {
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= len * (i64)R) return;
+    i64 i = t % len;
+    int r = (int)(t / len);
+    double acc = 0.0;
+    for (int n = 0; n < L; n++) {
+        const double* a = (const double*)lv[n] + (i64)r * ls[n];
+        const double* p = (const double*)lv[n + 1] + (i64)r * ls[n + 1];
+        double d = a[i >> (2 * n)] - p[i >> (2 * (n + 1))];
+        acc += coef[(i64)r * L + n] * d;
+    }
+    g[t] += acc;
+}
+
+// Kurtosis gradient: g4[r, i] = sum over the term's levels k (level lev[k]
+// = n) of coef (d^3 - c - K V d) at the level-n detail d of pixel i, c the
+// mean of d^3 over its 4 siblings, cf[(r T + k) * 3 + {0, 1, 2}] = (coef,
+// K, V) (kurtosis::loss_and_grad); then g[r, i] += g4 dk[r, i] (dk null:
+// g4).  lv, ls as level_power_grad, down to the deepest level of the term + 1.
+extern "C" __global__ void kurtosis_grad(
+    const u64* lv, const i64* ls, const int* lev, int T, const double* cf, i64 len, int R, const double* dk, double* g)
+{
+    i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= len * (i64)R) return;
+    i64 i = t % len;
+    int r = (int)(t / len);
+    double acc = 0.0;
+    for (int k = 0; k < T; k++) {
+        int n = lev[k];
+        const double* a = (const double*)lv[n] + (i64)r * ls[n];
+        const double* p = (const double*)lv[n + 1] + (i64)r * ls[n + 1];
+        i64 j = i >> (2 * n);
+        i64 j0 = j & ~(i64)3;
+        double pv = p[j >> 2];
+        double e0 = a[j0] - pv, e1 = a[j0 + 1] - pv, e2 = a[j0 + 2] - pv, e3 = a[j0 + 3] - pv;
+        double c = (e0 * e0 * e0 + e1 * e1 * e1 + e2 * e2 * e2 + e3 * e3 * e3) / 4.0;
+        double d = a[j] - pv;
+        const double* q = cf + ((i64)r * T + k) * 3;
+        acc += q[0] * (d * d * d - c - q[1] * q[2] * d);
+    }
+    g[t] += dk ? acc * dk[t] : acc;
+}
+
+// g[i] += a[i] b[i] (b null: a[i]).
+extern "C" __global__ void add_product(double* g, const double* a, const double* b, i64 n) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    g[i] += b ? a[i] * b[i] : a[i];
+}
+
+// Pixel marginal of one row: q-th smallest value at pixel perm[q], d =
+// x[perm[q]] - t[q], g[perm[q]] += coef d (marginal::loss_and_grad, coef = 2
+// w / N); out[c] = sum of d^2 over chunk c of positions, in a fixed tree.
+extern "C" __global__ void marginal_row(const double* x, const u32* perm, const double* tsorted, i64 n, double coef, i64 chunk, double* g, double* out) {
+    __shared__ double s[256];
+    i64 c = blockIdx.x;
+    i64 lo = c * chunk, hi = lo + chunk < n ? lo + chunk : n;
+    double acc = 0.0;
+    for (i64 q = lo + threadIdx.x; q < hi; q += blockDim.x) {
+        u32 p = perm[q];
+        double d = x[p] - tsorted[q];
+        acc += d * d;
+        g[p] += coef * d;
+    }
+    s[threadIdx.x] = acc;
+    __syncthreads();
+    for (int h = blockDim.x / 2; h > 0; h >>= 1) {
+        if (threadIdx.x < h) s[threadIdx.x] += s[threadIdx.x + h];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[c] = s[0];
+}
+
+// Stable LSD radix sort of f64 values (8-bit digits, 8 passes): tiles of
+// RS_TILE keys, per-tile digit counts, an exclusive scan of the counts
+// (digit-major), and a stable scatter.  The keys order as f64::total_cmp;
+// the payload is the index, so ties keep the index order.
+#define RS_ITEMS 8
+#define RS_TILE (256 * RS_ITEMS)
+
+extern "C" __global__ void rs_init(const double* x, i64 n, u64* keys, u32* vals) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    u64 b = (u64)__double_as_longlong(x[i]);
+    keys[i] = (b >> 63) ? ~b : (b | 0x8000000000000000ULL);
+    vals[i] = (u32)i;
+}
+
+// hist[d * n_tiles + tile] = number of keys of the tile with digit d.  One block of 256 per tile.
+extern "C" __global__ void rs_hist(const u64* keys, i64 n, int shift, u32* hist) {
+    __shared__ u32 counts[256];
+    i64 tile = blockIdx.x, n_tiles = gridDim.x;
+    counts[threadIdx.x] = 0;
+    __syncthreads();
+    for (int k = 0; k < RS_ITEMS; k++) {
+        i64 i = tile * RS_TILE + (i64)k * 256 + threadIdx.x;
+        if (i < n) atomicAdd(&counts[(keys[i] >> shift) & 255], 1u);
+    }
+    __syncthreads();
+    hist[(i64)threadIdx.x * n_tiles + tile] = counts[threadIdx.x];
+}
+
+// Exclusive scan in place by blocks of 1024 (256 threads x 4), the block
+// totals to sums[block] (sums null: dropped).
+extern "C" __global__ void scan_block(u32* a, i64 n, u32* sums) {
+    __shared__ u32 s[256];
+    i64 base = (i64)blockIdx.x * 1024 + threadIdx.x * 4;
+    u32 v[4], tot = 0;
+    for (int k = 0; k < 4; k++) {
+        v[k] = base + k < n ? a[base + k] : 0;
+        tot += v[k];
+    }
+    s[threadIdx.x] = tot;
+    __syncthreads();
+    for (int off = 1; off < 256; off <<= 1) {
+        u32 add = threadIdx.x >= off ? s[threadIdx.x - off] : 0;
+        __syncthreads();
+        s[threadIdx.x] += add;
+        __syncthreads();
+    }
+    u32 run = s[threadIdx.x] - tot;
+    for (int k = 0; k < 4; k++) {
+        if (base + k < n) a[base + k] = run;
+        run += v[k];
+    }
+    if (threadIdx.x == 255 && sums) sums[blockIdx.x] = s[255];
+}
+
+// a[i] += offs[i / 1024].
+extern "C" __global__ void scan_add(u32* a, i64 n, const u32* offs) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] += offs[i >> 10];
+}
+
+// Stable scatter of a tile: rounds of 256 keys (one per thread, in index
+// order); the rank of a key among the tile's keys of its digit = the
+// earlier rounds + the lower warps of its round + the lower lanes of its
+// warp (match_any); its position adds the scanned count of the tile.
+extern "C" __global__ void rs_scatter(const u64* kin, const u32* vin, i64 n, int shift, const u32* offs, u64* kout, u32* vout) {
+    __shared__ u32 base[256];
+    __shared__ u32 wc[8][257];
+    int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    i64 tile = blockIdx.x, n_tiles = gridDim.x;
+    base[tid] = offs[(i64)tid * n_tiles + tile];
+    for (int w = 0; w < 8; w++) wc[w][tid] = 0;
+    __syncthreads();
+    for (int k = 0; k < RS_ITEMS; k++) {
+        i64 i = tile * RS_TILE + (i64)k * 256 + tid;
+        bool valid = i < n;
+        u64 key = valid ? kin[i] : 0;
+        int d = valid ? (int)((key >> shift) & 255) : 256;
+        unsigned peers = __match_any_sync(0xffffffffu, d);
+        int below = __popc(peers & ((1u << lane) - 1u));
+        if (valid && below == 0) wc[warp][d] = __popc(peers);
+        __syncthreads();
+        if (valid) {
+            u32 pos = base[d] + below;
+            for (int w = 0; w < warp; w++) pos += wc[w][d];
+            kout[pos] = key;
+            vout[pos] = vin[i];
+        }
+        __syncthreads();
+        u32 sum = 0;
+        for (int w = 0; w < 8; w++) {
+            sum += wc[w][tid];
+            wc[w][tid] = 0;
+        }
+        base[tid] += sum;
+        __syncthreads();
+    }
+}
