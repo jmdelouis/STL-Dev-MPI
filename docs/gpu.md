@@ -159,8 +159,7 @@ the coefficient partial sums (chunked tree); block boundaries.
 
 ### 2.6b The objective's terms on the device (`--gpu-terms device`)
 
-With one rank per group of members (the case of every single-device
-run), `stl-synth --gpu` evaluates the whole objective on the device
+`stl-synth --gpu` evaluates the whole objective on the device
 (`stl-cli/src/device_terms.rs`, kernels in `stl_gpu::terms`), not only
 the statistics' sweeps:
 
@@ -191,8 +190,15 @@ up again for kappa's derivative afterwards, and the sort's buffers live
 between the sweeps; the engine's memory budget, hence its cache, is the
 host path's. Transfers go through a page-locked buffer (maps up twice,
 gradient down twice and up once per evaluation with the kappa
-statistics). `--gpu-terms host`, several ranks per group, `--minkowski-weight`
-or `--freeze-nside` keep the host path.
+statistics). With several ranks per group every rank works on its owned
+slice (copied to and from the engine's layout on the device), the
+pyramid's moments are summed over the ranks, and the marginal sorts each
+member's slice on the device and merges the ranks' orders on the host
+(the distributed sample sort without its local sort). `--gpu-terms host`,
+`--minkowski-weight` or `--freeze-nside` keep the host path.
+`STL_GPU_PHASE_SYNC=0` drops the engine's synchronisation at the end of
+every phase (the phase timers then count launches only): measured gains
+are below 1.5 % (§5.3), so it stays on.
 
 L-BFGS (`stl_core::lbfgs`) runs its vector operations (dot products,
 axpy, the line points, copies) on the host threads by chunks of 65 536
@@ -282,7 +288,7 @@ All tests run on both devices above with identical results.
 | `stats`: wavelet fields recomputed per block vs kept (`--gpu-fields`), the 8 fixtures, both geometry forms, 1 to 333 device blocks per level, the full plan and a mean / var / S1 / S2 plan, three evaluations (laptop) | identical to the bit (values, variances, stored moduli, map cotangents of every level) |
 | the whole `stl-gpu` suite with `STL_GPU_FIELDS=keep` and `=recompute` (laptop) | all pass |
 | `terms`: the device radix sort vs a host sort by value then index (sizes 1 to 2^20 around the tile and scan boundaries, ties, signed zeros, extremes); pyramid, level-power and kurtosis gradients (with and without the kappa chain), marginal, `g += a b` vs the host expressions; staged transfers (laptop) | sort: the same permutation; gradients and marginal identical to the bit; moments and marginal loss <= 1e-13 relative |
-| `stl-cli` `device_objective_matches_host_terms`: the device objective vs the host terms on the same sweeps, nside 64, 2 members, every term (ensemble with scatter, level power, marginal, kappa statistics, kurtosis of kappa), two maps (laptop) | kappa transform identical to the bit; loss identical at 16 digits, gradient <= 1.9e-16 of its maximum |
+| `stl-cli` `device_objective_matches_host_terms`: the device objective vs the host terms on the same sweeps, nside 64, 2 members, every term (ensemble with scatter, level power, marginal, kappa statistics, kurtosis of kappa), two maps, 1 and 3 thread ranks sharing the device (laptop) | kappa transform identical to the bit; loss identical at 16 digits, gradient <= 1.2e-16 of its maximum |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
 | `synthesis`: WebSky kappa nside 64, 20 L-BFGS iterations (25 evaluations), `STL_RANKS` 1, 2, 3 | 25 / 25 loss values identical to STL-Dev at the printed precision, max relative difference 1.5e-12 to 1.8e-11 |
@@ -596,6 +602,33 @@ engine's fields during the sweeps (cceca63) they get the host path's
 cache again. L-BFGS on 12 threads takes a quarter of its single-thread
 time. What is left, 100 s of the 107 s, is the engine's sweeps.
 
+Device occupancy during the evaluations alone (feb832c, `nvidia-smi`
+every 2 s, setup excluded; `benchmarks/terms/t4/*_feb832c.json`): the T4
+is busy 95.4 % of the time at 1024 x 10 with the device terms (107.6 s
+per evaluation). Without the per-phase synchronisation
+(`STL_GPU_PHASE_SYNC=0`) 106.1 s and 95.7 %: the device is saturated.
+
+nside 2048 x 5 over the three T4 of garoupe (3 thread ranks, one T4
+each, 4 host threads per rank, 13.3-13.7 GB per T4, the same terms with
+`--kurtosis-nside 32-2048` and `knots2048.npy`), 4 evaluations:
+
+| | host terms | device terms | device terms, no phase sync |
+|---|---|---|---|
+| s / evaluation | 184.7 | 134.6 | 134.3 |
+| device busy during the evaluations | 49.5 % | 68.7 % | 68.9 % |
+| marginal | 30.1 | 16.9 | 17.6 |
+| kurtosis, kappa transform, level power | 20.2 | 0.6 | 0.6 |
+| copies to and from the engine's layout, transfers | 8.9 | 1.7 | 1.7 |
+| L-BFGS | 2.7 | 2.0 | 2.0 |
+
+The losses of the three runs are identical at every evaluation to 2e-16.
+With several ranks the device waits for what still crosses the host: the
+merge of the ranks' orders in the marginal (17 s; the local sorts are on
+the devices) and the engine's halo exchanges, which copy whole level
+fields through the host (decimations 11.6 s, reverse exchanges 8.2 s,
+load 4.6 s per evaluation). A single-rank run, as the production runs on
+one A100, has neither.
+
 ## 6. Limitations and next steps
 
 - **FP64 throughput.** On the T4 the stencil kernel (interpolation of
@@ -625,7 +658,9 @@ time. What is left, 100 s of the 107 s, is the engine's sweeps.
   synchronisation at the end of every phase are the next.
 - **Exchanges** copy whole level fields between device and host (MPI is
   not CUDA-aware on garoupe): packing only the halo cells on the device
-  would cut the transfers by the halo fraction.
+  would cut the transfers by the halo fraction. At nside 2048 x 5 over
+  three T4 they cost 24 s of the 135 s of an evaluation (§5.3), with the
+  marginal's merge of the ranks' orders on the host (17 s).
 - **Setup** on the host: `build_partition` (CPU code of stl-mpi) and the
   decimation rows dominate on garoupe's 12 slow cores (1 to 5 minutes at
   nside 1024 to 2048); both could move to the device.
