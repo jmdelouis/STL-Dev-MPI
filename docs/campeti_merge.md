@@ -17,6 +17,10 @@ is superseded).  Branch `claude/campeti-merge-19032c`:
 | 244c99c | `python/stl_ensemble`: his Python as delivered (the reference) |
 | 4f3668c | `stl-core::sht` and `fixtures/ensemble` (his Python on the CPU bridge) |
 | 82189c2 | `stl-ensemble`: his objective in Rust (`crates/stl-cli/src/ensemble`) |
+| 5c925f4 | Minkowski states kept between the passes; timings on garoupe |
+
+Full run at nside 128 (ten members, 2500 iterations, 3 T4): 2 h 34 min,
+loss 61.8 to 0.625 (section 8.5).
 
 `stl-ensemble` (section 8 of this note: usage, validation, timings) runs his
 method without Python: `calibrate` builds the LUT and the targets from any
@@ -336,8 +340,58 @@ recomputes them as the source) and the 65 Gaussians of a pixel come from
 a recurrence (results unchanged to 1e-13, section 8.3).  Peak device memory
 2 GB on one T4 (batch 10), host 0.65 GB.
 
-Full run as his (`--niter 2500 --max-eval 50000`, 3 T4, `--groups 5`):
-started 30 Oct 19:23, garoupe /tmp/jmdeloui-campeti/runs/full128.
+Full run as his (`--niter 2500 --max-eval 50000`, 3 T4, `--groups 5`,
+`STL_THREADS=2`; garoupe /tmp/jmdeloui-campeti/runs/full128, revision
+5c925f4): **2 h 34 min** wall clock (30 Oct 19:23 to 21:57, setup 10 s),
+2869 evaluations at 3.10 s, exit status 0, no device error.  It stopped on
+the 2500-iteration limit (1.15 evaluations per iteration): the loss still
+fell by about 4e-4 per evaluation at the end, so none of the tolerance tests
+(`gtd`, gradient 1e-12, step or loss change 1e-15) can have fired.  The
+loss went from 61.81 to 0.625; the last value is the lowest (the 279 rises
+of `loss_history` are line-search trials).  Peak device memory 2.8 GB (max
+over the ranks, two ranks on each of two T4), host 0.53 GB per rank.
+Time per evaluation (rank 0, two members): Minkowski functionals 1.72 s
+(forward 1.11, reverse 0.62; 56 %), Gaussian SC 0.56 s, physical SC
+0.42 s, C_l and PDF 0.34 s, host chain and physical map 0.04 s.
+
+Final blocks (`blocks_final` of `ens.json`):
+
+| Block | Loss | Mean term | Variance term |
+|---|---|---|---|
+| Gaussian SC | 2.611 | 2.221 | 0.389 |
+| Physical SC | 0.412 | 0.282 | 0.131 |
+| C_l | 0.0080 | 0.0066 | 0.0014 |
+| PDF | 0.0156 | 0.0104 | 0.0052 |
+| Minkowski | 0.0801 | 0.0710 | 0.0091 |
+
+The ten final physical maps against the ten references at nside 128 (plain
+block means of r000-r009, the maps the targets come from: a training-set
+check, not a validation; z is the difference of the two means over its
+standard error):
+
+| Statistic | Members (mean +- sd) | References (mean +- sd) | z | sd ratio |
+|---|---|---|---|---|
+| std | 3.315e-4 +- 2.2e-5 | 3.308e-4 +- 2.4e-5 | 0.07 | 0.93 |
+| skewness | 12.9 +- 2.0 | 11.3 +- 1.1 | 2.1 | 1.8 |
+| excess kurtosis | 452 +- 176 | 287 +- 75 | 2.7 | 2.3 |
+| quantile 0.001 | -1.999e-4 +- 1.2e-5 | -1.918e-4 +- 1.2e-5 | -1.5 | 0.97 |
+| quantile 0.01 | -1.831e-4 +- 9.9e-6 | -1.802e-4 +- 1.1e-5 | -0.6 | 0.86 |
+| median | -8.30e-5 +- 6.5e-6 | -8.20e-5 +- 6.2e-6 | -0.4 | 1.05 |
+| quantile 0.99 | 1.255e-3 +- 9.1e-5 | 1.252e-3 +- 9.8e-5 | 0.05 | 0.93 |
+| quantile 0.999 | 3.77e-3 +- 2.1e-4 | 3.82e-3 +- 2.8e-4 | -0.4 | 0.76 |
+| minimum | -2.334e-4 +- 7.4e-6 | -2.046e-4 +- 1.2e-5 | -6.6 | 0.64 |
+| maximum | 2.52e-2 +- 3.3e-3 | 1.99e-2 +- 3.5e-3 | 3.4 | 0.92 |
+
+The bulk (std, quantiles 0.001 to 0.999) is within the scatter of the
+references.  The extremes are wider: the minima are lower than the
+references' (beyond its extreme knots the LUT extrapolates linearly in
+Gaussian coordinates, and his method adds no clipping, by design), and the
+few brightest pixels push skewness and kurtosis up; a handful of pixels
+per map weigh little in the five blocks.  His package has
+no nside-128 result to compare with: his `VALIDATION_REPORT.md` states that
+no native128 scientific run was made (the TRAIN54 maps were absent), and
+his earlier FOSCAT runs used another engine (7x7 kernel, 8 orientations,
+SciPy L-BFGS-B up to 8000 iterations).
 
 ### 8.6 What remains
 
