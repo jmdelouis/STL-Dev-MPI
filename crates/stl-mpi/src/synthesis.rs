@@ -211,7 +211,10 @@ impl<'a, C: Comm> Objective<'a, C> {
         let start = Instant::now();
         if let Some(ev) = &self.evaluator {
             let mut ev = ev.borrow_mut();
-            let (values, _) = ev.forward(&self.halo, &self.to_layout(x), false);
+            let layout = self.to_layout(x);
+            self.tick("host_to_layout", start);
+            let (values, _) = ev.forward(&self.halo, &layout, false);
+            drop(layout);
             self.tick("forward", start);
             let (loss, cotangent) = loss(&values);
             let start = Instant::now();
@@ -221,10 +224,13 @@ impl<'a, C: Comm> Objective<'a, C> {
             if s == e {
                 return (loss, Vec::new());
             }
+            let start = Instant::now();
             let layout = &self.part.layouts[0];
             let len = (e - s) as usize;
             let p0 = layout.pos(s);
             let owned: Vec<f64> = g0.chunks(layout.len()).flat_map(|row| row[p0..p0 + len].iter().copied()).collect();
+            drop(g0);
+            self.tick("host_owned_gradient", start);
             return (loss, owned);
         }
         let mut engine =

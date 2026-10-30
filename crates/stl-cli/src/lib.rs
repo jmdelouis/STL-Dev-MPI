@@ -13,7 +13,7 @@ use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Family};
 use stl_core::stencil::Gauge;
 use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
-use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, Objective};
+use stl_mpi::synthesis::{ergodic_weights, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
 mod kappa;
@@ -707,55 +707,86 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             println!("[rust-local P={}] evaluation {:4}  loss = {loss:.6e}  t = {t:7.1} s", comm.size(), i + 1);
         }
     };
+    // Wall time of every part of an evaluation (host_*: the terms with their
+    // gradient accumulation, the objectives with their device sweeps).
+    let host_timers: std::cell::RefCell<std::collections::BTreeMap<&'static str, f64>> = Default::default();
+    let tick = |name: &'static str, since: Instant| *host_timers.borrow_mut().entry(name).or_default() += since.elapsed().as_secs_f64();
     let history = if args.niter == 0 {
         Vec::new()
     } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() && freeze.is_none() {
-        run_lbfgs(&obj, &mut x, &opts, print)
+        let f = |p: &[f64]| {
+            let t = Instant::now();
+            let out = obj.loss_and_grad(p);
+            tick("host_evaluations", t);
+            out
+        };
+        run_lbfgs_with(comm, &mut x, &opts, f, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
+            let t_eval = Instant::now();
+            let t = Instant::now();
             let (mut loss, mut g) = if members == 1 { obj.loss_and_grad(p) } else { ens.loss_and_grad(p) };
+            tick("host_synthesis_objective", t);
             if let Some(lp) = &level_power {
+                let t = Instant::now();
                 let (l2, g2) = lp.loss_and_grad(p, e - s, gcomm, cross.as_ref());
                 loss += l2;
                 g.iter_mut().zip(&g2).for_each(|(a, b)| *a += b);
+                tick("host_level_power", t);
             }
             if let Some(mg) = &marginal {
+                let t = Instant::now();
                 let (lm, gm) = mg.loss_and_grad(p, e - s, s, gcomm, cross.as_ref());
                 loss += lm;
                 g.iter_mut().zip(&gm).for_each(|(a, b)| *a += b);
+                tick("host_marginal", t);
             }
             // Terms on kappa = f(g): cotangent on kappa, chained by f'(g).
+            let t = Instant::now();
             let kd = match &kappa_tf {
                 Some(tf) if kens.is_some() || kurtosis.is_some() || minkowski.is_some() => Some(tf.apply(p)),
                 _ => None,
             };
+            tick("host_kappa_transform", t);
             if let (Some((k, dk)), Some(ke)) = (&kd, &kens) {
+                let t = Instant::now();
                 let (lk, gk) = ke.loss_and_grad(k);
                 loss += lk;
                 g.iter_mut().zip(gk.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d);
+                tick("host_kappa_objective", t);
             }
             if let Some(ku) = &kurtosis {
+                let t = Instant::now();
                 let (l4, g4) = ku.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
                 loss += l4;
                 match &kd {
                     Some((_, dk)) => g.iter_mut().zip(g4.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
                     None => g.iter_mut().zip(&g4).for_each(|(a, b)| *a += b),
                 }
+                tick("host_kurtosis", t);
             }
             if let Some(mk) = &minkowski {
+                let t = Instant::now();
                 let (l5, g5) = mk.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
                 loss += l5;
                 match &kd {
                     Some((_, dk)) => g.iter_mut().zip(g5.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
                     None => g.iter_mut().zip(&g5).for_each(|(a, b)| *a += b),
                 }
+                tick("host_minkowski", t);
             }
             project(&mut g);
+            drop(kd);
+            tick("host_evaluations", t_eval);
             (loss, g)
         };
         run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
     };
     let seconds = started.elapsed().as_secs_f64();
+    // L-BFGS: what the evaluations leave of the run (two-loop recursion,
+    // line search, copies of the variable).
+    let lbfgs_seconds = seconds - host_timers.borrow().get("host_evaluations").copied().unwrap_or(0.0);
+    host_timers.borrow_mut().insert("host_lbfgs", lbfgs_seconds);
     let calls_after = obj.exchange_calls();
     let per_eval = |a: u64, b: u64| ((b - a) as f64 / history.len().max(1) as f64 * 10.0).round() / 10.0;
     let mpi_calls = serde_json::json!({
@@ -907,6 +938,9 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // one engine) and memory.
     let (device_timers, device_memory) = obj.evaluator_report();
     for (k, v) in device_timers {
+        timers.insert(k.to_string(), serde_json::json!((v * 100.0).round() / 100.0));
+    }
+    for (k, v) in host_timers.borrow().iter() {
         timers.insert(k.to_string(), serde_json::json!((v * 100.0).round() / 100.0));
     }
     let device_peaks = comm.allgather_i64(device_memory.map_or(0, |m| m.0 as i64));

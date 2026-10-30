@@ -789,6 +789,7 @@ impl<'a> GpuEngine<'a> {
     /// Loads the level-0 field `x` `[B, C, |layout 0|]` (owned cells read),
     /// exchanges its halo and decimates it to every level.
     pub fn load(&mut self, ex: &dyn Exchange, x: &[f64]) {
+        let started = Instant::now();
         let bc = self.batch * self.channels;
         assert_eq!(x.len(), bc * self.held(0));
         let mut x0 = self.gpu.upload(x);
@@ -809,6 +810,7 @@ impl<'a> GpuEngine<'a> {
             self.halo(ex, d + 1, &mut next, bc);
             self.maps.push(next);
         }
+        self.tick("gpu_load", started);
     }
 
     /// `maps[n]` on the host.
@@ -1562,7 +1564,10 @@ impl Evaluator for GpuEvaluator<'_> {
         assert_eq!(e.holder, self.id, "gradient without the forward sweep of this evaluator");
         let mg = e.reverse(ex, &self.plan, cotangent);
         let g0 = e.analysis_vjp(ex, mg);
-        e.gpu.download(&g0)
+        let started = Instant::now();
+        let out = e.gpu.download(&g0);
+        e.tick("gpu_download", started);
+        out
     }
 
     /// The engine's phases (of every evaluator sharing it).
