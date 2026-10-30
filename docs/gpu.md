@@ -629,6 +629,35 @@ fields through the host (decimations 11.6 s, reverse exchanges 8.2 s,
 load 4.6 s per evaluation). A single-rank run, as the production runs on
 one A100, has neither.
 
+hpc, one A100-SXM4-80GB, nside 2048 x 10 with the options of the
+production step (`--level-power-weight 10 --marginal-weight 10000
+--kappa-table --kappa-weight 0.1 --kurtosis-weight 1.0 --kurtosis-nside
+32-2048 --scatter-weight 1`), members started from the nside-1024
+syntheses (as job 2404157), 2 iterations (3 evaluations), 6 host threads,
+wavelet fields recomputed (`auto`), job 2423067 (4d10f1f):
+
+| | host terms | device terms |
+|---|---|---|
+| s / evaluation | 333.7 | 61.7 |
+| device busy during the evaluations | 16.2 % | 90.6 % |
+| peak GB (cache) | 67.5 (22.3) | 67.9 (22.3) |
+| synthesis objective | 130.6 | 44.6 |
+| kappa objective | 94.8 | 11.8 |
+| copies to the engine's layout | 84.2 | (none) |
+| marginal | 62.1 | 0.5 |
+| kappa transform | 23.3 | 0.2 |
+| kurtosis | 11.3 | 0.07 |
+| level power | 9.3 | (< 0.05) |
+| gradient download and copy, transfers | 2.0 | 2.1 |
+| L-BFGS | 1.9 | 2.3 |
+
+The evaluation is 5.4 times faster and the device busy 91 % of the time
+instead of 16 %; the losses agree to 1e-15 relative and the peak memory
+is the same (the engine's budget, hence its cache, is unchanged). The
+host terms' work, about 270 s per evaluation, becomes 3 s; the engine's sweeps (31 +
+39 s of the 62 s) are what is left. Setup (topology, target statistics,
+initial maps) takes 330 s in both, once per run.
+
 ## 6. Limitations and next steps
 
 - **FP64 throughput.** On the T4 the stencil kernel (interpolation of
@@ -648,9 +677,9 @@ one A100, has neither.
   H_0` doubles); pushing each block's moduli down the decimation chain as
   the CPU pieces do would remove it, and freeing `m[d][n]` once the
   reverse sweep has passed level `n` would lower the reverse peak too.
-- **Host work.** At nside 2048 the A100 was busy 11 to 14 % of the time
-  with the objective's terms on the host (§5.2); they now run on the
-  device (§5.3). L-BFGS stays on the host (its history, 2 x 10 x 4 GB at
+- **Host work.** At nside 2048 the A100 was busy 11 to 16 % of the time
+  with the objective's terms on the host (§5.2, §5.3); they now run on the
+  device and it is busy 91 % of the time (§5.3). L-BFGS stays on the host (its history, 2 x 10 x 4 GB at
   nside 2048 x 10, does not fit next to the fields): its two-loop
   recursion reads the history twice per iteration on the host threads.
   The engine's own host work (contribution lists of the coefficient
