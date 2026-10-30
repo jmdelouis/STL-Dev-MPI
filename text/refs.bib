@@ -1,0 +1,802 @@
+@preamble{ "\providecommand{\aap}{A\&A}\providecommand{\apj}{ApJ}\providecommand{\apjl}{ApJL}\providecommand{\mnras}{MNRAS}\providecommand{\prd}{Phys.~Rev.~D}\providecommand{\pasp}{PASP}\providecommand{\apjs}{ApJS}" }
+
+% refs.bib -- bibliography for the STL-Dev-MPI paper (A&A, natbib author-year).
+% Every entry was checked on 2026-10-27 against the publisher DOI record
+% (Crossref / doi.org), arXiv, NASA ADS-style journal references, or the
+% software's own repository / package registry. Fields that could not be
+% confirmed were left out.
+
+% ======================================================================
+% HEALPix / tools
+% ======================================================================
+
+@article{gorski2005,
+  author        = {G{\'o}rski, K. M. and Hivon, E. and Banday, A. J. and Wandelt, B. D. and Hansen, F. K. and Reinecke, M. and Bartelmann, M.},
+  title         = {{HEALPix}: a framework for high-resolution discretization and fast analysis of data distributed on the sphere},
+  journal       = {\apj},
+  year          = {2005},
+  volume        = {622},
+  number        = {2},
+  pages         = {759--771},
+  doi           = {10.1086/427976},
+  eprint        = {astro-ph/0409513},
+  archivePrefix = {arXiv}
+}
+
+@article{zonca2019,
+  author        = {Zonca, Andrea and Singer, Leo P. and Lenz, Daniel and Reinecke, Martin and Rosset, Cyrille and Hivon, Eric and Gorski, Krzysztof M.},
+  title         = {healpy: equal area pixelization and spherical harmonics transforms for data on the sphere in {Python}},
+  journal       = {Journal of Open Source Software},
+  year          = {2019},
+  volume        = {4},
+  number        = {35},
+  pages         = {1298},
+  doi           = {10.21105/joss.01298}
+}
+
+@article{harris2020,
+  author        = {Harris, Charles R. and Millman, K. Jarrod and van der Walt, St{\'e}fan J. and Gommers, Ralf and Virtanen, Pauli and others},
+  title         = {Array programming with {NumPy}},
+  journal       = {Nature},
+  year          = {2020},
+  volume        = {585},
+  number        = {7825},
+  pages         = {357--362},
+  doi           = {10.1038/s41586-020-2649-2},
+  eprint        = {2006.10256},
+  archivePrefix = {arXiv}
+}
+
+@article{virtanen2020,
+  author        = {Virtanen, Pauli and Gommers, Ralf and Oliphant, Travis E. and Haberland, Matt and Reddy, Tyler and others},
+  title         = {{SciPy} 1.0: fundamental algorithms for scientific computing in {Python}},
+  journal       = {Nature Methods},
+  year          = {2020},
+  volume        = {17},
+  number        = {3},
+  pages         = {261--272},
+  doi           = {10.1038/s41592-019-0686-2},
+  eprint        = {1907.10121},
+  archivePrefix = {arXiv}
+}
+
+@article{hunter2007,
+  author        = {Hunter, John D.},
+  title         = {{Matplotlib}: a {2D} graphics environment},
+  journal       = {Computing in Science \& Engineering},
+  year          = {2007},
+  volume        = {9},
+  number        = {3},
+  pages         = {90--95},
+  doi           = {10.1109/MCSE.2007.55}
+}
+
+@inproceedings{paszke2019,
+  author        = {Paszke, Adam and Gross, Sam and Massa, Francisco and Lerer, Adam and Bradbury, James and others},
+  title         = {{PyTorch}: an imperative style, high-performance deep learning library},
+  booktitle     = {Advances in Neural Information Processing Systems},
+  editor        = {Wallach, H. and Larochelle, H. and Beygelzimer, A. and d'Alch{\'e}-Buc, F. and Fox, E. and Garnett, R.},
+  volume        = {32},
+  publisher     = {Curran Associates, Inc.},
+  year          = {2019},
+  url           = {https://proceedings.neurips.cc/paper_files/paper/2019/file/bdbca288fee7f92f2bfa9f7012727740-Paper.pdf},
+  eprint        = {1912.01703},
+  archivePrefix = {arXiv}
+}
+
+@misc{stldev,
+  author        = {{STL-Proj}},
+  title         = {{STL-Dev}: {Scattering Transform Library} (development repository)},
+  howpublished  = {\url{https://github.com/STL-Proj/STL-Dev}},
+  year          = {2025},
+  note          = {Public GitHub repository of the STL-Proj organisation, created in December 2025; documentation at \url{https://stl-dev.readthedocs.io}; accessed 2026 October 27}
+}
+
+@misc{foscat,
+  author        = {Delouis, Jean-Marc},
+  title         = {{FOSCAT}: generate synthetic {Healpix} or {2D} data using {Cross Scattering Transform}},
+  howpublished  = {\url{https://github.com/jmdelouis/FOSCAT}},
+  year          = {2022},
+  note          = {Python package \texttt{foscat} on PyPI (\url{https://pypi.org/project/foscat/}), first released in 2022 (version 0.1); latest release 2026.6.1}
+}
+
+@misc{cudarc,
+  author        = {Lowman, Chelsea},
+  title         = {cudarc: safe and minimal {CUDA} bindings},
+  howpublished  = {\url{https://github.com/chelsea0x3b/cudarc}},
+  year          = {2026},
+  note          = {Rust crate \texttt{cudarc}, version 0.19.10 (\url{https://crates.io/crates/cudarc}); repository formerly at github.com/coreylowman/cudarc}
+}
+
+@misc{jax2018,
+  author        = {Bradbury, James and Frostig, Roy and Hawkins, Peter and Johnson, Matthew James and Katariya, Yash and Leary, Chris and Maclaurin, Dougal and Necula, George and Paszke, Adam and VanderPlas, Jake and Wanderman-Milne, Skye and Zhang, Qiao},
+  title         = {{JAX}: composable transformations of {P}ython+{N}um{P}y programs},
+  howpublished  = {\url{http://github.com/jax-ml/jax}},
+  year          = {2018},
+  note          = {Citation from the README of the repository}
+}
+
+@misc{rsmpi,
+  author        = {Steinbusch, Benedikt and Gaspar, Andrew and Brown, Jed},
+  title         = {rsmpi: {MPI} bindings for {Rust}},
+  howpublished  = {\url{https://github.com/rsmpi/rsmpi}},
+  year          = {2026},
+  note          = {Rust crate \texttt{mpi}, version 0.8.2 (\url{https://crates.io/crates/mpi})}
+}
+
+@misc{cdshealpix,
+  author        = {Pineau, Fran{\c c}ois-Xavier},
+  title         = {cdshealpix: the {CDS} {HEALPix} library in {Rust}},
+  howpublished  = {\url{https://github.com/cds-astro/cds-healpix-rust}},
+  year          = {2026},
+  note          = {Rust crate \texttt{cdshealpix}, version 0.10.1 (\url{https://crates.io/crates/cdshealpix}); Centre de Donn{\'e}es astronomiques de Strasbourg}
+}
+
+@misc{mpi41,
+  author        = {{Message Passing Interface Forum}},
+  title         = {{MPI}: A Message-Passing Interface Standard, Version 4.1},
+  howpublished  = {\url{https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report.pdf}},
+  year          = {2023},
+  month         = nov,
+  note          = {Approved by the MPI Forum on 2023 November 2}
+}
+
+@article{matsakis2014,
+  author        = {Matsakis, Nicholas D. and Klock, Felix S.},
+  title         = {The {Rust} language},
+  journal       = {ACM SIGAda Ada Letters},
+  year          = {2014},
+  volume        = {34},
+  number        = {3},
+  pages         = {103--104},
+  doi           = {10.1145/2692956.2663188}
+}
+
+% ======================================================================
+% Optimisation / numerics
+% ======================================================================
+
+@article{liu1989,
+  author        = {Liu, Dong C. and Nocedal, Jorge},
+  title         = {On the limited memory {BFGS} method for large scale optimization},
+  journal       = {Mathematical Programming},
+  year          = {1989},
+  volume        = {45},
+  pages         = {503--528},
+  doi           = {10.1007/BF01589116}
+}
+
+@book{nocedal2006,
+  author        = {Nocedal, Jorge and Wright, Stephen J.},
+  title         = {Numerical Optimization},
+  edition       = {2nd},
+  series        = {Springer Series in Operations Research and Financial Engineering},
+  publisher     = {Springer},
+  address       = {New York},
+  year          = {2006},
+  isbn          = {978-0-387-30303-1},
+  doi           = {10.1007/978-0-387-40065-5}
+}
+
+@article{wolfe1969,
+  author        = {Wolfe, Philip},
+  title         = {Convergence conditions for ascent methods},
+  journal       = {SIAM Review},
+  year          = {1969},
+  volume        = {11},
+  number        = {2},
+  pages         = {226--235},
+  doi           = {10.1137/1011036}
+}
+
+@book{griewank2008,
+  author        = {Griewank, Andreas and Walther, Andrea},
+  title         = {Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation},
+  edition       = {2nd},
+  publisher     = {Society for Industrial and Applied Mathematics (SIAM)},
+  address       = {Philadelphia},
+  year          = {2008},
+  isbn          = {978-0-89871-659-7},
+  doi           = {10.1137/1.9780898717761}
+}
+
+@article{fritsch1980,
+  author        = {Fritsch, F. N. and Carlson, R. E.},
+  title         = {Monotone piecewise cubic interpolation},
+  journal       = {SIAM Journal on Numerical Analysis},
+  year          = {1980},
+  volume        = {17},
+  number        = {2},
+  pages         = {238--246},
+  doi           = {10.1137/0717021}
+}
+
+@article{burt1983,
+  author        = {Burt, Peter J. and Adelson, Edward H.},
+  title         = {The {Laplacian} pyramid as a compact image code},
+  journal       = {IEEE Transactions on Communications},
+  year          = {1983},
+  volume        = {31},
+  number        = {4},
+  pages         = {532--540},
+  doi           = {10.1109/TCOM.1983.1095851}
+}
+
+@book{smith1996,
+  author        = {Smith, Barry F. and Bj{\o}rstad, Petter E. and Gropp, William D.},
+  title         = {Domain Decomposition: Parallel Multilevel Methods for Elliptic Partial Differential Equations},
+  publisher     = {Cambridge University Press},
+  address       = {Cambridge},
+  year          = {1996},
+  isbn          = {0-521-49589-X}
+}
+
+@article{frazer1970,
+  author        = {Frazer, W. D. and McKellar, A. C.},
+  title         = {Samplesort: a sampling approach to minimal storage tree sorting},
+  journal       = {Journal of the ACM},
+  year          = {1970},
+  volume        = {17},
+  number        = {3},
+  pages         = {496--507},
+  doi           = {10.1145/321592.321600}
+}
+
+@book{villani2009,
+  author        = {Villani, C{\'e}dric},
+  title         = {Optimal Transport: Old and New},
+  series        = {Grundlehren der mathematischen Wissenschaften},
+  volume        = {338},
+  publisher     = {Springer},
+  address       = {Berlin, Heidelberg},
+  year          = {2009},
+  isbn          = {978-3-540-71049-3},
+  doi           = {10.1007/978-3-540-71050-9}
+}
+
+% ======================================================================
+% Scattering transforms and texture synthesis
+% ======================================================================
+
+@article{mallat2012,
+  author        = {Mallat, St{\'e}phane},
+  title         = {Group invariant scattering},
+  journal       = {Communications on Pure and Applied Mathematics},
+  year          = {2012},
+  volume        = {65},
+  number        = {10},
+  pages         = {1331--1398},
+  doi           = {10.1002/cpa.21413},
+  eprint        = {1101.2286},
+  archivePrefix = {arXiv}
+}
+
+@article{bruna2013,
+  author        = {Bruna, Joan and Mallat, St{\'e}phane},
+  title         = {Invariant scattering convolution networks},
+  journal       = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  year          = {2013},
+  volume        = {35},
+  number        = {8},
+  pages         = {1872--1886},
+  doi           = {10.1109/TPAMI.2012.230},
+  eprint        = {1203.1513},
+  archivePrefix = {arXiv}
+}
+
+% Note: volume 1 (no. 3/4) of Math. Stat. Learn. is dated 2018 by the
+% publisher (EMS Press); the article itself appeared online on 2019 May 19.
+@article{bruna2019,
+  author        = {Bruna, Joan and Mallat, St{\'e}phane},
+  title         = {Multiscale sparse microcanonical models},
+  journal       = {Mathematical Statistics and Learning},
+  year          = {2018},
+  volume        = {1},
+  number        = {3/4},
+  pages         = {257--315},
+  doi           = {10.4171/MSL/7},
+  eprint        = {1801.02013},
+  archivePrefix = {arXiv}
+}
+
+@article{mallat2020,
+  author        = {Mallat, St{\'e}phane and Zhang, Sixin and Rochette, Gaspar},
+  title         = {Phase harmonic correlations and convolutional neural networks},
+  journal       = {Information and Inference: A Journal of the IMA},
+  year          = {2020},
+  volume        = {9},
+  number        = {3},
+  pages         = {721--747},
+  doi           = {10.1093/imaiai/iaz019},
+  eprint        = {1810.12136},
+  archivePrefix = {arXiv}
+}
+
+@article{zhang2021,
+  author        = {Zhang, Sixin and Mallat, St{\'e}phane},
+  title         = {Maximum entropy models from phase harmonic covariances},
+  journal       = {Applied and Computational Harmonic Analysis},
+  year          = {2021},
+  volume        = {53},
+  pages         = {199--230},
+  doi           = {10.1016/j.acha.2021.01.003},
+  eprint        = {1911.10017},
+  archivePrefix = {arXiv}
+}
+
+@article{portilla2000,
+  author        = {Portilla, Javier and Simoncelli, Eero P.},
+  title         = {A parametric texture model based on joint statistics of complex wavelet coefficients},
+  journal       = {International Journal of Computer Vision},
+  year          = {2000},
+  volume        = {40},
+  number        = {1},
+  pages         = {49--70},
+  doi           = {10.1023/A:1026553619983}
+}
+
+@inproceedings{gatys2015,
+  author        = {Gatys, Leon A. and Ecker, Alexander S. and Bethge, Matthias},
+  title         = {Texture synthesis using convolutional neural networks},
+  booktitle     = {Advances in Neural Information Processing Systems},
+  editor        = {Cortes, C. and Lawrence, N. and Lee, D. and Sugiyama, M. and Garnett, R.},
+  volume        = {28},
+  publisher     = {Curran Associates, Inc.},
+  year          = {2015},
+  url           = {https://proceedings.neurips.cc/paper_files/paper/2015/file/a5e00132373a7031000fd987a3c9f87b-Paper.pdf},
+  eprint        = {1505.07376},
+  archivePrefix = {arXiv}
+}
+
+@article{allys2019,
+  author        = {Allys, E. and Levrier, F. and Zhang, S. and Colling, C. and Regaldo-Saint Blancard, B. and Boulanger, F. and Hennebelle, P. and Mallat, S.},
+  title         = {The {RWST}, a comprehensive statistical description of the non-{Gaussian} structures in the {ISM}},
+  journal       = {\aap},
+  year          = {2019},
+  volume        = {629},
+  pages         = {A115},
+  doi           = {10.1051/0004-6361/201834975},
+  eprint        = {1905.01372},
+  archivePrefix = {arXiv}
+}
+
+@article{allys2020,
+  author        = {Allys, E. and Marchand, T. and Cardoso, J.-F. and Villaescusa-Navarro, F. and Ho, S. and Mallat, S.},
+  title         = {New interpretable statistics for large-scale structure analysis and generation},
+  journal       = {\prd},
+  year          = {2020},
+  volume        = {102},
+  number        = {10},
+  pages         = {103506},
+  doi           = {10.1103/PhysRevD.102.103506},
+  eprint        = {2006.06298},
+  archivePrefix = {arXiv}
+}
+
+@article{cheng2020,
+  author        = {Cheng, Sihao and Ting, Yuan-Sen and M{\'e}nard, Brice and Bruna, Joan},
+  title         = {A new approach to observational cosmology using the scattering transform},
+  journal       = {\mnras},
+  year          = {2020},
+  volume        = {499},
+  number        = {4},
+  pages         = {5902--5914},
+  doi           = {10.1093/mnras/staa3165},
+  eprint        = {2006.08561},
+  archivePrefix = {arXiv}
+}
+
+@article{cheng2021,
+  author        = {Cheng, Sihao and M{\'e}nard, Brice},
+  title         = {How to quantify fields or textures? {A} guide to the scattering transform},
+  journal       = {arXiv e-prints},
+  year          = {2021},
+  pages         = {arXiv:2112.01288},
+  eprint        = {2112.01288},
+  archivePrefix = {arXiv}
+}
+
+% Note: arXiv:2204.10177 (2022) was published in ACHA in 2025.
+@article{morel2022,
+  author        = {Morel, Rudy and Rochette, Gaspar and Leonarduzzi, Roberto and Bouchaud, Jean-Philippe and Mallat, St{\'e}phane},
+  title         = {Scale dependencies and self-similar models with wavelet scattering spectra},
+  journal       = {Applied and Computational Harmonic Analysis},
+  year          = {2025},
+  volume        = {75},
+  pages         = {101724},
+  doi           = {10.1016/j.acha.2024.101724},
+  eprint        = {2204.10177},
+  archivePrefix = {arXiv}
+}
+
+% Note: arXiv:2308.01486 (2023) was published in Quantitative Finance in 2024.
+@article{morel2023,
+  author        = {Morel, Rudy and Mallat, St{\'e}phane and Bouchaud, Jean-Philippe},
+  title         = {Path shadowing {Monte Carlo}},
+  journal       = {Quantitative Finance},
+  year          = {2024},
+  volume        = {24},
+  number        = {9},
+  pages         = {1199--1225},
+  doi           = {10.1080/14697688.2024.2399285},
+  eprint        = {2308.01486},
+  archivePrefix = {arXiv}
+}
+
+@article{cheng2024,
+  author        = {Cheng, Sihao and Morel, Rudy and Allys, Erwan and M{\'e}nard, Brice and Mallat, St{\'e}phane},
+  title         = {Scattering spectra models for physics},
+  journal       = {PNAS Nexus},
+  year          = {2024},
+  volume        = {3},
+  number        = {4},
+  pages         = {pgae103},
+  doi           = {10.1093/pnasnexus/pgae103},
+  eprint        = {2306.17210},
+  archivePrefix = {arXiv}
+}
+
+@article{delouis2022,
+  author        = {Delouis, J.-M. and Allys, E. and Gauvrit, E. and Boulanger, F.},
+  title         = {Non-{Gaussian} modelling and statistical denoising of {Planck} dust polarisation full-sky maps using scattering transforms},
+  journal       = {\aap},
+  year          = {2022},
+  volume        = {668},
+  pages         = {A122},
+  doi           = {10.1051/0004-6361/202244566},
+  eprint        = {2207.12527},
+  archivePrefix = {arXiv}
+}
+
+@article{campeti2025,
+  author        = {Campeti, P. and Delouis, J.-M. and Pagano, L. and Allys, E. and Lattanzi, M. and Gerbino, M.},
+  title         = {From few to many maps: A fast map-level emulator for extreme augmentation of {CMB} systematics datasets},
+  journal       = {\aap},
+  year          = {2025},
+  volume        = {700},
+  pages         = {A136},
+  doi           = {10.1051/0004-6361/202554540},
+  eprint        = {2503.11643},
+  archivePrefix = {arXiv}
+}
+
+@article{mousset2024,
+  author        = {Mousset, L. and Allys, E. and Price, M. A. and Aumont, J. and Delouis, J.-M. and Montier, L. and McEwen, J. D.},
+  title         = {Generative models of astrophysical fields with scattering transforms on the sphere},
+  journal       = {\aap},
+  year          = {2024},
+  volume        = {691},
+  pages         = {A269},
+  doi           = {10.1051/0004-6361/202451396},
+  eprint        = {2407.07007},
+  archivePrefix = {arXiv}
+}
+
+@inproceedings{mcewen2022,
+  author        = {McEwen, Jason D. and Wallis, Christopher G. R. and Mavor-Parker, Augustine N.},
+  title         = {Scattering networks on the sphere for scalable and rotationally equivariant spherical {CNNs}},
+  booktitle     = {International Conference on Learning Representations (ICLR 2022)},
+  year          = {2022},
+  url           = {https://openreview.net/forum?id=bjy5Zb2fo2},
+  eprint        = {2102.02828},
+  archivePrefix = {arXiv}
+}
+
+@article{jeffrey2022,
+  author        = {Jeffrey, Niall and Boulanger, Fran{\c c}ois and Wandelt, Benjamin D. and Regaldo-Saint Blancard, Bruno and Allys, Erwan and Levrier, Fran{\c c}ois},
+  title         = {Single frequency {CMB} {B}-mode inference with realistic foregrounds from a single training image},
+  journal       = {\mnras},
+  year          = {2022},
+  volume        = {510},
+  number        = {1},
+  pages         = {L1--L6},
+  doi           = {10.1093/mnrasl/slab120},
+  eprint        = {2111.01138},
+  archivePrefix = {arXiv}
+}
+
+% Note: A&A 649, L18 (2021) is the statistical-denoising letter below. The
+% title "Statistical component separation for targeted signal recovery in
+% noisy mixtures" belongs to a different paper (Regaldo-Saint Blancard &
+% Eickenberg, arXiv:2306.15012, TMLR 2024).
+@article{regaldo2021,
+  author        = {Regaldo-Saint Blancard, Bruno and Allys, Erwan and Boulanger, Fran{\c c}ois and Levrier, Fran{\c c}ois and Jeffrey, Niall},
+  title         = {A new approach for the statistical denoising of {Planck} interstellar dust polarization data},
+  journal       = {\aap},
+  year          = {2021},
+  volume        = {649},
+  pages         = {L18},
+  doi           = {10.1051/0004-6361/202140503},
+  eprint        = {2102.03160},
+  archivePrefix = {arXiv}
+}
+
+@article{valogiannis2022,
+  author        = {Valogiannis, Georgios and Dvorkin, Cora},
+  title         = {Towards an optimal estimation of cosmological parameters with the wavelet scattering transform},
+  journal       = {\prd},
+  year          = {2022},
+  volume        = {105},
+  number        = {10},
+  pages         = {103534},
+  doi           = {10.1103/PhysRevD.105.103534},
+  eprint        = {2108.07821},
+  archivePrefix = {arXiv}
+}
+
+% Note: this is paper I of the DES Y3 series (validation, PRD 2024). Paper II
+% (cosmological results; Gatti, Campailla, Jeffrey et al., arXiv:2405.10881)
+% was published in Phys. Rev. D 111, 063504 (2025), doi:10.1103/PhysRevD.111.063504.
+@article{gatti2024,
+  author        = {Gatti, M. and Jeffrey, N. and Whiteway, L. and Williamson, J. and Jain, B. and others},
+  title         = {{Dark Energy Survey Year 3} results: simulation-based cosmological inference with wavelet harmonics, scattering transforms, and moments of weak lensing mass maps. {Validation} on simulations},
+  journal       = {\prd},
+  year          = {2024},
+  volume        = {109},
+  number        = {6},
+  pages         = {063534},
+  doi           = {10.1103/PhysRevD.109.063534},
+  eprint        = {2310.17557},
+  archivePrefix = {arXiv}
+}
+
+% ======================================================================
+% Weak lensing, non-Gaussian statistics, Minkowski functionals
+% ======================================================================
+
+@article{takahashi2017,
+  author        = {Takahashi, Ryuichi and Hamana, Takashi and Shirasaki, Masato and Namikawa, Toshiya and Nishimichi, Takahiro and Osato, Ken and Shiroyama, Kosei},
+  title         = {Full-sky gravitational lensing simulation for large-area galaxy surveys and cosmic microwave background experiments},
+  journal       = {\apj},
+  year          = {2017},
+  volume        = {850},
+  number        = {1},
+  pages         = {24},
+  doi           = {10.3847/1538-4357/aa943d},
+  eprint        = {1706.01472},
+  archivePrefix = {arXiv}
+}
+
+@article{coles1991,
+  author        = {Coles, Peter and Jones, Bernard},
+  title         = {A lognormal model for the cosmological mass distribution},
+  journal       = {\mnras},
+  year          = {1991},
+  volume        = {248},
+  number        = {1},
+  pages         = {1--13},
+  doi           = {10.1093/mnras/248.1.1}
+}
+
+@article{neyrinck2009,
+  author        = {Neyrinck, Mark C. and Szapudi, Istv{\'a}n and Szalay, Alexander S.},
+  title         = {Rejuvenating the matter power spectrum: restoring information with a logarithmic density mapping},
+  journal       = {\apjl},
+  year          = {2009},
+  volume        = {698},
+  number        = {2},
+  pages         = {L90--L93},
+  doi           = {10.1088/0004-637X/698/2/L90},
+  eprint        = {0903.4693},
+  archivePrefix = {arXiv}
+}
+
+@article{schmalzing1998,
+  author        = {Schmalzing, J. and G{\'o}rski, K. M.},
+  title         = {{Minkowski} functionals used in the morphological analysis of cosmic microwave background anisotropy maps},
+  journal       = {\mnras},
+  year          = {1998},
+  volume        = {297},
+  number        = {2},
+  pages         = {355--365},
+  doi           = {10.1046/j.1365-8711.1998.01467.x},
+  eprint        = {astro-ph/9710185},
+  archivePrefix = {arXiv}
+}
+
+@article{tomita1986,
+  author        = {Tomita, H.},
+  title         = {Curvature invariants of random interface generated by {Gaussian} fields},
+  journal       = {Progress of Theoretical Physics},
+  year          = {1986},
+  volume        = {76},
+  number        = {4},
+  pages         = {952--955},
+  doi           = {10.1143/PTP.76.952}
+}
+
+@article{matsubara2003,
+  author        = {Matsubara, Takahiko},
+  title         = {Statistics of smoothed cosmic fields in perturbation theory. {I}. {Formulation} and useful formulae in second-order perturbation theory},
+  journal       = {\apj},
+  year          = {2003},
+  volume        = {584},
+  number        = {1},
+  pages         = {1--33},
+  doi           = {10.1086/345521},
+  eprint        = {astro-ph/0006269},
+  archivePrefix = {arXiv}
+}
+
+@article{matsubara2010,
+  author        = {Matsubara, Takahiko},
+  title         = {Analytic {Minkowski} functionals of the cosmic microwave background: second-order non-{Gaussianity} with bispectrum and trispectrum},
+  journal       = {\prd},
+  year          = {2010},
+  volume        = {81},
+  number        = {8},
+  pages         = {083505},
+  doi           = {10.1103/PhysRevD.81.083505},
+  eprint        = {1001.2321},
+  archivePrefix = {arXiv}
+}
+
+@article{kratochvil2010,
+  author        = {Kratochvil, Jan M. and Haiman, Zolt{\'a}n and May, Morgan},
+  title         = {Probing cosmology with weak lensing peak counts},
+  journal       = {\prd},
+  year          = {2010},
+  volume        = {81},
+  number        = {4},
+  pages         = {043519},
+  doi           = {10.1103/PhysRevD.81.043519},
+  eprint        = {0907.0486},
+  archivePrefix = {arXiv}
+}
+
+@article{kratochvil2012,
+  author        = {Kratochvil, Jan M. and Lim, Eugene A. and Wang, Sheng and Haiman, Zolt{\'a}n and May, Morgan and Huffenberger, Kevin},
+  title         = {Probing cosmology with weak lensing {Minkowski} functionals},
+  journal       = {\prd},
+  year          = {2012},
+  volume        = {85},
+  number        = {10},
+  pages         = {103513},
+  doi           = {10.1103/PhysRevD.85.103513},
+  eprint        = {1109.6334},
+  archivePrefix = {arXiv}
+}
+
+@article{petri2013,
+  author        = {Petri, Andrea and Haiman, Zolt{\'a}n and Hui, Lam and May, Morgan and Kratochvil, Jan M.},
+  title         = {Cosmology with {Minkowski} functionals and moments of the weak lensing convergence field},
+  journal       = {\prd},
+  year          = {2013},
+  volume        = {88},
+  number        = {12},
+  pages         = {123002},
+  doi           = {10.1103/PhysRevD.88.123002},
+  eprint        = {1309.4460},
+  archivePrefix = {arXiv}
+}
+
+% The braced first author renders as "Euclid Collaboration: Ajani, V." in the
+% list and "Euclid Collaboration: Ajani et al." in the text (A&A convention).
+@article{ajani2023,
+  author        = {{Euclid Collaboration: Ajani}, V. and Baldi, M. and Barthelemy, A. and Boyle, A. and Burger, P. and others},
+  title         = {{Euclid} preparation. {XXVIII}. {Forecasts} for ten different higher-order weak lensing statistics},
+  journal       = {\aap},
+  year          = {2023},
+  volume        = {675},
+  pages         = {A120},
+  doi           = {10.1051/0004-6361/202346017},
+  eprint        = {2301.12890},
+  archivePrefix = {arXiv}
+}
+
+% ======================================================================
+% Climate / ocean (outlook)
+% ======================================================================
+
+@article{hersbach2020,
+  author        = {Hersbach, Hans and Bell, Bill and Berrisford, Paul and Hirahara, Shoji and Hor{\'a}nyi, Andr{\'a}s and others},
+  title         = {The {ERA5} global reanalysis},
+  journal       = {Quarterly Journal of the Royal Meteorological Society},
+  year          = {2020},
+  volume        = {146},
+  number        = {730},
+  pages         = {1999--2049},
+  doi           = {10.1002/qj.3803}
+}
+
+@article{lam2023,
+  author        = {Lam, Remi and Sanchez-Gonzalez, Alvaro and Willson, Matthew and Wirnsberger, Peter and Fortunato, Meire and others},
+  title         = {Learning skillful medium-range global weather forecasting},
+  journal       = {Science},
+  year          = {2023},
+  volume        = {382},
+  number        = {6677},
+  pages         = {1416--1421},
+  doi           = {10.1126/science.adi2336}
+}
+
+@article{price2025,
+  author        = {Price, Ilan and Sanchez-Gonzalez, Alvaro and Alet, Ferran and Andersson, Tom R. and El-Kadi, Andrew and others},
+  title         = {Probabilistic weather forecasting with machine learning},
+  journal       = {Nature},
+  year          = {2025},
+  volume        = {637},
+  number        = {8044},
+  pages         = {84--90},
+  doi           = {10.1038/s41586-024-08252-9}
+}
+
+@article{bi2023,
+  author        = {Bi, Kaifeng and Xie, Lingxi and Zhang, Hengheng and Chen, Xin and Gu, Xiaotao and Tian, Qi},
+  title         = {Accurate medium-range global weather forecasting with {3D} neural networks},
+  journal       = {Nature},
+  year          = {2023},
+  volume        = {619},
+  number        = {7970},
+  pages         = {533--538},
+  doi           = {10.1038/s41586-023-06185-3}
+}
+
+@article{kochkov2024,
+  author        = {Kochkov, Dmitrii and Yuval, Janni and Langmore, Ian and Norgaard, Peter and Smith, Jamie and others},
+  title         = {Neural general circulation models for weather and climate},
+  journal       = {Nature},
+  year          = {2024},
+  volume        = {632},
+  number        = {8027},
+  pages         = {1060--1066},
+  doi           = {10.1038/s41586-024-07744-y},
+  eprint        = {2311.07222},
+  archivePrefix = {arXiv}
+}
+
+@article{karlbauer2024,
+  author        = {Karlbauer, Matthias and Cresswell-Clay, Nathaniel and Durran, Dale R. and Moreno, Raul A. and Kurth, Thorsten and Bonev, Boris and Brenowitz, Noah and Butz, Martin V.},
+  title         = {Advancing parsimonious deep learning weather prediction using the {HEALPix} mesh},
+  journal       = {Journal of Advances in Modeling Earth Systems},
+  year          = {2024},
+  volume        = {16},
+  number        = {8},
+  pages         = {e2023MS004021},
+  doi           = {10.1029/2023MS004021},
+  eprint        = {2311.06253},
+  archivePrefix = {arXiv}
+}
+
+@article{stevens2019,
+  author        = {Stevens, Bjorn and Satoh, Masaki and Auger, Ludovic and Biercamp, Joachim and Bretherton, Christopher S. and others},
+  title         = {{DYAMOND}: the {DYnamics} of the {Atmospheric} general circulation {Modeled On Non-hydrostatic Domains}},
+  journal       = {Progress in Earth and Planetary Science},
+  year          = {2019},
+  volume        = {6},
+  pages         = {61},
+  doi           = {10.1186/s40645-019-0304-z}
+}
+
+@article{eyring2016,
+  author        = {Eyring, Veronika and Bony, Sandrine and Meehl, Gerald A. and Senior, Catherine A. and Stevens, Bjorn and Stouffer, Ronald J. and Taylor, Karl E.},
+  title         = {Overview of the {Coupled Model Intercomparison Project Phase 6 (CMIP6)} experimental design and organization},
+  journal       = {Geoscientific Model Development},
+  year          = {2016},
+  volume        = {9},
+  number        = {5},
+  pages         = {1937--1958},
+  doi           = {10.5194/gmd-9-1937-2016}
+}
+
+@article{hewitt2020,
+  author        = {Hewitt, Helene T. and Roberts, Malcolm and Mathiot, Pierre and Biastoch, Arne and Blockley, Ed and others},
+  title         = {Resolving and parameterising the ocean mesoscale in {Earth} system models},
+  journal       = {Current Climate Change Reports},
+  year          = {2020},
+  volume        = {6},
+  number        = {4},
+  pages         = {137--152},
+  doi           = {10.1007/s40641-020-00164-w}
+}
+
+@article{bauer2015,
+  author        = {Bauer, Peter and Thorpe, Alan and Brunet, Gilbert},
+  title         = {The quiet revolution of numerical weather prediction},
+  journal       = {Nature},
+  year          = {2015},
+  volume        = {525},
+  number        = {7567},
+  pages         = {47--55},
+  doi           = {10.1038/nature14956}
+}

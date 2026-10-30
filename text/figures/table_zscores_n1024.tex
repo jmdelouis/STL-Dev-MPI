@@ -1,0 +1,53 @@
+\begin{table*}
+\caption{Deviation of the ensemble members from the target r000 at nside 1024, in units of the standard deviation $\sigma$ of the 10 Takahashi realizations: median [min, max] over the members (bold: $|z| > 2$). $\sigma/\mu$ is the realizations' relative standard deviation and the r000 column the target's own deviation from their mean. Details of level $n$: the map at nside $n$ minus the mean of each group of 4 children. The $C_\ell$ and Minkowski rows give the rms over the bands ($\ell \geq 31$) or thresholds ($-2\leq\nu\leq5$, FWHM 13.74$'$) of each member's deviation.}
+\label{tab:zscores_n1024}
+\centering\small
+\begin{tabular}{llrrcc}
+\hline\hline
+Statistic & Level & $\sigma/\mu$ & r000 & no kappa terms & kappa terms \\
+\hline
+\multicolumn{6}{l}{\emph{variance, $\kappa$}} \\
+ & 8 & 13.4\% & +0.1 & $-$0.7 [$-$1.1, +1.8] & $-$0.3 [$-$0.8, +0.6] \\
+ & 16 & 18.0\% & $-$0.2 & $-$0.2 [$-$0.4, +1.8] & +0.2 [$-$0.3, +0.6] \\
+ & 32 & 15.0\% & $-$0.1 & $-$0.5 [$-$1.0, +1.4] & $-$0.0 [$-$0.6, +0.9] \\
+ & 64 & 14.7\% & $-$0.1 & $-$0.2 [$-$0.4, +0.4] & +0.4 [$-$0.2, +0.9] \\
+ & 128 & 13.0\% & +0.2 & +0.7 [+0.2, +1.6] & +0.0 [$-$0.5, +1.1] \\
+ & 256 & 11.7\% & +0.1 & \textbf{+2.5} [\textbf{+2.2}, \textbf{+2.7}] & $-$0.0 [$-$0.5, +0.2] \\
+ & 512 & 10.9\% & $-$0.1 & $-$0.9 [$-$1.9, $-$0.5] & $-$0.2 [$-$0.4, $-$0.0] \\
+ & 1024 & 9.3\% & $-$0.0 & \textbf{$-$2.1} [\textbf{$-$3.3}, $-$1.7] & $-$0.1 [$-$0.6, +0.4] \\
+\hline
+\multicolumn{6}{l}{\emph{excess kurtosis, $\kappa$}} \\
+ & 8 & 31.4\% & +0.7 & \textbf{$-$2.3} [\textbf{$-$3.0}, \textbf{+32.8}] & $-$1.3 [$-$1.7, \textbf{+3.4}] \\
+ & 16 & 35.2\% & +1.4 & $-$1.7 [\textbf{$-$2.3}, \textbf{+61.8}] & \textbf{+2.7} [$-$1.7, \textbf{+5.5}] \\
+ & 32 & 35.3\% & +1.1 & \textbf{$-$2.0} [\textbf{$-$2.7}, \textbf{+23.1}] & \textbf{+2.9} [$-$1.0, \textbf{+10.8}] \\
+ & 64 & 27.9\% & +0.7 & +0.0 [$-$1.7, \textbf{+6.5}] & \textbf{+10.7} [\textbf{+4.5}, \textbf{+35.3}] \\
+ & 128 & 29.8\% & +1.9 & $-$0.8 [\textbf{$-$2.3}, \textbf{+11.7}] & \textbf{+3.3} [$-$1.5, \textbf{+10.7}] \\
+ & 256 & 21.3\% & +1.6 & \textbf{+4.8} [\textbf{+2.5}, \textbf{+9.6}] & +1.7 [$-$1.9, \textbf{+4.8}] \\
+ & 512 & 16.3\% & +1.4 & \textbf{+2.8} [$-$1.4, \textbf{+6.5}] & $-$0.0 [$-$1.5, \textbf{+2.6}] \\
+ & 1024 & 17.3\% & +1.1 & \textbf{+2.7} [\textbf{$-$2.4}, \textbf{+5.7}] & \textbf{+3.6} [+1.2, \textbf{+10.6}] \\
+\hline
+\multicolumn{6}{l}{\emph{variance, gaussianised}} \\
+ & 8 & 5.6\% & +0.6 & $-$0.2 [$-$0.6, +0.3] & $-$0.1 [$-$0.3, +0.2] \\
+ & 16 & 3.7\% & $-$0.7 & $-$0.1 [$-$0.5, +0.5] & +0.1 [$-$0.1, +0.4] \\
+ & 32 & 2.2\% & $-$1.1 & +0.6 [+0.2, +1.1] & +1.2 [+0.9, +1.6] \\
+ & 64 & 2.0\% & $-$1.3 & \textbf{+3.0} [\textbf{+2.9}, \textbf{+3.4}] & \textbf{+4.0} [\textbf{+3.9}, \textbf{+4.3}] \\
+ & 128 & 1.3\% & +0.2 & \textbf{+12.6} [\textbf{+12.2}, \textbf{+12.7}] & \textbf{+12.0} [\textbf{+11.8}, \textbf{+12.2}] \\
+ & 256 & 1.6\% & +1.1 & \textbf{+22.4} [\textbf{+22.2}, \textbf{+22.6}] & \textbf{+13.9} [\textbf{+13.7}, \textbf{+14.1}] \\
+ & 512 & 2.4\% & +1.3 & +0.2 [+0.1, +0.4] & +0.7 [+0.6, +0.9] \\
+ & 1024 & 3.6\% & +1.1 & \textbf{$-$11.1} [\textbf{$-$11.1}, \textbf{$-$11.0}] & \textbf{$-$8.7} [\textbf{$-$8.8}, \textbf{$-$8.5}] \\
+\hline
+\multicolumn{6}{l}{\emph{peaks}} \\
+ & $>3\sigma$ & 5.8\% & $-$0.4 & \textbf{+4.0} [\textbf{+3.8}, \textbf{+4.1}] & $-$0.2 [$-$0.4, $-$0.1] \\
+ & $>5\sigma$ & 6.6\% & $-$0.3 & \textbf{+3.1} [\textbf{+2.8}, \textbf{+3.3}] & +0.3 [+0.1, +0.5] \\
+ & $>10\sigma$ & 8.1\% & $-$0.2 & +1.7 [+1.3, \textbf{+2.1}] & +0.8 [+0.6, +1.1] \\
+\hline
+\multicolumn{6}{l}{\emph{$C_\ell$}} \\
+ & rms, $\ell\geq31$ &  &  & 2.6 [2.3, 2.8] & 0.6 [0.5, 1.0] \\
+\hline
+\multicolumn{6}{l}{\emph{Minkowski}} \\
+ & $V_0$, rms &  &  & 1.8 [1.4, 3.2] & 2.3 [2.0, 2.4] \\
+ & $V_1$, rms &  &  & 1.3 [1.1, 3.7] & 2.2 [1.8, 2.7] \\
+ & $V_2$, rms &  &  & 3.5 [3.0, 5.4] & 2.5 [2.4, 2.7] \\
+\hline
+\end{tabular}
+\end{table*}

@@ -1,0 +1,41 @@
+nside 512: C_l bands, relative std of the realizations, members' median deviation from r000 in sigma
+no kurtosis: l >= 31 median |z| 0.17 max |z| 0.43, rms of C_l / C_l(r000) - 1 0.034
+  2-2: real  52.9%  z +0.21
+  3-3: real  73.3%  z +0.59
+  4-5: real  16.0%  z -1.22
+  6-7: real  23.6%  z +0.23
+  8-10: real  21.7%  z -0.15
+  11-15: real  18.0%  z +0.45
+  16-22: real  16.0%  z -0.41
+  23-32: real  12.8%  z -0.04
+  33-46: real  16.4%  z -0.33
+  47-65: real  16.9%  z -0.04
+  66-93: real  16.9%  z +0.01
+  94-132: real  15.8%  z -0.29
+  133-187: real  14.1%  z -0.15
+  188-266: real  13.5%  z -0.17
+  267-378: real  12.6%  z +0.15
+  379-537: real  12.3%  z -0.43
+  538-762: real  11.5%  z -0.39
+  763-1082: real  10.9%  z +0.32
+  1083-1535: real   9.9%  z -0.16
+kurtosis: l >= 31 median |z| 0.33 max |z| 0.55, rms of C_l / C_l(r000) - 1 0.044
+  2-2: real  52.9%  z +0.32
+  3-3: real  73.3%  z +0.56
+  4-5: real  16.0%  z -1.24
+  6-7: real  23.6%  z +0.17
+  8-10: real  21.7%  z -0.20
+  11-15: real  18.0%  z +0.43
+  16-22: real  16.0%  z -0.43
+  23-32: real  12.8%  z -0.03
+  33-46: real  16.4%  z -0.41
+  47-65: real  16.9%  z -0.06
+  66-93: real  16.9%  z -0.11
+  94-132: real  15.8%  z -0.33
+  133-187: real  14.1%  z -0.26
+  188-266: real  13.5%  z -0.24
+  267-378: real  12.6%  z -0.05
+  379-537: real  12.3%  z -0.52
+  538-762: real  11.5%  z -0.55
+  763-1082: real  10.9%  z +0.36
+  1083-1535: real   9.9%  z +0.44

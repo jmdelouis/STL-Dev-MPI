@@ -1,0 +1,19 @@
+job 2353875: compute-114-9, GPU 0, 8d1679a claude/great-moore-0f5dae (+ tools/hpc/synth_dia.slurm)
+0, NVIDIA A100-SXM4-80GB, 81920 MiB, 0 MiB
+== nside 1024 stencils 19:28:48
+{"evaluations":4,"loss_first":0.007773551611009387,"loss_last":0.007773510173491066,"ranks":1,"seconds":19.49,"seconds_per_evaluation":4.873}
+  s/eval 4.873 setup 78.85 peak GB [62.0] cache transposition [45.3] blocks [12, 3]
+  geometry 4.4 weights 9.3 forward 12.0 reverse 7.3
+== nside 1024 dia 19:30:32
+{"evaluations":4,"loss_first":0.007773551611009389,"loss_last":0.007773510173491066,"ranks":1,"seconds":12.14,"seconds_per_evaluation":3.035}
+  s/eval 3.035 setup 76.75 peak GB [61.0] cache transposition [50.1] blocks [12, 3]
+  geometry 3.6 weights 0.8 forward 5.3 reverse 3.8
+== nside 2048 stencils 19:32:08
+{"evaluations":4,"loss_first":0.007741535785581675,"loss_last":0.007741525297361651,"ranks":1,"seconds":185.0,"seconds_per_evaluation":46.25}
+  s/eval 46.25 setup 318.57 peak GB [67.4] cache transposition [33.0] blocks [58, 15]
+  geometry 159.9 weights 8.2 forward 113.1 reverse 77.4
+== nside 2048 dia 19:41:01
+{"evaluations":4,"loss_first":0.007741535785581667,"loss_last":0.007741525297361637,"ranks":1,"seconds":71.72,"seconds_per_evaluation":17.93}
+  s/eval 17.93 setup 319.73 peak GB [63.2] cache transposition [34.5] blocks [48, 12]
+  geometry 18.0 weights 23.6 forward 36.8 reverse 20.7
+done Thu Oct 29 07:47:47 PM CET 2026

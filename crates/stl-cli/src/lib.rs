@@ -17,11 +17,15 @@ use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, O
 use stl_mpi::Comm;
 
 mod kappa;
+mod kurtosis;
 mod level_power;
 mod marginal;
+pub mod minkowski;
 use kappa::Transform;
+use kurtosis::Kurtosis;
 use level_power::LevelPower;
 use marginal::Marginal;
+use minkowski::{Minkowski, SigmaFile};
 
 pub const USAGE: &str = "\
 stl-synth --target MAP [options]
@@ -39,6 +43,8 @@ stl-synth --target MAP [options]
   --kernel-size N       stencil (default 5)
   --fewer               has_fewer_convolutions definitions of S3/S4
   --block-pixels N      block size per level (default 16384)
+  --overlap N           overlapping patches: levels < N evaluated with redundant halos (no
+                        exchange during the sweeps), levels >= N on rank 0; for a few ranks
   --conv-chunk N        rebuild the convolution geometry by sub-blocks of N rows at every
                         application (less memory, more time; default: whole block)
   --niter N             L-BFGS iterations (default 50)
@@ -64,9 +70,32 @@ stl-synth --target MAP [options]
   --kappa-weight X      factor X of that term (default 0.1; 0 drops it)
   --kappa-families F    families of that term (default 'mean,var,S1,S2': the power and the l1 norm
                         of every scale and orientation)
+  --kappa-s3-weight X   adds the S3 of kappa as a separate reduced chi^2 of factor X (ergodic weights
+                        normalised over its own coefficients); default 0
+  --kappa-s3-nside A-B  restricts it to the S3 (j1 <= j3) whose scale j3 is at the levels of nside A
+                        to B (e.g. 64-128); default every level
+  --kurtosis-weight X   adds X / B sum_m sum_n (K_n / K_n(target) - 1)^2, K_n = <d_n^4> / <d_n^2>^2 the
+                        kurtosis of the details of level n of the 4-children pyramid of kappa = f(g)
+                        (of the map without --kappa-table); default 0
+  --kurtosis-nside A-B  levels of that term by nside (e.g. 64-128); default every level of
+                        --level-power-weight (finest to nside 8)
+  --minkowski-weight X  adds X / B sum_m mean_{n,k,i} ((V_k(t_i) - V_k(t_i; target)) / sigma_k,i)^2, the
+                        Minkowski functionals V0, V1, V2 of level n of the 4-children pyramid of
+                        kappa = f(g) (of the map without --kappa-table) at the thresholds
+                        t_i = mu_n + nu_i sigma_n of the target (nu = -2 ... 5 by 0.2), soft (logistic of
+                        width 0.2 sigma_n) with least-squares derivatives on the 3x3 cells; default 0
+  --minkowski-nside A-B levels of that term by nside; default 64 to nside / 2 (at the map's own nside
+                        the functionals of kappa are those of g: the level power holds them)
+  --minkowski-standardise standardise every level map by its own mean and std first (thresholds nu_i
+                        for every map, as mf_levels.py): the functionals then measure the shape only
+  --minkowski-sigma F   JSON of stl-minkowski --sigma-out: std of the functionals over realizations,
+                        with its estimator (thresholds, width, --minkowski-standardise or not);
+                        default 1 % of the target's maximum
   --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
                         distance between the sorted values of every member and of the target: holds
                         the pixel histogram; default 0
+  --freeze-nside M      hold the means of the map over the pixels of nside M at those of the
+                        initial map: only the scales finer than M move (coarse-to-fine steps)
   --history-size N      L-BFGS history (default 10)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
@@ -78,8 +107,20 @@ stl-synth --target MAP [options]
   --gpu-cache C         convolution geometry kept on the device between sweeps: 'full', 'transposition'
                         (the weights are recomputed), 'none', or 'auto' (default: full if it fits,
                         else transposition); budget from the device memory or STL_GPU_CACHE_MB
+  --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
+                        docs/dia_convolution.md) or 'stencils' (bound stencils and their
+                        transposition); default STL_GPU_CONV, else dia
   --quiet               no line per evaluation
 ";
+
+/// `64-128` (or `64`) -> (64, 128): levels given by their nside.
+fn parse_nside_range(k: &str, v: Option<&String>) -> Result<(usize, usize), String> {
+    let v = v.ok_or(format!("{k} needs a value"))?;
+    let (a, b) = v.split_once('-').unwrap_or((v, v));
+    let p = |t: &str| t.trim().parse::<usize>().ok().filter(|n| n.is_power_of_two()).ok_or(format!("{k}: '{t}' is not a power of 2"));
+    let (a, b) = (p(a)?, p(b)?);
+    Ok((a.min(b), a.max(b)))
+}
 
 /// `S1=10,S2=10` -> [(S1, 10), (S2, 10)]: factors on the weights of whole families.
 fn parse_family_weights(v: &str) -> Result<Vec<(Family, f64)>, String> {
@@ -109,15 +150,25 @@ pub struct Args {
     pub fewer: bool,
     pub block_pixels: usize,
     pub conv_chunk: Option<usize>,
+    pub overlap: Option<usize>,
     pub ergodic_weights: bool,
     pub family_weights: Vec<(Family, f64)>,
     pub ensemble: usize,
     pub groups: usize,
     pub scatter_weight: f64,
+    pub freeze_nside: Option<usize>,
     pub level_power_weight: f64,
     pub kappa_table: Option<PathBuf>,
     pub kappa_weight: f64,
     pub kappa_families: Vec<Family>,
+    pub kappa_s3_weight: f64,
+    pub kappa_s3_nside: Option<(usize, usize)>,
+    pub kurtosis_weight: f64,
+    pub kurtosis_nside: Option<(usize, usize)>,
+    pub minkowski_weight: f64,
+    pub minkowski_nside: Option<(usize, usize)>,
+    pub minkowski_sigma: Option<PathBuf>,
+    pub minkowski_standardise: bool,
     pub marginal_weight: f64,
     pub niter: usize,
     pub history_size: usize,
@@ -127,6 +178,8 @@ pub struct Args {
     pub gpu: bool,
     pub gpu_block_rows: usize,
     pub gpu_cache: String,
+    /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
+    pub gpu_conv: Option<String>,
 }
 
 impl Args {
@@ -143,15 +196,25 @@ impl Args {
             fewer: false,
             block_pixels: 16384,
             conv_chunk: None,
+            overlap: None,
             ergodic_weights: false,
             family_weights: Vec::new(),
             ensemble: 1,
             groups: 1,
             scatter_weight: 0.0,
+            freeze_nside: None,
             level_power_weight: 0.0,
             kappa_table: None,
             kappa_weight: 0.1,
             kappa_families: vec![Family::Mean, Family::Var, Family::S1, Family::S2],
+            kappa_s3_weight: 0.0,
+            kappa_s3_nside: None,
+            kurtosis_weight: 0.0,
+            kurtosis_nside: None,
+            minkowski_weight: 0.0,
+            minkowski_nside: None,
+            minkowski_sigma: None,
+            minkowski_standardise: false,
             marginal_weight: 0.0,
             niter: 50,
             history_size: 10,
@@ -161,6 +224,7 @@ impl Args {
             gpu: false,
             gpu_block_rows: 0,
             gpu_cache: "auto".into(),
+            gpu_conv: None,
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -188,6 +252,7 @@ impl Args {
                 "--fewer" => a.fewer = true,
                 "--block-pixels" => a.block_pixels = num(it.next(), k)?,
                 "--conv-chunk" => a.conv_chunk = Some(num(it.next(), k)?),
+                "--overlap" => a.overlap = Some(num(it.next(), k)?),
                 "--weights" => {
                     a.ergodic_weights = match it.next().map(String::as_str) {
                         Some("none") => false,
@@ -230,6 +295,22 @@ impl Args {
                         .map(|f| Family::parse(f.trim()).ok_or(format!("--kappa-families: unknown family '{f}'")))
                         .collect::<Result<_, _>>()?;
                 }
+                "--kappa-s3-weight" | "--kurtosis-weight" | "--minkowski-weight" => {
+                    let v: f64 = it.next().ok_or(format!("{k} needs a value"))?.parse().map_err(|_| format!("{k}: not a number"))?;
+                    if !(v.is_finite() && v >= 0.0) {
+                        return Err(format!("{k} must be finite and >= 0"));
+                    }
+                    match k.as_str() {
+                        "--kappa-s3-weight" => a.kappa_s3_weight = v,
+                        "--kurtosis-weight" => a.kurtosis_weight = v,
+                        _ => a.minkowski_weight = v,
+                    }
+                }
+                "--kappa-s3-nside" => a.kappa_s3_nside = Some(parse_nside_range(k, it.next())?),
+                "--kurtosis-nside" => a.kurtosis_nside = Some(parse_nside_range(k, it.next())?),
+                "--minkowski-nside" => a.minkowski_nside = Some(parse_nside_range(k, it.next())?),
+                "--minkowski-sigma" => a.minkowski_sigma = Some(it.next().ok_or("--minkowski-sigma needs a path")?.into()),
+                "--minkowski-standardise" => a.minkowski_standardise = true,
                 "--marginal-weight" => {
                     let v: f64 = it.next().ok_or("--marginal-weight needs a value")?.parse().map_err(|_| "--marginal-weight: not a number")?;
                     if !(v.is_finite() && v >= 0.0) {
@@ -237,6 +318,7 @@ impl Args {
                     }
                     a.marginal_weight = v;
                 }
+                "--freeze-nside" => a.freeze_nside = Some(num(it.next(), k)?),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
@@ -250,12 +332,21 @@ impl Args {
                         _ => return Err("--gpu-cache is 'auto', 'full', 'transposition' or 'none'".into()),
                     }
                 }
+                "--gpu-conv" => {
+                    a.gpu_conv = match it.next().map(String::as_str) {
+                        Some(v @ ("stencils" | "dia")) => Some(v.to_string()),
+                        _ => return Err("--gpu-conv is 'stencils' or 'dia'".into()),
+                    }
+                }
                 "-h" | "--help" => return Err(USAGE.into()),
                 other => return Err(format!("unknown option {other}\n\n{USAGE}")),
             }
         }
         if a.target.as_os_str().is_empty() {
             return Err(format!("--target is required\n\n{USAGE}"));
+        }
+        if a.kappa_s3_weight > 0.0 && a.kappa_weight > 0.0 && a.kappa_families.contains(&Family::S3) {
+            return Err("--kappa-s3-weight: S3 is already in --kappa-families".into());
         }
         if a.gpu && !cfg!(feature = "gpu") {
             return Err("--gpu: built without the feature gpu".into());
@@ -336,7 +427,16 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     let j = args.j.unwrap_or_else(|| (64 - (nside as u64).leading_zeros() as usize).saturating_sub(2).max(1));
     let mut geo = LocalGeometry::new(nside, args.kernel_size, args.l, Gauge::Cosmo, args.block_pixels);
     geo.conv_chunk = args.conv_chunk;
-    let cfg = EngineConfig::new(j, args.fewer);
+    let mut cfg = EngineConfig::new(j, args.fewer);
+    if let Some(coarse) = args.overlap {
+        if args.gpu {
+            return Err("--overlap runs on the CPU engine only (the device engine needs the standard partition)".into());
+        }
+        if coarse < 1 || coarse > cfg.levels() {
+            return Err(format!("--overlap {coarse}: the first coarse level must be in 1..={}", cfg.levels()));
+        }
+        cfg.overlap = Some(coarse);
+    }
     let plan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &Family::ALL);
     let started_setup = Instant::now();
     let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
@@ -468,24 +568,36 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         let levels = LevelPower::levels(nside as usize, s, e, gcomm);
         LevelPower::new(args.level_power_weight, &target, levels, npix, members, gcomm)
     });
-    // Statistics of kappa = f(g) (--kappa-table): own plan, target statistics
-    // (of the transformed target) and ergodic weights, loss on the mean of the members.
-    let kplan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &args.kappa_families);
+    // Statistics of kappa = f(g) (--kappa-table): own plan (the families of
+    // --kappa-families, then the S3 of --kappa-s3-weight at the levels of
+    // --kappa-s3-nside), target statistics (of the transformed target) and
+    // ergodic weights, loss on the mean of the members.
+    let at_levels = |range: Option<(usize, usize)>, dg: usize| range.is_none_or(|(a, b)| (a..=b).contains(&(nside as usize >> dg)));
+    let mut kplan = if args.kappa_weight > 0.0 { build_plan(j, args.l, &cfg.j_to_dg, 1, None, &args.kappa_families) } else { Vec::new() };
+    let kbase = kplan.len();
+    if args.kappa_s3_weight > 0.0 {
+        let s3 = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &[Family::S3]);
+        kplan.extend(s3.into_iter().filter(|c| at_levels(args.kappa_s3_nside, c.native_dg)));
+        if kplan.len() == kbase {
+            return Err("--kappa-s3-nside: no S3 at these levels".into());
+        }
+    }
     let kdummy = vec![Complex64::new(0.0, 0.0); kplan.len()];
     let kappa_tf = match &args.kappa_table {
         Some(p) => Some(Transform::new(&read_map_range(p, 0, map_len(p)?)?, &target, mean, std, npix, gcomm)?),
         None => None,
     };
-    let kappa_stats = args.kappa_weight > 0.0;
-    let (kstats, kvar) = match &kappa_tf {
-        Some(tf) if kappa_stats => {
+    let ktarget = kappa_tf.as_ref().map(|tf| tf.apply(&target).0);
+    let kappa_stats = !kplan.is_empty();
+    let (kstats, kvar) = match &ktarget {
+        Some(kt) if kappa_stats => {
             #[allow(unused_mut)]
             let mut probe = Objective::with_partition(&geo, &cfg, &kplan, &kdummy, 1, 1, gcomm, obj.dec.clone(), obj.part.clone());
             #[cfg(feature = "gpu")]
             if let Some(dev) = &device {
                 probe.set_evaluator(Box::new(dev.share(&kplan, 1)));
             }
-            probe.statistics_moments(&tf.apply(&target).0)
+            probe.statistics_moments(kt)
         }
         _ => (Vec::new(), Vec::new()),
     };
@@ -497,16 +609,82 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             if let Some(dev) = &device {
                 k.set_evaluator(Box::new(dev.share(&kplan, local_members)));
             }
-            k.weights = ergodic_weights(&geo, &kplan, &kvar);
-            k.weights.iter_mut().for_each(|w| *w *= members as f64 * args.kappa_weight);
+            // Two reduced chi^2: the families, and the S3 of --kappa-s3-weight.
+            let (base, s3) = (ergodic_weights(&geo, &kplan[..kbase], &kvar[..kbase]), ergodic_weights(&geo, &kplan[kbase..], &kvar[kbase..]));
+            let scaled = |w: Vec<f64>, f: f64| w.into_iter().map(move |v| v * members as f64 * f);
+            k.weights = scaled(base, args.kappa_weight).chain(scaled(s3, args.kappa_s3_weight)).collect();
             Some(k)
         }
         _ => None,
     };
     let kens = kobj.as_ref().map(|k| Ensemble { obj: k, cross: cross.as_ref(), members, target: &kstats, scatter: None });
+    // Kurtosis per level (--kurtosis-weight), of kappa = f(g) with --kappa-table;
+    // the kurtosis of every level is reported whenever one of them is given.
+    let pyramid_levels = LevelPower::levels(nside as usize, s, e, gcomm);
+    let kurtosis_levels: Vec<usize> = (0..pyramid_levels).filter(|&n| at_levels(args.kurtosis_nside, n)).collect();
+    if args.kurtosis_weight > 0.0 && kurtosis_levels.is_empty() {
+        return Err("--kurtosis-nside: no level of the pyramid in this range".into());
+    }
+    let kurtosis_source: &[f64] = ktarget.as_deref().unwrap_or(&target);
+    let kurtosis = (args.kurtosis_weight > 0.0)
+        .then(|| Kurtosis::new(args.kurtosis_weight, kurtosis_source, kurtosis_levels.clone(), npix, members, gcomm));
+    let kurtosis_all = (args.kurtosis_weight > 0.0 || kappa_tf.is_some())
+        .then(|| Kurtosis::new(0.0, kurtosis_source, (0..pyramid_levels).collect(), npix, members, gcomm));
+    // Minkowski functionals per level (--minkowski-weight), of the same field
+    // as the kurtosis; levels of means aligned on the ranks (0 ..= pyramid_levels).
+    let minkowski = if args.minkowski_weight > 0.0 {
+        let half = nside as usize / 2;
+        let levels: Vec<usize> = (0..=pyramid_levels)
+            .filter(|&n| match args.minkowski_nside {
+                Some((a, b)) => (a..=b).contains(&(nside as usize >> n)),
+                None => n >= 1 && (64..=half).contains(&(nside as usize >> n)),
+            })
+            .collect();
+        if levels.is_empty() {
+            return Err("--minkowski-nside: no level of the pyramid in this range".into());
+        }
+        let file = match &args.minkowski_sigma {
+            Some(p) => Some(SigmaFile::read(p)?),
+            None => None,
+        };
+        let path = args.minkowski_sigma.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        // The sigma file's estimator wins.
+        let standardise = file.as_ref().map_or(args.minkowski_standardise, |f| f.standardise);
+        let sigma = file.as_ref().map(|f| (f, path.as_str()));
+        Some(Minkowski::new(args.minkowski_weight, kurtosis_source, s, npix, members, &levels, sigma, standardise, gcomm)?)
+    } else {
+        None
+    };
     let marginal = (args.marginal_weight > 0.0).then(|| Marginal::new(args.marginal_weight, &target, s, npix, members, gcomm));
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
+
+    // --freeze-nside M: the means of the map over the pixels of nside M (groups
+    // of `freeze` consecutive NESTED pixels) stay those of the initial map; the
+    // gradient is projected on the zero-mean details, so L-BFGS (directions
+    // built from projected gradients and steps) only moves the scales finer than M.
+    let freeze = match args.freeze_nside {
+        None => None,
+        Some(m) => {
+            let n = nside as usize;
+            if m == 0 || m > n || n % m != 0 || !m.is_power_of_two() {
+                return Err(format!("--freeze-nside {m}: a power of 2 dividing the target nside {nside}"));
+            }
+            let group = (n / m) * (n / m);
+            if s % group != 0 || e % group != 0 {
+                return Err(format!("--freeze-nside {m}: rank ranges are not aligned on its pixels (use fewer ranks)"));
+            }
+            Some(group)
+        }
+    };
+    let project = |g: &mut [f64]| {
+        if let Some(group) = freeze {
+            for c in g.chunks_mut(group) {
+                let mean = c.iter().sum::<f64>() / group as f64;
+                c.iter_mut().for_each(|v| *v -= mean);
+            }
+        }
+    };
 
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
     let calls_before = obj.exchange_calls();
@@ -518,7 +696,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
     let history = if args.niter == 0 {
         Vec::new()
-    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() {
+    } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() && freeze.is_none() {
         run_lbfgs(&obj, &mut x, &opts, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
@@ -533,13 +711,33 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 loss += lm;
                 g.iter_mut().zip(&gm).for_each(|(a, b)| *a += b);
             }
-            if let (Some(tf), Some(ke)) = (&kappa_tf, &kens) {
-                // Statistics of kappa = f(g): cotangent on kappa, chained by f'(g).
-                let (k, dk) = tf.apply(p);
-                let (lk, gk) = ke.loss_and_grad(&k);
+            // Terms on kappa = f(g): cotangent on kappa, chained by f'(g).
+            let kd = match &kappa_tf {
+                Some(tf) if kens.is_some() || kurtosis.is_some() || minkowski.is_some() => Some(tf.apply(p)),
+                _ => None,
+            };
+            if let (Some((k, dk)), Some(ke)) = (&kd, &kens) {
+                let (lk, gk) = ke.loss_and_grad(k);
                 loss += lk;
-                g.iter_mut().zip(gk.iter().zip(&dk)).for_each(|(a, (b, d))| *a += b * d);
+                g.iter_mut().zip(gk.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d);
             }
+            if let Some(ku) = &kurtosis {
+                let (l4, g4) = ku.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
+                loss += l4;
+                match &kd {
+                    Some((_, dk)) => g.iter_mut().zip(g4.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
+                    None => g.iter_mut().zip(&g4).for_each(|(a, b)| *a += b),
+                }
+            }
+            if let Some(mk) = &minkowski {
+                let (l5, g5) = mk.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
+                loss += l5;
+                match &kd {
+                    Some((_, dk)) => g.iter_mut().zip(g5.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
+                    None => g.iter_mut().zip(&g5).for_each(|(a, b)| *a += b),
+                }
+            }
+            project(&mut g);
             (loss, g)
         };
         run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
@@ -551,6 +749,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "neighbour_exchanges_per_evaluation": per_eval(calls_before.0, calls_after.0),
         "engine_allreduces_per_evaluation": per_eval(calls_before.1, calls_after.1),
         "halo_mode": std::env::var("STL_MPI_HALO").unwrap_or_else(|_| "point-to-point".into()),
+        "overlap_first_coarse_level": args.overlap,
     });
     // Final statistics of this group's members and their mean over all members.
     let final_members = obj.statistics(&x);
@@ -570,12 +769,13 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         None => (0.0, Vec::new()),
     };
     // Kappa term: final value and residual of the mean per family (sigma / sqrt(B)).
-    let (loss_kappa, kappa_report) = match (&kappa_tf, &kens) {
-        (Some(tf), Some(ke)) => {
-            let kmean = ke.mean(&ke.obj.statistics(&tf.apply(&x).0));
+    let kfinal = kappa_tf.as_ref().map(|tf| tf.apply(&x).0);
+    let (loss_kappa, kappa_report) = match (&kappa_tf, &kens, &kfinal) {
+        (Some(tf), Some(ke), Some(kx)) => {
+            let kmean = ke.mean(&ke.obj.statistics(kx));
             let kloss: f64 = kmean.iter().zip(&kstats).zip(&ke.obj.weights).map(|((a, b), w)| w * (a - b).norm_sqr()).sum();
             let mut fams = serde_json::Map::new();
-            for fam in &args.kappa_families {
+            for fam in &Family::ALL {
                 let z: Vec<f64> = (0..kplan.len())
                     .filter(|&i| kplan[i].family == *fam)
                     .map(|i| {
@@ -592,7 +792,10 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             let report = serde_json::json!({
                 "table": args.kappa_table,
                 "weight": args.kappa_weight,
-                "families": args.kappa_families.iter().map(|f| f.name()).collect::<Vec<_>>(),
+                "families": if kbase > 0 { args.kappa_families.iter().map(|f| f.name()).collect::<Vec<_>>() } else { Vec::new() },
+                "s3_weight": args.kappa_s3_weight,
+                "s3_levels_nside": args.kappa_s3_nside.map(|(a, b)| [a, b]),
+                "s3_coefficients": kplan.len() - kbase,
                 "coefficients": kplan.len(),
                 "kappa_mean": km,
                 "kappa_std": ks,
@@ -604,7 +807,44 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         _ => (0.0, serde_json::Value::Null),
     };
     let loss_marginal = marginal.as_ref().map_or(0.0, |mg| mg.loss_and_grad(&x, e - s, s, gcomm, cross.as_ref()).0);
-    let final_loss = loss_mean + loss_scatter + loss_levels + loss_kappa + loss_marginal;
+    // Kurtosis of the details (of kappa with --kappa-table): term and every level.
+    let kurtosis_x: &[f64] = kfinal.as_deref().unwrap_or(&x);
+    let loss_kurtosis = kurtosis.as_ref().map_or(0.0, |ku| ku.loss_and_grad(kurtosis_x, e - s, gcomm, cross.as_ref()).0);
+    let kurtosis_report = match &kurtosis_all {
+        Some(ka) => {
+            let excess = |v: &[f64]| v.iter().map(|k| k - 3.0).collect::<Vec<_>>();
+            serde_json::json!({
+                "weight": args.kurtosis_weight,
+                "of": if kappa_tf.is_some() { "kappa" } else { "map" },
+                "levels_nside": kurtosis.as_ref().map(|ku| ku.levels.iter().map(|n| nside >> n).collect::<Vec<_>>()),
+                "loss_final_term": loss_kurtosis,
+                "all_levels_nside": (0..pyramid_levels).map(|n| nside >> n).collect::<Vec<_>>(),
+                "target_excess": excess(&ka.target),
+                "final_excess_mean_over_members": excess(&ka.values(kurtosis_x, e - s, gcomm, cross.as_ref())),
+            })
+        }
+        None => serde_json::Value::Null,
+    };
+    let (loss_minkowski, minkowski_report) = match &minkowski {
+        Some(mk) => {
+            let l = mk.loss_and_grad(kurtosis_x, e - s, gcomm, cross.as_ref()).0;
+            let report = serde_json::json!({
+                "weight": args.minkowski_weight,
+                "of": if kappa_tf.is_some() { "kappa" } else { "map" },
+                "levels_nside": mk.levels_nside(),
+                "nu": mk.nu,
+                "h_over_level_std": mk.h,
+                "eps_over_mean_squared_gradient": mk.eps,
+                "standardised_levels": mk.standardise,
+                "sigma": mk.sigma_source,
+                "loss_final_term": l,
+                "final_z_over_members": mk.report(kurtosis_x, e - s, first_member, gcomm, cross.as_ref()),
+            });
+            (l, report)
+        }
+        None => (0.0, serde_json::Value::Null),
+    };
+    let final_loss = loss_mean + loss_scatter + loss_levels + loss_kappa + loss_marginal + loss_kurtosis + loss_minkowski;
     let sigma: Vec<f64> = sigma2.iter().map(|v| v.sqrt()).collect();
     // Residual of the mean per family, in units of its ergodic sigma
     // (sigma / sqrt(B): sigma itself for one map).
@@ -762,6 +1002,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "loss_history": history,
         "fits": [file("_target.fits"), file("_synthesis.fits")],
         "init": init_info,
+        "freeze_nside": args.freeze_nside,
         "level_power": {
             "weight": args.level_power_weight,
             "levels_nside": (0..level_ratios.len()).map(|n| nside >> n).collect::<Vec<_>>(),
@@ -769,6 +1010,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             "loss_final_term": loss_levels,
         },
         "kappa": kappa_report,
+        "kurtosis": kurtosis_report,
+        "minkowski": minkowski_report,
         "marginal": {"weight": args.marginal_weight, "loss_final_term": loss_marginal},
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
@@ -792,7 +1035,7 @@ mod gpu {
     use stl_core::engine::{EngineConfig, Partition};
     use stl_core::local::LocalGeometry;
     use stl_core::plan::Coefficient;
-    use stl_gpu::{GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
+    use stl_gpu::{ConvForm, GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
 
     /// The device engine of the rank, sized for `batch` maps (the largest
     /// batch it evaluates), as the evaluator of `plan` at that batch (other
@@ -810,6 +1053,9 @@ mod gpu {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
         let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        if let Some(c) = &args.gpu_conv {
+            opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
+        }
         if let Some(mb) = std::env::var("STL_GPU_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
             opts.cache_bytes = mb << 20;
         }
@@ -824,6 +1070,7 @@ mod gpu {
             "blocks_per_level": engine.blocks_per_level(),
             "block_rows": engine.block_rows(),
             "geometry_cache": engine.geometry_cache().0.name(),
+            "conv_form": engine.conv_form().name(),
             "geometry_cache_budget_bytes": engine.geometry_cache().1,
         });
         Ok((GpuEvaluator::new(engine, plan), info))

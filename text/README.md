@@ -1,0 +1,176 @@
+# STL-Dev-MPI paper (first draft)
+
+Draft of the paper on STL-Dev-MPI: scattering-covariance synthesis of
+HEALPix maps on distributed-memory machines (Rust, MPI, CUDA), with the
+weak-lensing convergence experiment (ensembles of 10 syntheses of the
+Takahashi et al. 2017 map r000, judged against the realizations r001-r009).
+Target journal: A&A.
+
+| Path | Content |
+|---|---|
+| `paper.tex` | the text; red `[TODO: ...]` marks in the PDF, `% NUM2048` comments on lines whose numbers come from the nside 512/1024 ensembles |
+| `refs.bib` | bibliography; every entry checked against its DOI record, arXiv or the publisher (2026-10-27) |
+| `figures/` | figures and generated tables (`*_n512.*`, `*_n1024.*`, then `*_n2048.*`), with the `.txt` summaries the text quotes |
+| `scripts/` | the scripts of every data figure and table (below) |
+| `TODO_2048.md` | what to run and edit when the nside 2048 ensemble is available |
+| `paper.pdf` | the compiled draft, committed so that it can be shared: rebuild and commit it with every change of the text |
+
+## Building
+
+```bash
+latexmk -pdf paper.tex
+```
+
+The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
+from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
+aanda.org, author instructions) and are kept in this directory; `lineno`
+comes from TeX Live. The draft builds to 20 pages with no warning (abstract
+under the 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
+for the corresponding author, `\email{...}` after each co-author (read by the
+editorial system, not printed), no ORCID, `[longauth]` only for long author
+lists. The float parameters and the `\FloatBarrier` before Sect. 7 keep the
+experiment's figures ahead of the discussion; the A&A production redoes the
+layout. Build products are ignored by git, except `paper.pdf`.
+
+## Overleaf
+
+This directory is also the Overleaf project
+https://www.overleaf.com/project/6ae0c881be7354f25bfc0005, through the
+Overleaf git bridge (a premium feature of the project owner's account) and
+`git subtree`. GitHub stays the reference; the Overleaf project holds the
+history of `text/` only. In the repository root, with the remote
+`overleaf` = `https://git.overleaf.com/6ae0c881be7354f25bfc0005` (user name
+`git`, password: a git token from Overleaf's Account Settings):
+
+```bash
+# Overleaf -> GitHub (first, before any push)
+git subtree pull --prefix text overleaf main -m "Paper: changes from Overleaf"
+git push origin main
+# GitHub -> Overleaf
+git subtree push --prefix text overleaf main
+```
+
+Pull before pushing and avoid editing on both sides at once. Pushes from git
+can drop or move Overleaf's comments and tracked changes; Overleaf has no
+branches or tags. Overleaf compiles its own PDF (main document: `paper.tex`,
+pdfLaTeX); `paper.pdf` here is rebuilt with `latexmk` and committed.
+
+## Figures
+
+All data figures are computed on the hpc cluster, next to the maps (the
+maps never leave the clusters); only PDFs, PNGs and text come back.
+
+| Script | Figure / table | Data |
+|---|---|---|
+| `measure.py` | caches every statistic of each map in `CACHE/n{N}/{set}/{map}.npz` | realizations `rXXX_nside{N}_nested.npy`, members `synthesis_mMMM_nested.npy` (kappa, histogram-matched) |
+| `fig_cl.py` | `cl_n{N}.pdf`, `.txt` | caches |
+| `fig_levels.py` | `levels_n{N}.pdf` | caches |
+| `fig_peaks_pdf.py` | `peaks_pdf_n{N}.pdf` | caches |
+| `fig_minkowski.py` | `minkowski_n{N}_s0.pdf` (4 pixels), `_s1.pdf` (30 arcmin), `.txt` | caches |
+| `table_zscores.py` | `table_zscores_n{N}.tex` (input by `paper.tex`), `.txt` | caches |
+| `mf_levels.py` (`mf_levels.slurm`) | `mf_levels_n{N}.pdf`, `.tex`, `.txt`: Minkowski functionals of the maps degraded to each level, members and r001-r009 against r000 | maps (own cache `*_mfl.npz`) |
+| `fig_maps.py` (`maps.slurm`) | `maps_mollweide_n{N}.png`, `maps_gnomonic_n{N}.png`: r000, r001, a Gaussian field with r000's spectrum and members, logarithmic colour scale as in Mousset et al. (2024) | maps |
+| `fig_scaling.py` | `scaling.pdf`, `.txt` | `benchmarks/` reports of the repository (runs locally) |
+| `make_all.sh` | measure + every figure for one nside | |
+| `paper_figures.slurm` | the hpc job: Minkowski test, nside 512, 1024, 2048 realizations (`STEPS`) | |
+
+`common.py` holds the definitions (pyramid details, peaks, bands,
+thresholds, smoothing scales). The Minkowski functionals come from
+`tools/minkowski.py`, tested by `tools/test_minkowski.py` against Gaussian
+fields (Appendix A of the paper).
+
+On hpc (layout of the first run, job 2094597, 2026-10-27):
+
+```bash
+# from the repository root, in WSL: copy the scripts to the cluster
+tar cz text/scripts tools/minkowski.py tools/test_minkowski.py | ssh hpc 'tar xzf - -C /scratch/jmdeloui/paper/src'
+ssh hpc 'cd /scratch/jmdeloui/paper/logs && sbatch --export=ALL,P=/scratch/jmdeloui/paper /scratch/jmdeloui/paper/src/text/scripts/paper_figures.slurm'
+# fetch the figures (small files only)
+ssh hpc 'cd /scratch/jmdeloui/paper/figures && tar cf - *.pdf *.png *.txt *.tex' | tar xf - -C text/figures
+```
+
+`/scratch/jmdeloui/paper/cache` keeps the measurements: a re-run measures
+only the maps that are new or changed (at nside 2048, about 4.5 minutes per
+map on 6 threads, 5 maps at a time).
+
+The three PNGs `kappa_*_n256.png` are the figures of
+`docs/kappa_power_spectrum.md` (nside 256 study of the kappa terms), kept
+until they are redrawn in the paper's style.
+
+## Sources of the numbers
+
+- Method, validation, CPU scaling: `CLAUDE.md`, `README.md`, `docs/USAGE.md`
+  section 7, `benchmarks/` (Datarmor, hpc), commit messages of the
+  milestones.
+- GPU: `docs/gpu.md`; H200 numbers from the run reports on hpc
+  (`~/stl-mpi/ens/runs/*/syn.json`) and from
+  `notebooks/takahashi_nside2048_results.ipynb` (nside 4096 on 2 H200).
+  Shared engine against one engine per objective (Table `tab:gpu`,
+  footnotes c and d, the paragraph "One engine per rank" and the
+  conclusions): `docs/gpu.md` section 5.1 at commit fa2e742 of branch
+  `claude/musing-elgamal-9897d9` (engine badc63b, on main; memory formula
+  in section 2.7): hpc, one rank, A100-SXM4-80GB, gaussianised Takahashi
+  kappa target, L = 4, `--weights ergodic --scatter-weight 1 --kappa-table
+  knots --kappa-weight 0.1`, level-power and marginal weights 10 and 10000
+  at nside 1024, 5 and 5000 at 2048, 3 evaluations, 6 host threads (16 on
+  the H200). nside 1024 x 10: c15e8ec out of memory uncapped, 86.6 s,
+  setup 156 s, peak 70.2 GB with `STL_GPU_CACHE_MB=6000`; shared engine
+  uncapped 64.4 s, setup 86 s, peak 62.8 GB (cache 28.4 GB; job 2285199).
+  nside 2048 x 5, shared engine: 394.7 s, setup 446 s, peak 77.7 GB (cache
+  8.6 GB). H200 c15e8ec: 1024 x 10 capped at 16000 MB (44.5 s in the
+  3-evaluation test, peak 98.0 GB; the table keeps the 54.3 s of the
+  production ensemble), 2048 x 5 capped at 6000 MB (156.7 s, 139.2 GB,
+  test 1977934).
+  Diagonal (DIA) form of the convolution (paragraph after "Performance" in
+  the GPU section, Table `tab:gpu` footnote e): PR jmdelouis/STL-Dev-MPI#3,
+  merged into main as 8120aec (30 Oct): DIA is the default of
+  `stl-synth --gpu`, `--gpu-conv stencils` / `STL_GPU_CONV=stencils` gives
+  the bound stencils back; DIA against stencils on the fixtures: 5.3e-17
+  (statistics) and 5.3e-15 (gradients) relative. Method and per-row bytes
+  in `docs/dia_convolution.md`; A100 stencils against DIA (measured with
+  the engine at 74c0b0e, before the merge):
+  hpc job 2353875, one A100-SXM4-80GB, nside 1024 and 2048, one map,
+  L = 4, 3 L-BFGS iterations (4 evaluations) from white noise on a
+  lognormal target, cache `auto` (transposition), reports
+  `benchmarks/dia/a100_synth/synth_n{1024,2048}_L4_{stencils,dia}.json`
+  (one run per case); T4 figures (one T4, garoupe, against a bound-stencil
+  run of the same series) and the A100 ones in `docs/gpu.md` section 5.0,
+  kernel ratios in `docs/dia_convolution.md` section 5.2. Every other GPU
+  figure of the paper (Table `tab:gpu`, Fig. `scaling` (c), the T4 times
+  of `tab:mink512` and `tab:runs`) was measured with the bound stencils;
+  the text says so and gives, for each, the DIA effect measured or
+  expected (expected: per-row sizes of `docs/dia_convolution.md` and the
+  A100 runs). nside 4096 on two H200s: hpc job 1700256 (test, 3
+  evaluations, 60.2 s per evaluation, peak 124.5 GB, `gpu_geometry` 185 s
+  on rank 0 against 181 s for the evaluations; the timers include the
+  target statistics of the setup), report `~/stl-gpu/runs/1700256/test.json`
+  on hpc.
+- Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
+  section 8: Minkowski term and its nside-256 tests). The nside-512 test of
+  the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
+  `/scratch/jmdeloui/mfterm` (jobs 2144055 and 2150122);
+  the runs and the other statistics: `docs/kappa_power_spectrum.md` sections 8.4
+  (term added to the converged ensemble) and 8.5 (term from nside 256 on), and
+  the recommendation in section 6 (branch `claude/kappa-minkowski`, commit 9b323f8).
+  The tail term (`--marginal-tail-weight`, `--marginal-tail`, commit e0496a1)
+  with the Minkowski term from nside 256: judged on garoupe,
+  `/tmp/jmdeloui-mf/cv10_n512ft.txt` and `/tmp/jmdeloui-mf/mfl512t/mf_levels_n512.txt`
+  (28 Oct; not used in production).
+- Irene nside-1024 ensemble with the kurtosis term (job 6087067, analysed on
+  garoupe): `figures/cv10_n1024_irene.txt`, `figures/mf_levels_n1024_irene.txt`
+  (300 iterations). Continued by 300 iterations on Datarmor with the same
+  setting (commit 39d2f60, Minkowski and tail terms off, INIT_NOISE=0):
+  job 7775548, 400 ranks in 10 groups of 40 on 16 nodes (448 cores), Intel
+  MPI, 311 evaluations at 258 s, 22.4 h, loss 2.46 to 0.802 (finished
+  29 Oct); members histogram-matched to kappa (`tools/gaussianize.py
+  match`), judged against r000-r009 (files from `runs/` of the main checkout):
+  `figures/cv10_n1024_datarmor.txt`, `figures/mf_levels_n1024_datarmor.txt`
+  (Irene 300 it and Datarmor 600 it side by side; preliminary until the
+  2048 analysis). Then the 2048 ensemble from these members, jobs 7775549
+  (100 iterations, about 1070 s per evaluation on the same 448 cores,
+  started 29 Oct 17:50) and 7775550 (100 iterations). The Irene jobs
+  6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
+  Datarmor chain).
+- Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
+- Cosmic variance: `figures/table_zscores_n*.txt` (same definitions as
+  `cv10.py` on hpc, `/scratch/jmdeloui/takahashi`).

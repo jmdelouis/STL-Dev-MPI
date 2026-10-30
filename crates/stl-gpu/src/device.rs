@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = include_str!("kernels.cu");
 
-const KERNELS: [&str; 20] = [
+const KERNELS: [&str; 31] = [
     "ring_thetas",
     "geom_build",
     "geom_pack",
@@ -23,6 +23,17 @@ const KERNELS: [&str; 20] = [
     "seg_sort",
     "conv_fwd",
     "conv_adj",
+    "dia_reach",
+    "flag_count",
+    "flag_fill",
+    "dia_build",
+    "dia_slots",
+    "dia_pack",
+    "dia_fwd",
+    "dia_gin_t",
+    "dia_adj",
+    "face_conv_f32",
+    "face_conv_f64",
     "csr_apply",
     "modulus_at",
     "modvjp_add",

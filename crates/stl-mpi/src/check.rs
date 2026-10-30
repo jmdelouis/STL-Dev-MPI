@@ -2,7 +2,7 @@
 //! it: shared by the thread tests and the `stl-mpi-check` binary.
 
 use crate::comm::Comm;
-use crate::decomposition::{build_partition, Decomposition};
+use crate::decomposition::{build_partition_for, Decomposition};
 use crate::halo::HaloExchange;
 use num_complex::Complex64;
 use std::path::{Path, PathBuf};
@@ -114,7 +114,7 @@ fn prepare<'c, C: Comm>(
         Some(u) => Decomposition::with_unit(geo, cfg.levels(), comm.size(), u),
         None => Decomposition::new(geo, cfg.levels(), comm.size()),
     };
-    let part = build_partition(geo, &dec, comm.rank());
+    let part = build_partition_for(geo, cfg, &dec, comm.rank());
     let ex = HaloExchange::new(comm, &dec, &part);
     let (n0, layout0) = (geo.pixels(0), &part.layouts[0]);
     let mut x = vec![0.0; batch * channels * layout0.len()];
@@ -239,6 +239,42 @@ mod gpu {
         let bands = bands.iter().enumerate().map(|(d, g)| owned_of(&part, d, g)).collect();
         RankResult { values, owned, maps_gradient, bands, held, halo }
     }
+}
+
+/// Overlap mode (`cfg.overlap` set): statistics, owned level-0 range and
+/// owned slice `[B, C, end - start]` of the map cotangent (the band and
+/// per-level cotangents are not formed in this mode).
+#[allow(clippy::too_many_arguments)]
+pub fn run_problem_overlap<C: Comm>(
+    geo: &LocalGeometry,
+    cfg: &EngineConfig,
+    plan: &[Coefficient],
+    map0: &[f64],
+    gradient: &[Complex64],
+    batch: usize,
+    channels: usize,
+    comm: &C,
+) -> (Vec<Complex64>, (i64, i64), Vec<f64>) {
+    assert!(cfg.overlap.is_some());
+    let dec = Decomposition::new(geo, cfg.levels(), comm.size());
+    let part = build_partition_for(geo, cfg, &dec, comm.rank());
+    let ex = HaloExchange::new(comm, &dec, &part);
+    let (n0, layout0) = (geo.pixels(0), &part.layouts[0]);
+    let mut x = vec![0.0; batch * channels * layout0.len()];
+    for r in 0..batch * channels {
+        for p in 0..layout0.len() {
+            let id = layout0.id(p);
+            if part.owns(0, id) {
+                x[r * layout0.len() + p] = map0[r * n0 + id as usize];
+            }
+        }
+    }
+    let owned0 = part.owned[0];
+    let mut engine = LocalEngine::distributed(geo, cfg, part, &ex, x, batch, channels);
+    let values = engine.forward(plan);
+    let mg = engine.reverse(plan, gradient);
+    let g0 = engine.map_cotangent(mg);
+    (values, owned0, engine.owned_values(0, &g0))
 }
 
 /// Collective: every rank's result on rank 0 (`None` elsewhere).

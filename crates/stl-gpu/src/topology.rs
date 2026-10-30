@@ -191,6 +191,9 @@ fn decimation(geo: &LocalGeometry, fine: &LevelTopo, coarse: &LevelTopo, threads
     for (cols, w) in fwd {
         dn.cols.extend(cols);
         dn.vals.extend_from_slice(w);
+        // u32 row pointers: ~30 nonzeros per coarse row, so a rank holds
+        // up to ~1.4e8 coarse cells of a level (nside 8192 needs >= 2 ranks).
+        assert!(dn.cols.len() <= u32::MAX as usize, "decimation rows beyond u32 row pointers: use more ranks");
         dn.indptr.push(dn.cols.len() as u32);
     }
     // Transpose on the owned fine cells.
@@ -207,7 +210,10 @@ fn decimation(geo: &LocalGeometry, fine: &LevelTopo, coarse: &LevelTopo, threads
                 }
             }
         }
+        let mut sum = 0u64;
         for i in 0..n {
+            sum += count[i + 1] as u64;
+            assert!(sum <= u32::MAX as u64, "transposed decimation rows beyond u32 row pointers: use more ranks");
             count[i + 1] += count[i];
         }
         let total = count[n] as usize;

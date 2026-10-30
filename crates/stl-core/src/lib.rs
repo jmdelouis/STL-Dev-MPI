@@ -8,6 +8,7 @@
 
 pub mod conv;
 pub mod decimation;
+pub mod dia;
 pub mod engine;
 pub mod healpix;
 pub mod lbfgs;

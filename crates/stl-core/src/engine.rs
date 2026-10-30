@@ -59,11 +59,14 @@ pub struct EngineConfig {
     pub j_to_dg: Vec<usize>,
     /// `has_fewer_convolutions` definitions of S3/S4.
     pub fewer: bool,
+    /// Overlapping-patch mode with the levels from this one on computed by
+    /// one process (see [`Overlap`]); `None`: halo exchanges at every level.
+    pub overlap: Option<usize>,
 }
 
 impl EngineConfig {
     pub fn new(j_count: usize, fewer: bool) -> Self {
-        EngineConfig { j_count, j_to_dg: (0..j_count).collect(), fewer }
+        EngineConfig { j_count, j_to_dg: (0..j_count).collect(), fewer, overlap: None }
     }
 
     /// Number of pyramid levels, `max dg(j) + 1`.
@@ -118,6 +121,22 @@ impl Layout {
     }
 }
 
+/// Overlapping-patch mode.  Levels `< coarse` (fine): each process
+/// evaluates its owned blocks (coefficient terms counted) and halo blocks
+/// (terms not counted, fields recomputed so that everything its owned
+/// terms read is exact locally), and decimates its maps on its map blocks:
+/// no exchange during the sweeps.  Levels `>= coarse` are held whole and
+/// evaluated by the root process alone; their inputs (stored moduli of the
+/// fine levels, the map of level `coarse`) are summed over the processes
+/// once, their cotangents handed back once.  An evaluation then needs the
+/// level-0 halo of the map, two global sums, one broadcast and the
+/// level-0 ghost reduction of the map cotangent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overlap {
+    pub coarse: usize,
+    pub root: bool,
+}
+
 /// What one process holds and works on: per level, the owned NESTED range
 /// `[start, end)`, the layout of its fields and its blocks (in id order).
 /// The pyramid is aligned: the owned range of level `d + 1` is the parents
@@ -126,17 +145,35 @@ impl Layout {
 pub struct Partition {
     pub owned: Vec<(i64, i64)>,
     pub layouts: Vec<Layout>,
+    /// Blocks whose coefficient terms this process counts.
     pub blocks: Vec<Vec<Vec<i64>>>,
+    /// Overlap mode: blocks evaluated without counting their terms.
+    pub halo_blocks: Vec<Vec<Vec<i64>>>,
+    /// Cells where this process decimates the map of each level (and
+    /// chains the map cotangent back): the owned blocks, or in overlap
+    /// mode the whole region its blocks read.
+    pub map_blocks: Vec<Vec<Vec<i64>>>,
+    pub overlap: Option<Overlap>,
 }
 
 impl Partition {
     /// One process holding every level whole (`LocalGeometry.blocks`).
     pub fn serial(geo: &LocalGeometry, levels: usize) -> Self {
+        let blocks: Vec<Vec<Vec<i64>>> = (0..levels).map(|d| geo.blocks(d)).collect();
         Partition {
             owned: (0..levels).map(|d| (0, geo.pixels(d) as i64)).collect(),
             layouts: (0..levels).map(|d| Layout::Full(geo.pixels(d))).collect(),
-            blocks: (0..levels).map(|d| geo.blocks(d)).collect(),
+            halo_blocks: vec![Vec::new(); levels],
+            map_blocks: blocks.clone(),
+            blocks,
+            overlap: None,
         }
+    }
+
+    /// First level held whole by the root (`levels` when none, or in the
+    /// classic mode).
+    pub fn coarse_level(&self) -> usize {
+        self.overlap.map_or(self.layouts.len(), |o| o.coarse)
     }
 
     #[inline]
@@ -265,10 +302,17 @@ impl<'a> LocalEngine<'a> {
                 m.insert((d, n), vec![0.0; rows * part.layouts[n].len()]);
             }
         }
+        let overlap = part.overlap;
         let mut engine = LocalEngine { geo, cfg, part, ex, batch, channels, maps: vec![x], m, gm: BTreeMap::new() };
         for d in 0..levels - 1 {
             let mut next = engine.decimate(d);
-            ex.halo(d + 1, &mut next, bc);
+            match overlap {
+                None => ex.halo(d + 1, &mut next, bc),
+                // Each process decimated its owned cells of the first coarse
+                // level (zero elsewhere): the sum is the whole level.
+                Some(o) if d + 1 == o.coarse => ex.allreduce(&mut next),
+                Some(_) => {}
+            }
             engine.maps.push(next);
         }
         engine
@@ -312,7 +356,7 @@ impl<'a> LocalEngine<'a> {
         let x = &self.maps[dg];
         let rows = self.batch * self.channels;
         let mut out = vec![0.0; rows * self.part.layouts[dg + 1].len()];
-        for coarse in &self.part.blocks[dg + 1] {
+        for coarse in &self.part.map_blocks[dg + 1] {
             let domain = decimation_domain(self.geo, dg, coarse);
             let down = self.geo.down(dg, &domain);
             let y = down.apply(&self.gather(dg, x, &domain));
@@ -329,10 +373,11 @@ impl<'a> LocalEngine<'a> {
     }
 
     /// Transpose of [`decimate`](Self::decimate) added into `out` (level
-    /// `dg`, owned cells); `g` (level `dg + 1`) must hold its halo.
-    fn decimate_adjoint_add(&self, g: &[f64], dg: usize, out: &mut [f64]) {
+    /// `dg`) on the cells of `fine_blocks`; `g` (level `dg + 1`) must hold
+    /// every coarse cell they read.
+    fn decimate_adjoint_add(&self, g: &[f64], dg: usize, out: &mut [f64], fine_blocks: &[Vec<i64>]) {
         let rings = 2 * self.geo.down_rings(dg);
-        for block in &self.part.blocks[dg] {
+        for block in fine_blocks {
             let domain = dilate_fine(block, self.geo.nside(dg), rings);
             let down = self.geo.down(dg, &domain);
             let x = down.adjoint(&self.gather(dg + 1, g, &down.out_ids));
@@ -376,25 +421,34 @@ impl<'a> LocalEngine<'a> {
         let mut values = vec![ZERO; self.batch * plan.len()];
         let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
         let rows = self.batch * self.channels * self.geo.l;
+        let coarse = self.part.coarse_level();
         for n in 0..self.levels() {
-            for block in self.part.blocks[n].clone() {
+            let counted = self.part.blocks[n].iter().map(|b| (b.clone(), true));
+            let halo = self.part.halo_blocks[n].iter().map(|b| (b.clone(), false));
+            let work: Vec<(Vec<i64>, bool)> = counted.chain(halo).collect();
+            for (block, counted) in work {
                 let mut fields = Block::new(self, n, &block);
-                for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
-                    let (a, b) = fields.operands(self, &plan[i]);
-                    let p = fields.partial(self, &plan[i], &a, &b);
-                    for (bi, v) in p.into_iter().enumerate() {
-                        values[bi * plan.len() + i] += v;
-                    }
-                    if moments {
-                        for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
-                            second[bi * plan.len() + i] += v;
+                if counted {
+                    for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
+                        let (a, b) = fields.operands(self, &plan[i]);
+                        let p = fields.partial(self, &plan[i], &a, &b);
+                        for (bi, v) in p.into_iter().enumerate() {
+                            values[bi * plan.len() + i] += v;
+                        }
+                        if moments {
+                            for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
+                                second[bi * plan.len() + i] += v;
+                            }
                         }
                     }
                 }
-                // Push |z_n| on F to every coarser level.
+                // Push |z_n| on F to every coarser level (a halo block only
+                // to the fine levels: the coarse ones are summed over the
+                // processes and its cells are counted by their owner).
+                let top = if counted { self.levels() } else { coarse };
                 let chain = self.supports(n, &block);
                 let mut a: Vec<f64> = fields.z_on_block().iter().map(|v| v.norm()).collect();
-                for n2 in n + 1..self.levels() {
+                for n2 in n + 1..top {
                     let (next, _) = self.geo.piece_forward(&a, &chain[n2 - n - 1], n2 - 1);
                     a = next;
                     let mut target = std::mem::take(self.m.get_mut(&(n, n2)).unwrap());
@@ -402,15 +456,34 @@ impl<'a> LocalEngine<'a> {
                     self.m.insert((n, n2), target);
                 }
             }
-            // The moduli pushed from level n are complete: owners collect
-            // them, then hand them out as halo to the coarser levels' readers
-            // (all coarser levels in one exchange each way).
             let ex = self.ex;
-            let mut fields: Vec<(usize, &mut [f64], usize)> =
-                self.m.range_mut((n, n + 1)..(n + 1, 0)).map(|(&(_, n2), v)| (n2, v.as_mut_slice(), rows)).collect();
-            if !fields.is_empty() {
-                ex.reduce_ghosts_many(&mut fields);
-                ex.halo_many(&mut fields);
+            match self.part.overlap {
+                // The moduli pushed from level n are complete: owners collect
+                // them, then hand them out as halo to the coarser levels'
+                // readers (all coarser levels in one exchange each way).
+                None => {
+                    let mut fields: Vec<(usize, &mut [f64], usize)> =
+                        self.m.range_mut((n, n + 1)..(n + 1, 0)).map(|(&(_, n2), v)| (n2, v.as_mut_slice(), rows)).collect();
+                    if !fields.is_empty() {
+                        ex.reduce_ghosts_many(&mut fields);
+                        ex.halo_many(&mut fields);
+                    }
+                }
+                // Fine levels done: the coarse stored moduli of the fine
+                // levels, summed over the processes in one global sum.
+                Some(o) if n + 1 == o.coarse && o.coarse < self.levels() => {
+                    let keys: Vec<(usize, usize)> = self.m.keys().copied().filter(|&(d, n2)| d < o.coarse && n2 >= o.coarse).collect();
+                    let mut flat: Vec<f64> = keys.iter().flat_map(|k| self.m[k].iter().copied()).collect();
+                    ex.allreduce(&mut flat);
+                    let mut at = 0;
+                    for k in keys {
+                        let field = self.m.get_mut(&k).unwrap();
+                        let len = field.len();
+                        field.copy_from_slice(&flat[at..at + len]);
+                        at += len;
+                    }
+                }
+                Some(_) => {}
             }
         }
         let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
@@ -434,30 +507,79 @@ impl<'a> LocalEngine<'a> {
         let (bc, rows) = (self.batch * self.channels, self.batch * self.channels * self.geo.l);
         self.gm = self.m.iter().map(|(&k, v)| (k, vec![0.0; v.len()])).collect();
         let mut maps_gradient: Vec<Vec<f64>> = self.maps.iter().map(|x| vec![0.0; x.len()]).collect();
+        let coarse = self.part.coarse_level();
         for n in (0..self.levels()).rev() {
-            for block in self.part.blocks[n].clone() {
+            let counted = self.part.blocks[n].iter().map(|b| (b.clone(), true));
+            let halo = self.part.halo_blocks[n].iter().map(|b| (b.clone(), false));
+            let work: Vec<(Vec<i64>, bool)> = counted.chain(halo).collect();
+            for (block, counted) in work {
                 let mut fields = Block::new(self, n, &block);
-                for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
-                    if !active[i] {
-                        continue;
+                if counted {
+                    for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
+                        if !active[i] {
+                            continue;
+                        }
+                        let g: Vec<Complex64> = (0..self.batch).map(|b| gradient[b * plan.len() + i]).collect();
+                        let (a, b) = fields.operands(self, &plan[i]);
+                        fields.reverse_coefficient(self, &plan[i], &a, &b, &g, &mut maps_gradient);
                     }
-                    let g: Vec<Complex64> = (0..self.batch).map(|b| gradient[b * plan.len() + i]).collect();
-                    let (a, b) = fields.operands(self, &plan[i]);
-                    fields.reverse_coefficient(self, &plan[i], &a, &b, &g, &mut maps_gradient);
                 }
-                fields.finish_reverse(self, &mut maps_gradient);
+                let top = if counted { self.levels() } else { coarse };
+                fields.finish_reverse(self, &mut maps_gradient, top);
             }
-            // gm[d][n] is complete once level n is done: collect (with the
-            // map cotangent of level n, one exchange), then hand out as halo
-            // to the finer levels' chains (one exchange).
             let ex = self.ex;
-            let mut fields: Vec<(usize, &mut [f64], usize)> =
-                self.gm.iter_mut().filter(|(&(_, k), _)| k == n).map(|(_, v)| (n, v.as_mut_slice(), rows)).collect();
-            fields.push((n, maps_gradient[n].as_mut_slice(), bc));
-            ex.reduce_ghosts_many(&mut fields);
-            fields.pop();
-            if !fields.is_empty() {
-                ex.halo_many(&mut fields);
+            match self.part.overlap {
+                // gm[d][n] is complete once level n is done: collect (with
+                // the map cotangent of level n, one exchange), then hand out
+                // as halo to the finer levels' chains (one exchange).
+                None => {
+                    let mut fields: Vec<(usize, &mut [f64], usize)> =
+                        self.gm.iter_mut().filter(|(&(_, k), _)| k == n).map(|(_, v)| (n, v.as_mut_slice(), rows)).collect();
+                    fields.push((n, maps_gradient[n].as_mut_slice(), bc));
+                    ex.reduce_ghosts_many(&mut fields);
+                    fields.pop();
+                    if !fields.is_empty() {
+                        ex.halo_many(&mut fields);
+                    }
+                }
+                // Coarse levels done (on the root): chain their map
+                // cotangents down to the first coarse level, then hand the
+                // cotangents the fine levels need to every process (one
+                // global sum, zero contributions from the other processes).
+                Some(o) if n == o.coarse => {
+                    if o.root {
+                        let levels = self.levels();
+                        for d in (o.coarse + 1..levels).rev() {
+                            let all = self.geo.blocks(d - 1);
+                            let (fine, coarse_part) = maps_gradient.split_at_mut(d);
+                            self.decimate_adjoint_add(&coarse_part[0], d - 1, &mut fine[d - 1], &all);
+                        }
+                    }
+                    let keys: Vec<(usize, usize)> = self.gm.keys().copied().filter(|&(d, n2)| d < o.coarse && n2 >= o.coarse).collect();
+                    let mut flat: Vec<f64> = keys.iter().flat_map(|k| self.gm[k].iter().copied()).collect();
+                    flat.extend_from_slice(&maps_gradient[o.coarse]);
+                    ex.allreduce(&mut flat);
+                    let mut at = 0;
+                    for k in keys {
+                        let field = self.gm.get_mut(&k).unwrap();
+                        let len = field.len();
+                        field.copy_from_slice(&flat[at..at + len]);
+                        at += len;
+                    }
+                    // The first coarse level was decimated by the owners of
+                    // its cells: each keeps the cotangent of its own cells.
+                    let (s, e) = self.part.owned[o.coarse];
+                    let layout = &self.part.layouts[o.coarse];
+                    let np = layout.len();
+                    let mg = &mut maps_gradient[o.coarse];
+                    for r in 0..bc {
+                        for p in 0..np {
+                            let id = layout.id(p);
+                            mg[r * np + p] = if s <= id && id < e { flat[at + r * np + p] } else { 0.0 };
+                        }
+                    }
+                }
+                Some(_) => {}
             }
         }
         self.gm.clear();
@@ -469,6 +591,7 @@ impl<'a> LocalEngine<'a> {
     /// pyramid (`LocalGeometry.analysis_vjp`).  Returns `(map0, bands)` over
     /// the layouts, owned cells valid.
     pub fn analysis_vjp(&self, maps_gradient: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
+        assert!(self.part.overlap.is_none(), "band cotangents are not available in the overlap mode");
         let bc = self.batch * self.channels;
         let g0 = self.map_cotangent(maps_gradient);
         let mut bands = vec![g0.clone()];
@@ -496,10 +619,24 @@ impl<'a> LocalEngine<'a> {
     /// and their exchanges): what a synthesis with the map as variable needs.
     pub fn map_cotangent(&self, mut maps_gradient: Vec<Vec<f64>>) -> Vec<f64> {
         let bc = self.batch * self.channels;
-        for d in (1..self.levels()).rev() {
-            self.ex.halo(d, &mut maps_gradient[d], bc);
-            let (fine, coarse) = maps_gradient.split_at_mut(d);
-            self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1]);
+        match self.part.overlap {
+            None => {
+                for d in (1..self.levels()).rev() {
+                    self.ex.halo(d, &mut maps_gradient[d], bc);
+                    let (fine, coarse) = maps_gradient.split_at_mut(d);
+                    self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1], &self.part.blocks[d - 1]);
+                }
+            }
+            // Local partial cotangents chained over the map regions (the
+            // coarse levels were chained by the root in `reverse`), then
+            // the halo contributions of level 0 summed on their owners.
+            Some(o) => {
+                for d in (1..o.coarse.min(self.levels() - 1) + 1).rev() {
+                    let (fine, coarse) = maps_gradient.split_at_mut(d);
+                    self.decimate_adjoint_add(&coarse[0], d - 1, &mut fine[d - 1], &self.part.map_blocks[d - 1]);
+                }
+                self.ex.reduce_ghosts(0, &mut maps_gradient[0], bc);
+            }
         }
         maps_gradient.swap_remove(0)
     }
@@ -900,7 +1037,9 @@ impl Block {
         }
     }
 
-    fn finish_reverse(&mut self, engine: &mut LocalEngine, maps_gradient: &mut [Vec<f64>]) {
+    /// Reverse of the block's fields; its own decimation chain is reversed
+    /// for the targets of the levels below `top`.
+    fn finish_reverse(&mut self, engine: &mut LocalEngine, maps_gradient: &mut [Vec<f64>], top: usize) {
         let geo = engine.geo;
         let (n, l, kd, na1, nf) = (self.n, geo.l, self.domain.len(), self.na1(), self.nf());
         let bc = engine.batch * engine.channels;
@@ -928,7 +1067,7 @@ impl Block {
         // The block's own chain to coarser levels.
         let chain = engine.supports(n, &self.block);
         let mut g_fine: Option<Vec<f64>> = None;
-        for n2 in n + 1..engine.levels() {
+        for n2 in n + 1..top {
             let mut g = engine.gather(n2, &engine.gm[&(n, n2)], &chain[n2 - n]);
             for level in (n..n2).rev() {
                 g = geo.piece_adjoint(&g, &chain[level - n], &chain[level - n + 1], level);

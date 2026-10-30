@@ -1,0 +1,7 @@
+(a) nside 64, $L=2$, CPU Datarmor (Xeon E5-2680): 1: 8.061 s, 4: 2.595 s, 16: 1.034 s, 28: 0.812 s; efficiency at 28: 0.35
+(a) nside 64, $L=2$, CPU hpc (EPYC 9655): 1: 3.262 s, 4: 1.054 s, 16: 0.488 s, 64: 0.29 s, 128: 0.284 s; efficiency at 128: 0.09
+(b) nside 1024, $L=2$, CPU hpc, 1 node (EPYC 9655): 24: 60.867 s, 48: 33.031 s, 96: 19.68 s, 192: 10.153 s; efficiency at 192: 0.75
+(b) nside 1024, $L=2$, CPU Irene (EPYC 7H12): 128: 30.2 s, 512: 8.9 s; efficiency at 512: 0.85
+(c) $L=4$, Tesla T4 GPUs nside 256: 1: 1.261 s, 2: 0.424 s, 3: 0.335 s; efficiency at 3: 1.25
+(c) $L=4$, Tesla T4 GPUs nside 1024: 1: 66.792 s, 2: 24.686 s, 3: 13.34 s; efficiency at 3: 1.67
+(c) $L=4$, Tesla T4 GPUs nside 2048: 2: 474.16 s, 3: 114.283 s; efficiency at 3: 2.77

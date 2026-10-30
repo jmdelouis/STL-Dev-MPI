@@ -1,0 +1,13 @@
+nside 512: Minkowski functionals, members' median deviation from r000 in sigma of the realizations, rms over -2 <= nu <= 5
+fwhm 27.48' V0 no kurtosis: rms 3.04, max |median| 5.04
+fwhm 27.48' V0 kurtosis: rms 2.85, max |median| 4.73
+fwhm 27.48' V1 no kurtosis: rms 1.66, max |median| 3.35
+fwhm 27.48' V1 kurtosis: rms 1.70, max |median| 3.72
+fwhm 27.48' V2 no kurtosis: rms 1.27, max |median| 3.05
+fwhm 27.48' V2 kurtosis: rms 1.22, max |median| 3.20
+fwhm 30' V0 no kurtosis: rms 3.11, max |median| 5.29
+fwhm 30' V0 kurtosis: rms 2.92, max |median| 5.04
+fwhm 30' V1 no kurtosis: rms 1.81, max |median| 3.82
+fwhm 30' V1 kurtosis: rms 1.85, max |median| 4.15
+fwhm 30' V2 no kurtosis: rms 1.19, max |median| 2.34
+fwhm 30' V2 kurtosis: rms 1.20, max |median| 2.52

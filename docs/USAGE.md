@@ -266,6 +266,14 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--kappa-table KNOTS` | none | add the statistics of `kappa = f(g)`, `f` the monotone interpolation of the gaussianisation table (below) |
 | `--kappa-weight X` | 0.1 | factor on that term (0 drops it) |
 | `--kappa-families F` | `mean,var,S1,S2` | families of that term |
+| `--kappa-s3-weight X` | 0 | add the S3 of `kappa` as a separate reduced chi^2 of factor X |
+| `--kappa-s3-nside A-B` | all | keep only the S3 whose scale `j3` is at the levels of nside A to B |
+| `--kurtosis-weight X` | 0 | hold the kurtosis of the pyramid details of `kappa` (of the map without `--kappa-table`) at the selected levels (below) |
+| `--kurtosis-nside A-B` | all | levels of that term, by nside |
+| `--minkowski-weight X` | 0 | hold the Minkowski functionals V0, V1, V2 of the pyramid levels of `kappa` (of the map without `--kappa-table`) at the target's, in units of their std over realizations (below) |
+| `--minkowski-nside A-B` | 64 to nside / 2 | levels of that term, by nside |
+| `--minkowski-standardise` | off | standardise every level map by its own mean and std first (as `mf_levels.py`); the sigma file decides when given |
+| `--minkowski-sigma F` | 1 % of the target's maximum | std of the functionals over realizations, from `stl-minkowski --sigma-out` |
 | `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
@@ -325,6 +333,21 @@ nside 256.  Two terms fix it:
 
 With both, the kappa C_l of a 4-member ensemble go from 12.5 % to 6.6 % rms
 over l = 31-767, with every gaussianised family still at 1 sigma per member.
+
+Those two terms leave the tails of the kappa details too heavy at
+intermediate scales: in that ensemble the excess kurtosis of the pyramid
+details is 3 times the target's at nside 64 and 2.3 times at 32.
+
+- `--kurtosis-weight X --kurtosis-nside A-B` adds
+  `X / B sum_m sum_n (K_n / K_n(target) - 1)^2`, where `K_n` is the
+  kurtosis of the details of level n of `kappa = f(g)` (of the map itself
+  without `--kappa-table`), for the levels of nside A to B.  Use X = 0.1 per
+  member (0.1 B) on `32-NSIDE`.  Every level then ends within 8 % of the
+  target's, the statistics do not move, and the cost is +3 %.
+- `--kappa-s3-weight X --kappa-s3-nside A-B` adds the S3 of kappa (at the
+  levels of `j3` in the range) as a separate reduced chi^2.  It does not
+  hold the kurtosis.
+
 Details, failed alternatives and open points are in
 [kappa_power_spectrum.md](kappa_power_spectrum.md).
 

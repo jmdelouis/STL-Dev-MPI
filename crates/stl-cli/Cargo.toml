@@ -1,6 +1,6 @@
 [package]
 name = "stl-cli"
-description = "Command-line tools: stl-synth (synthesis of HEALPix maps from ScatCov statistics)"
+description = "Command-line tools: stl-synth (synthesis of HEALPix maps from ScatCov statistics), stl-minkowski"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,3 +23,7 @@ mpi = { workspace = true, optional = true }
 [[bin]]
 name = "stl-synth"
 path = "src/bin/stl-synth.rs"
+
+[[bin]]
+name = "stl-minkowski"
+path = "src/bin/stl-minkowski.rs"
