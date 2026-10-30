@@ -1,0 +1,17 @@
+{
+ "name": "objective_n16",
+ "nside": 16,
+ "scales": 5,
+ "references": 12,
+ "members": 10,
+ "block_pixels": 256,
+ "ps_variance_upper": 40.0,
+ "loss": 19.669805534071703,
+ "blocks": {
+  "gaussian_sc": 3.033290556651461,
+  "physical_sc": 56.9133567045724,
+  "power": 1.1554831368325975,
+  "pdf": 17.861756113644727,
+  "mf": 19.385141158657312
+ }
+}

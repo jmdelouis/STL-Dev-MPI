@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 cdshealpix.workspace = true
 num-complex.workspace = true
+rustfft.workspace = true
 
 [dev-dependencies]
 npyz.workspace = true
