@@ -22,6 +22,13 @@ is superseded).  Branch `claude/campeti-merge-19032c`:
 Full run at nside 128 (ten members, 2500 iterations, 3 T4): 2 h 34 min,
 loss 61.8 to 0.625 (section 8.5).
 
+Tests on garoupe before the merge into main (revision 2b45ba4, release
+profile, 3 T4, no device test skipped): `cargo test --workspace` (with the
+doc-tests), `-p stl-bridge --features gpu`, `-p stl-mpi --features gpu`,
+`-p stl-cli --features gpu,mpi`, `tools/mpi_check.sh 2 4` and `2 3`, and
+the 20-iteration trajectory against STL-Dev (`--ignored`, 4 ranks): all
+pass.
+
 `stl-ensemble` (section 8 of this note: usage, validation, timings) runs his
 method without Python: `calibrate` builds the LUT and the targets from any
 list of reference maps, `run` minimises the ten members with the native
