@@ -2,7 +2,9 @@
 //! (`stl_port/ensemble.py`, `EnsembleObjective`), with the members' maps as
 //! the variable:
 //!
-//!     L = (L_GSC + L_PSC + L_PS + L_PDF + L_MF) / 5
+//! ```text
+//! L = (L_GSC + L_PSC + L_PS + L_PDF + L_MF) / 5
+//! ```
 //!
 //! on the Gaussian maps `g` of the B members and their physical maps
 //! `kappa = f(g) - mean(f(g))`: the SC statistics of g and of kappa through
