@@ -269,6 +269,27 @@ impl DeviceGeometry {
         out: Arg,
         out_stride: usize,
     ) {
+        self.forward_mapped(gpu, ker, x, NULL, x_stride, rows, row0, n, opos, out, out_stride);
+    }
+
+    /// [`forward`](Self::forward) reading grid cell `j` at `x[r x_stride +
+    /// xmap[j]]` (`i32`; -1: a zero input), e.g. a field held on a block's
+    /// convolution rows only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_mapped(
+        &self,
+        gpu: &Gpu,
+        ker: &CudaSlice<f64>,
+        x: Arg,
+        xmap: Arg,
+        x_stride: usize,
+        rows: usize,
+        row0: usize,
+        n: usize,
+        opos: Arg,
+        out: Arg,
+        out_stride: usize,
+    ) {
         assert!(row0 + n <= self.k);
         gpu.launch1(
             "conv_fwd",
@@ -281,6 +302,7 @@ impl DeviceGeometry {
                 (self.p as i32).into(),
                 gpu.a(ker),
                 x,
+                xmap,
                 x_stride.into(),
                 (rows as i32).into(),
                 row0.into(),

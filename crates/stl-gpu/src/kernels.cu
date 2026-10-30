@@ -498,11 +498,12 @@ extern "C" __global__ void geom_wt(const u32* kgp, u64 n_entries, const double* 
 #define RC 4
 
 // out[((r * G + g) * 2 + o) * out_stride + opos(i)] = sum_p (sum_n x[r, pos] w) ker[g, o, p]
-// for the geometry rows k = row0 + i (i < n_sel; opos null: i).  One
+// for the geometry rows k = row0 + i (i < n_sel; opos null: i).  The grid
+// cell pos is read at xmap[pos] when xmap is given (-1: a zero input).  One
 // thread per (i, g, group of RC input rows r).
 extern "C" __global__ void conv_fwd(
     const u32* pos, const double* w, int G, i64 K, int P, const double* ker,
-    const double* x, i64 x_stride, int R,
+    const double* x, const int* xmap, i64 x_stride, int R,
     i64 row0, i64 n_sel, const u32* opos, i64 out_stride, double* out)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
@@ -525,11 +526,11 @@ extern "C" __global__ void conv_fwd(
         for (int j = 0; j < RC; j++) acc[j] = 0.0;
         for (int n = 0; n < 4; n++) {
             i64 a = (((i64)g * 4 + n) * P + p) * K + k;
-            u32 ps = pos[a];
+            i64 ps = xmap ? (i64)xmap[pos[a]] : (i64)pos[a];
             double wv = w[a];
 #pragma unroll
             for (int j = 0; j < RC; j++)
-                if (j < nr) acc[j] += x[(i64)(r0 + j) * x_stride + ps] * wv;
+                if (j < nr) acc[j] += (ps >= 0 ? x[(i64)(r0 + j) * x_stride + ps] : 0.0) * wv;
         }
         double kp0 = k0[p], kp1 = k1[p];
 #pragma unroll
@@ -845,13 +846,14 @@ extern "C" __global__ void dia_pack(const double* dense, i64 K, int G, int D, co
 // out[((r * G + g) * 2 + o) * out_stride + opos(i)] = sum_d coef[g, o, d, k]
 // x[r, cell(k, d)] for the rows k = row0 + i (i < n_sel), over the
 // diagonals the row uses in increasing order (the others are zero for
-// every gauge).  One thread per (i, GB gauges, RC input rows): the cell of
-// a diagonal and its RC inputs serve every gauge.
+// every gauge).  The grid cell is read at xmap[cell] when xmap is given
+// (-1: skipped, as a cell off the grid).  One thread per (i, GB gauges, RC
+// input rows): the cell of a diagonal and its RC inputs serve every gauge.
 extern "C" __global__ void dia_fwd(
     const double* coef, const u32* mask, int G, i64 K, const int* doff,
     const i64* rows, i64 nside, int order,
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
-    const double* x, i64 x_stride, int R,
+    const double* x, const int* xmap, i64 x_stride, int R,
     i64 row0, i64 n_sel, const u32* opos, i64 out_stride, double* out)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
@@ -883,6 +885,7 @@ extern "C" __global__ void dia_fwd(
             i64 q = ext_pix(fr, xr + doff[2 * d], yr + doff[2 * d + 1], nside, order);
             if (q < 0) continue;
             i64 ps = grid_find(grid, n_grid, own_start, own_end, own_pos0, q);
+            if (ps >= 0 && xmap) ps = xmap[ps];
             if (ps < 0) continue;
             double xv[RC];
 #pragma unroll
@@ -1097,16 +1100,19 @@ extern "C" __global__ void csr_apply(
 // Element-wise operations
 // ---------------------------------------------------------------------------
 
-// |z| of a planar complex field at the positions pos[i] (rows R):
-// out[r * out_stride + pos[i]] = hypot(z[(2r) * z_stride + pos[i]], z[(2r+1) * z_stride + pos[i]]).
-extern "C" __global__ void modulus_at(const double* z, i64 z_stride, const u32* pos, i64 n, int R, double* out, i64 out_stride) {
+// |z| of a planar complex field, element i of rows R:
+// out[r * out_stride + opos(i)] = hypot(z[(2r) * z_stride + zpos(i)], z[(2r+1) * z_stride + zpos(i)])
+// (positions: index arrays or contiguous when null).
+extern "C" __global__ void modulus_at(
+    const double* z, i64 z_stride, const u32* zpos, i64 n, int R, double* out, i64 out_stride, const u32* opos)
+{
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= n * (i64)R) return;
     i64 i = t % n;
     int r = (int)(t / n);
-    i64 p = pos[i];
+    i64 p = zpos ? (i64)zpos[i] : i;
     double re = z[(2 * (i64)r) * z_stride + p], im = z[(2 * (i64)r + 1) * z_stride + p];
-    out[(i64)r * out_stride + p] = hypot(re, im);
+    out[(i64)r * out_stride + (opos ? (i64)opos[i] : i)] = hypot(re, im);
 }
 
 // gz += modulus_vjp(z, g) (planar complex gz, z; real g), element i of
