@@ -497,10 +497,10 @@ faster (the kept fields leave 1.3 GB of cache and blocks of 19 086 rows
 on the T4). At nside 2048 x 5 both take the same time (163 s per
 evaluation, against 395 s with the bound stencils in §5.1); the fields
 go from 47.3 to 15.0 GB, a third, and the peak from 75.1 to 63.8 GB. The
-losses of the two modes agree to 2e-15 relative on the T4 and 2e-16 on
-the A100 (different block boundaries; with the same blocks they are
-identical, §3), and at nside 2048 x 5 to 1e-15 with the bound-stencil
-run of §5.1.
+losses of the two modes agree to 2.7e-15 relative on both devices
+(different block boundaries; with the same blocks they are identical,
+§3), and at nside 2048 x 5 to 2.3e-15 with the bound-stencil run of
+§5.1.
 
 Ten members at nside 2048 now fit on one A100: 67.5 GB at the peak,
 of which the level fields 30.1 GB (45 %), the DIA geometry cache 22.3 GB
