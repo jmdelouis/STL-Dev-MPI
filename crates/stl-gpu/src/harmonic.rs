@@ -341,13 +341,13 @@ impl GpuSht {
     }
 }
 
-/// Sum over the `n` pixels (chunks of [`CHUNK`] in a fixed tree, then the
-/// chunks in order): mode 0 `sum a`, 1 `sum (a - shift)^2`, 2 `sum a^2 +
-/// b^2`, 3 `sum a b`.
-pub fn pixel_sum(gpu: &Gpu, a: &CudaSlice<f64>, b: Option<&CudaSlice<f64>>, n: usize, shift: f64, mode: i32) -> f64 {
+/// Sum over the `n` pixels at `a` (and `b`; device addresses, see
+/// [`Gpu::at`]), chunks of [`CHUNK`] in a fixed tree, then the chunks in
+/// order: mode 0 `sum a`, 1 `sum (a - shift)^2`, 2 `sum a^2 + b^2`, 3 `sum a b`.
+pub fn pixel_sum(gpu: &Gpu, a: Arg, b: Arg, n: usize, shift: f64, mode: i32) -> f64 {
     let chunks = n.div_ceil(CHUNK);
     let out = gpu.zeros::<f64>(chunks);
-    gpu.launch("px_sums", (chunks as u32, 1), 256, &[gpu.a(a), b.map_or(NULL, |v| gpu.a(v)), n.into(), CHUNK.into(), shift.into(), mode.into(), gpu.a(&out)]);
+    gpu.launch("px_sums", (chunks as u32, 1), 256, &[a, b, n.into(), CHUNK.into(), shift.into(), mode.into(), gpu.a(&out)]);
     gpu.download(&out).iter().sum()
 }
 

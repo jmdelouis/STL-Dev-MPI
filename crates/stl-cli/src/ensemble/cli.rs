@@ -50,6 +50,8 @@ run:
   --ps-variance-upper X upper band centre of the C_l variance term (default 383 at nside 128;
                         required otherwise)
   --history-size N      L-BFGS history (default 10)
+  --harmonic cpu|gpu    where the C_l, PDF and Minkowski terms run (default gpu with --gpu;
+                        the device needs cuFFT, libcufft.so or STL_CUFFT)
   --out PREFIX          PREFIX.json, PREFIX_mMMM_gaussian_nested.npy, PREFIX_mMMM_physical_nested.npy
 both:
   --block-pixels N      CPU engine block (default 16384)
@@ -83,6 +85,8 @@ pub struct Args {
     pub gpu_fields: Option<String>,
     pub gpu_cache: String,
     pub gpu_block_rows: usize,
+    /// `--harmonic`: `Some(true)` on the device.
+    pub harmonic_gpu: Option<bool>,
 }
 
 impl Args {
@@ -134,6 +138,13 @@ impl Args {
                 "--gpu-fields" => a.gpu_fields = Some(it.next().ok_or("--gpu-fields needs a value")?.clone()),
                 "--gpu-cache" => a.gpu_cache = it.next().ok_or("--gpu-cache needs a value")?.clone(),
                 "--gpu-block-rows" => a.gpu_block_rows = num(it.next(), k)?,
+                "--harmonic" => {
+                    a.harmonic_gpu = Some(match it.next().map(|s| s.as_str()) {
+                        Some("gpu") => true,
+                        Some("cpu") => false,
+                        _ => return Err("--harmonic: cpu or gpu".into()),
+                    })
+                }
                 "-h" | "--help" => return Err(USAGE.into()),
                 other => return Err(format!("unknown option {other}\n\n{USAGE}")),
             }
@@ -144,6 +155,9 @@ impl Args {
             "calibrate" | "run" => {
                 if a.gpu && !cfg!(feature = "gpu") {
                     return Err("--gpu: built without the feature gpu".into());
+                }
+                if a.harmonic_gpu == Some(true) && !a.gpu {
+                    return Err("--harmonic gpu needs --gpu".into());
                 }
                 Ok(a)
             }
@@ -176,7 +190,8 @@ mod device {
     use stl_core::plan::Coefficient;
     use stl_gpu::{ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
 
-    /// The device engine of the rank for `batch` maps, as an evaluator of `plan`.
+    /// The device engine of the rank for `batch` maps, as an evaluator of
+    /// `plan`, its description and the device.
     pub fn evaluator<'a>(
         args: &Args,
         geo: &'a LocalGeometry,
@@ -185,7 +200,7 @@ mod device {
         part: &Partition,
         rank: usize,
         batch: usize,
-    ) -> Result<(GpuEvaluator<'a>, serde_json::Value), String> {
+    ) -> Result<(GpuEvaluator<'a>, serde_json::Value, Arc<Gpu>), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
         let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
         let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
@@ -207,7 +222,7 @@ mod device {
             "conv_form": engine.conv_form().name(), "fields": engine.field_store().name(),
             "geometry_cache": engine.geometry_cache().0.name(), "block_rows": engine.block_rows(),
         });
-        Ok((GpuEvaluator::new(engine, plan), info))
+        Ok((GpuEvaluator::new(engine, plan), info, gpu))
     }
 }
 
@@ -239,7 +254,7 @@ pub fn run_calibrate<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
     let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
     #[cfg(feature = "gpu")]
     if args.gpu {
-        let (ev, _) = device::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), 1)?;
+        let (ev, _, _) = device::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), 1)?;
         probe.set_evaluator(Box::new(ev));
     }
     let names = args.references.iter().map(|p| p.display().to_string()).collect();
@@ -292,16 +307,21 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
     let mut gpu_info = serde_json::Value::Null;
     // One device engine for this group's members, shared by the SC of g and of kappa.
     #[cfg(feature = "gpu")]
-    let _device = if args.gpu {
-        let (ev, info) = device::evaluator(args, &geo, &cfg, &plan, &og.part, comm.rank(), local)?;
+    let (_device, dev_gpu) = if args.gpu {
+        let (ev, info, gpu) = device::evaluator(args, &geo, &cfg, &plan, &og.part, comm.rank(), local)?;
         og.set_evaluator(Box::new(ev.share(&plan, local)));
         ok.set_evaluator(Box::new(ev.share(&plan, local)));
         gpu_info = info;
-        Some(ev)
+        (Some(ev), Some(gpu))
     } else {
-        None
+        (None, None)
     };
-    let obj = EnsembleObjective::new(&og, &ok, cross.as_ref(), &cal, &plan, members, first, cutoff)?;
+    #[allow(unused_mut)]
+    let mut obj = EnsembleObjective::new(&og, &ok, cross.as_ref(), &cal, &plan, members, first, cutoff)?;
+    #[cfg(feature = "gpu")]
+    if let (Some(gpu), true) = (dev_gpu, args.harmonic_gpu.unwrap_or(args.gpu)) {
+        obj.use_device_terms(gpu)?;
+    }
     let (s, e) = og.owned();
     let (s, e) = (s as usize, e as usize);
     let npix = 12 * nside * nside;
@@ -395,7 +415,7 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
         "nside": nside, "scales": cal.scales, "orientations": 4, "kernel": 5, "members": members, "groups": groups,
         "ranks": comm.size(), "calibration": path, "references": cal.references, "bootstrap_ids": cal.bootstrap_ids,
         "ps_variance_upper": cutoff, "niter": args.niter, "max_eval": args.max_eval, "history_size": args.history_size,
-        "init": args.init, "seed": seed, "gpu": gpu_info,
+        "init": args.init, "seed": seed, "gpu": gpu_info, "harmonic": if obj.device_terms() { "gpu" } else { "cpu" },
         "evaluations": history.len(), "seconds": seconds, "setup_seconds": setup_seconds,
         "seconds_per_evaluation": per_eval, "first_evaluation_seconds": evals.first(),
         "loss_history": &history, "blocks": BLOCKS, "blocks_history": &*blocks_history.borrow(),

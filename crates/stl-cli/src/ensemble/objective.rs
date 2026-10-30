@@ -20,7 +20,9 @@
 //! for those terms).
 
 use super::calibration::Calibration;
-use super::fields::{band_powers, band_powers_vjp, lp_windows, Cic, Minkowski};
+use super::fields::{band_powers, band_powers_vjp, lp_windows, Cic, Minkowski, MinkowskiState};
+#[cfg(feature = "gpu")]
+use super::gpu_terms::GpuTerms;
 use super::losses::{mf_loss, pdf_loss, power_loss, sc_loss, Block, ScCoordinates};
 use num_complex::Complex64;
 use std::cell::RefCell;
@@ -60,6 +62,15 @@ pub struct EnsembleObjective<'o, 'a, C: Comm> {
     npix: usize,
     pub last: RefCell<[Block; 5]>,
     pub timers: RefCell<BTreeMap<&'static str, f64>>,
+    #[cfg(feature = "gpu")]
+    gpu_terms: Option<RefCell<GpuTerms>>,
+}
+
+/// What the host's cotangents of the harmonic terms need of the forward pass.
+#[derive(Default)]
+struct HostPass {
+    alms: Vec<Vec<C64>>,
+    states: Vec<MinkowskiState>,
 }
 
 impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
@@ -105,6 +116,8 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
             npix: 12 * nside * nside,
             last: RefCell::new([Block::default(); 5]),
             timers: Default::default(),
+            #[cfg(feature = "gpu")]
+            gpu_terms: None,
         })
     }
 
@@ -187,6 +200,111 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         (block, grad)
     }
 
+    #[cfg(feature = "gpu")]
+    fn add_time(&self, name: &'static str, seconds: f64) {
+        *self.timers.borrow_mut().entry(name).or_default() += seconds;
+    }
+
+    /// Band powers, CIC and Minkowski functionals of the members' whole
+    /// physical maps on the host, and what their cotangents need.
+    fn host_forward(&self, kfull: &[f64], kept: &mut HostPass) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let t = Instant::now();
+        let local = self.local();
+        let mut pw = Vec::with_capacity(local * self.windows.len());
+        let mut hist = Vec::with_capacity(local * self.cic.bins);
+        for row in kfull.chunks(self.npix) {
+            let (p, a) = band_powers(&self.sht, &self.windows, row);
+            pw.extend(p);
+            kept.alms.push(a);
+            hist.extend(self.cic.forward(row));
+        }
+        self.tick("power_pdf_forward", t);
+        // Minkowski states (six maps per member) kept for the cotangent when
+        // they take at most MF_STATE_BYTES, else recomputed (the source's replay).
+        let t = Instant::now();
+        let keep = local * self.npix * 6 * 8 <= MF_STATE_BYTES;
+        let mut mfv = Vec::with_capacity(local * self.mk.count());
+        for row in kfull.chunks(self.npix) {
+            let (v, s) = self.mk.forward(&self.sht, row);
+            mfv.extend(v);
+            if keep {
+                kept.states.push(s);
+            }
+        }
+        self.tick("mf_forward", t);
+        (pw, hist, mfv)
+    }
+
+    /// Map cotangents `[local, npix]` on the host from the cotangents of this
+    /// group's members' band powers, CIC and functionals.
+    fn host_reverse(&self, kfull: &[f64], kept: HostPass, cps: &[f64], cpdf: &[f64], cmf: &[f64]) -> Vec<f64> {
+        let (nb, bins, nm) = (self.windows.len(), self.cic.bins, self.mk.count());
+        let t = Instant::now();
+        let mut hk = vec![0.0; self.local() * self.npix];
+        for (m, row) in kfull.chunks(self.npix).enumerate() {
+            let g1 = band_powers_vjp(&self.sht, &self.windows, &kept.alms[m], &cps[m * nb..(m + 1) * nb]);
+            let g2 = self.cic.vjp(row, &cpdf[m * bins..(m + 1) * bins]);
+            let out = &mut hk[m * self.npix..(m + 1) * self.npix];
+            out.iter_mut().zip(g1.iter().zip(&g2)).for_each(|(o, (p, q))| *o = p + q);
+        }
+        self.tick("power_pdf_reverse", t);
+        let t = Instant::now();
+        let mut states = kept.states.into_iter();
+        for (m, row) in kfull.chunks(self.npix).enumerate() {
+            let state = match states.next() {
+                Some(s) => s,
+                None => self.mk.forward(&self.sht, row).1,
+            };
+            let g3 = self.mk.vjp(&self.sht, &state, &cmf[m * nm..(m + 1) * nm]);
+            hk[m * self.npix..(m + 1) * self.npix].iter_mut().zip(g3).for_each(|(o, v)| *o += v);
+        }
+        self.tick("mf_reverse", t);
+        hk
+    }
+
+    /// Runs the harmonic terms on `gpu` (`--harmonic gpu`).
+    #[cfg(feature = "gpu")]
+    pub fn use_device_terms(&mut self, gpu: std::sync::Arc<stl_gpu::Gpu>) -> Result<(), String> {
+        self.gpu_terms = Some(RefCell::new(GpuTerms::new(gpu, &self.sht, &self.mk)?));
+        Ok(())
+    }
+
+    /// Whether the harmonic terms run on the device.
+    pub fn device_terms(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        return self.gpu_terms.is_some();
+        #[cfg(not(feature = "gpu"))]
+        false
+    }
+
+    #[cfg(feature = "gpu")]
+    fn device_forward(&self, kfull: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let d = self.gpu_terms.as_ref()?;
+        let (pw, hist, mfv, secs) = d.borrow_mut().forward(kfull, &self.windows, &self.cic);
+        self.add_time("power_pdf_forward", secs[0]);
+        self.add_time("mf_forward", secs[1]);
+        Some((pw, hist, mfv))
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn device_forward(&self, _: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        None
+    }
+
+    #[cfg(feature = "gpu")]
+    fn device_reverse(&self, cps: &[f64], cpdf: &[f64], cmf: &[f64]) -> Option<Vec<f64>> {
+        let d = self.gpu_terms.as_ref()?;
+        let (hk, secs) = d.borrow().reverse(&self.windows, &self.cic, cps, cpdf, cmf);
+        self.add_time("power_pdf_reverse", secs[0]);
+        self.add_time("mf_reverse", secs[1]);
+        Some(hk)
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn device_reverse(&self, _: &[f64], _: &[f64], _: &[f64]) -> Option<Vec<f64>> {
+        None
+    }
+
     /// Loss and owned gradient of this group's members `x` `[local, owned]`
     /// (Gaussian maps).
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
@@ -201,61 +319,25 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         let t = Instant::now();
         let (psc, mut gk) = self.sc_block(self.k, &kx, true);
         self.tick("physical_sc", t);
-        // Host features of this group's members, gathered over the groups.
-        let t = Instant::now();
+        // Harmonic features of this group's members (on the device with
+        // `--harmonic gpu`), gathered over the groups.
         let local = self.local();
-        let nb = self.windows.len();
-        let nm = self.mk.count();
-        let mut pw = Vec::with_capacity(local * nb);
-        let mut alms = Vec::with_capacity(local);
-        let mut hist = Vec::with_capacity(local * self.cic.bins);
-        for row in kfull.chunks(self.npix) {
-            let (p, a) = band_powers(&self.sht, &self.windows, row);
-            pw.extend(p);
-            alms.push(a);
-            hist.extend(self.cic.forward(row));
-        }
-        self.tick("power_pdf_forward", t);
-        // Minkowski states (six maps per member) kept for the cotangent when
-        // they take at most MF_STATE_BYTES, else recomputed (the source's replay).
-        let t = Instant::now();
-        let keep = local * self.npix * 6 * 8 <= MF_STATE_BYTES;
-        let mut mfv = Vec::with_capacity(local * nm);
-        let mut states = Vec::new();
-        for row in kfull.chunks(self.npix) {
-            let (v, s) = self.mk.forward(&self.sht, row);
-            mfv.extend(v);
-            if keep {
-                states.push(s);
-            }
-        }
-        self.tick("mf_forward", t);
+        let (nb, bins, nm) = (self.windows.len(), self.cic.bins, self.mk.count());
+        let mut kept = HostPass::default();
+        let (pw, hist, mfv) = match self.device_forward(&kfull) {
+            Some(f) => f,
+            None => self.host_forward(&kfull, &mut kept),
+        };
         let tg = &self.cal.targets;
         let (ps, cps) = power_loss(&self.gather_rows(&pw, nb), &tg.power_mean, &tg.power_var, &self.centers, self.cutoff).expect("C_l block");
-        let (pdf, cpdf) = pdf_loss(&self.gather_rows(&hist, self.cic.bins), &tg.pdf_mean, &tg.pdf_var);
+        let (pdf, cpdf) = pdf_loss(&self.gather_rows(&hist, bins), &tg.pdf_mean, &tg.pdf_var);
         let (mf, cmf) = mf_loss(&self.gather_rows(&mfv, nm), &tg.mf_mean, &tg.mf_var);
-        let t = Instant::now();
-        let mut hk = vec![0.0; local * self.npix];
-        for (m, row) in kfull.chunks(self.npix).enumerate() {
-            let a = self.first_member + m;
-            let g1 = band_powers_vjp(&self.sht, &self.windows, &alms[m], &cps[a * nb..(a + 1) * nb]);
-            let g2 = self.cic.vjp(row, &cpdf[a * self.cic.bins..(a + 1) * self.cic.bins]);
-            let out = &mut hk[m * self.npix..(m + 1) * self.npix];
-            out.iter_mut().zip(g1.iter().zip(&g2)).for_each(|(o, (p, q))| *o = p + q);
-        }
-        self.tick("power_pdf_reverse", t);
-        let t = Instant::now();
-        let mut kept = states.into_iter();
-        for (m, row) in kfull.chunks(self.npix).enumerate() {
-            let a = self.first_member + m;
-            let state = match kept.next() {
-                Some(s) => s,
-                None => self.mk.forward(&self.sht, row).1,
-            };
-            let g3 = self.mk.vjp(&self.sht, &state, &cmf[a * nm..(a + 1) * nm]);
-            hk[m * self.npix..(m + 1) * self.npix].iter_mut().zip(g3).for_each(|(o, v)| *o += v);
-        }
-        self.tick("mf_reverse", t);
+        let (a, b) = (self.first_member, self.first_member + local);
+        let (cps, cpdf, cmf) = (&cps[a * nb..b * nb], &cpdf[a * bins..b * bins], &cmf[a * nm..b * nm]);
+        let hk = match self.device_reverse(cps, cpdf, cmf) {
+            Some(h) => h,
+            None => self.host_reverse(&kfull, kept, cps, cpdf, cmf),
+        };
         // kappa cotangent -> g: f'(g) (c - mean(c)), member by member.
         let t = Instant::now();
         let hk = self.owned(&hk);

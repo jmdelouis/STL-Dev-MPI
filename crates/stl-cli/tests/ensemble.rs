@@ -193,6 +193,115 @@ fn objective_matches_python() {
     assert!((an - fd).abs() <= 1e-2 * fd.abs(), "finite differences");
 }
 
+#[cfg(feature = "gpu")]
+fn device() -> Option<std::sync::Arc<stl_gpu::Gpu>> {
+    match stl_gpu::Gpu::new(0) {
+        Ok(g) => Some(std::sync::Arc::new(g)),
+        Err(e) => {
+            eprintln!("no device, test skipped: {e}");
+            None
+        }
+    }
+}
+
+/// The harmonic terms on the device (`--harmonic gpu`) against the host:
+/// the five blocks and the gradient of the fixture objective.
+#[cfg(feature = "gpu")]
+#[test]
+fn device_terms_match_the_host() {
+    let Some(gpu) = device() else { return };
+    let case = "objective_n16";
+    let m = meta(case);
+    let cal = fixture_calibration();
+    let members = m["members"].as_u64().unwrap() as usize;
+    let (geo, cfg, plan) = setup(cal.nside, cal.scales, 256);
+    let x = f(case, "members");
+    let out = stl_mpi::threads::run_ranks(1, |comm| {
+        let dummy = vec![Complex64::new(0.0, 0.0); members * plan.len()];
+        let og = Objective::new(&geo, &cfg, &plan, &dummy, members, 1, comm);
+        let ok = Objective::with_partition(&geo, &cfg, &plan, &dummy, members, 1, comm, og.dec.clone(), og.part.clone());
+        let mut obj = EnsembleObjective::new(&og, &ok, None, &cal, &plan, members, 0, m["ps_variance_upper"].as_f64().unwrap()).unwrap();
+        let (_, host) = obj.loss_and_grad(&x);
+        let hb = *obj.last.borrow();
+        obj.use_device_terms(gpu.clone()).unwrap();
+        let (_, dev) = obj.loss_and_grad(&x);
+        let db = *obj.last.borrow();
+        (hb, host, db, dev)
+    });
+    let (hb, host, db, dev) = &out[0];
+    for ((h, d), name) in hb.iter().zip(db).zip(stl_cli::ensemble::objective::BLOCKS) {
+        let e = (h.loss - d.loss).abs() / h.loss;
+        eprintln!("{name}: host {:.15e} device {:.15e} ({e:.2e})", h.loss, d.loss);
+        assert!(e < 1e-12, "{name}");
+    }
+    let e = rel(dev, host);
+    eprintln!("gradient: {e:.2e}");
+    assert!(e < 1e-12, "gradient {e:e}");
+}
+
+/// Wall time of the harmonic terms of one member on the device, as
+/// `host_profile` (`--ignored`, `--features gpu`): the transforms one by
+/// one, then the forward and reverse passes of the three terms.
+#[cfg(feature = "gpu")]
+#[test]
+#[ignore]
+fn device_profile() {
+    use std::time::Instant;
+    use stl_cli::ensemble::fields::{lp_windows, Cic, Minkowski};
+    use stl_cli::ensemble::gpu_terms::GpuTerms;
+    use stl_gpu::harmonic::GpuSht;
+    let Some(gpu) = device() else { return };
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    let nside = env("STL_PROFILE_NSIDE").unwrap_or(128);
+    let reps = env("STL_PROFILE_REPS").unwrap_or(3);
+    let best = |f: &mut dyn FnMut()| {
+        (0..reps)
+            .map(|_| {
+                gpu.sync();
+                let t = Instant::now();
+                f();
+                gpu.sync();
+                t.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let t = Instant::now();
+    let sht = Sht::new(nside, 3 * nside - 1);
+    let dev = GpuSht::new(&gpu, &sht).unwrap();
+    let setup = t.elapsed().as_secs_f64();
+    let x: Vec<f64> = (0..sht.npix).map(|i| (0.5 * stl_cli::pixel_normal(3, i as i64)).exp() - 1.0).collect();
+    let dx = gpu.upload(&x);
+    let alm = dev.analysis(&gpu, &dx);
+    let d = dev.derivatives(&gpu, &alm);
+    let analysis = best(&mut || drop(dev.analysis(&gpu, &dx)));
+    let synthesis = best(&mut || drop(dev.analysis_vjp(&gpu, &alm)));
+    let derivatives = best(&mut || drop(dev.derivatives(&gpu, &alm)));
+    let derivatives_vjp = best(&mut || drop(dev.derivatives_vjp(&gpu, &d)));
+    let (w, _) = lp_windows(3 * nside - 1);
+    let (lo, hi) = x.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    let cic = Cic::new(lo, hi, 100);
+    let mk = Minkowski::default();
+    let mut terms = GpuTerms::new(gpu.clone(), &sht, &mk).unwrap();
+    let (cps, cpdf, cmf) = (vec![1.0; w.len()], vec![1.0; 100], vec![1.0; mk.count()]);
+    let mut fwd = [0.0; 2];
+    let forward = best(&mut || fwd = terms.forward(&x, &w, &cic).3);
+    let mut rev = [0.0; 2];
+    let reverse = best(&mut || rev = terms.reverse(&w, &cic, &cps, &cpdf, &cmf).1);
+    let report = serde_json::json!({
+        "nside": nside, "lmax": 3 * nside - 1, "device": gpu.name, "reps": reps, "setup": setup,
+        "seconds": {
+            "sht_analysis": analysis, "sht_synthesis": synthesis, "sht_derivatives": derivatives, "sht_derivatives_vjp": derivatives_vjp,
+            "forward": forward, "forward_power_pdf": fwd[0], "forward_mf": fwd[1],
+            "reverse": reverse, "reverse_power_pdf": rev[0], "reverse_mf": rev[1],
+        },
+        "per_member_evaluation": {
+            "sht": 2.0 * analysis + derivatives + derivatives_vjp + 2.0 * synthesis,
+            "total": forward + reverse,
+        },
+    });
+    println!("{report}");
+}
+
 /// Wall time of the host terms of one member and one evaluation, part by
 /// part (`--ignored`; `STL_PROFILE_NSIDE`, default 128; `STL_THREADS`):
 /// the SHT passes, the Minkowski thresholds (the functionals minus their

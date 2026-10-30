@@ -6,6 +6,8 @@
 pub mod calibration;
 pub mod cli;
 pub mod fields;
+#[cfg(feature = "gpu")]
+pub mod gpu_terms;
 pub mod losses;
 pub mod lut;
 pub mod objective;
