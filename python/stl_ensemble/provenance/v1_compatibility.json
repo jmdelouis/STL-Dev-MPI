@@ -1,0 +1,63 @@
+{
+  "source_version": "2026-10-28-v1",
+  "implementation_sha256": "0d60c2edd7eb6660798d1bcb8004c74fae4c82bbe4c865efa77eba5462c1ec64",
+  "implementation_files": {
+    "__init__.py": "4d6c08ac77ad1d609ded6f591ef94033cbeef00e9cdf90bde210f4b13aee5374",
+    "calibration.py": "a09203d035c1ec084c21734be7080aa3434683310fddcce3f032acfab4f9628c",
+    "config.py": "03e708cc5f4c0c54be73768f709ed40145a97d245ab6601cfbec49e605837717",
+    "driver.py": "cfe5af1c11a8df96d66f86609e45bff9bc76f80c994dde084b9b258047be1893",
+    "ensemble.py": "77dca0bb934a80b6ffb1274f44850933cb8ed1daaac191a6d67cfd12f75f6291",
+    "harmonics.py": "f793ffb28ae7616d5e2987b0e76f4d2976a53579ed27ec9dc9c63588a26ff498",
+    "losses.py": "4b2c12afe7f52fba19d8c38a8add1305b984dc5423b6537971956df381238c5d",
+    "lut.py": "41c717fbb4061dd9f5f2b8e09c7e81a2b53dfa73adb59f29d455549a9f3bbd4b",
+    "minkowski.py": "146ba458a1941e691e549dcfb889cd18f32f9e7e1264941d0cd14f2d558b1c7f",
+    "native.py": "a04e0514167fce536b05ff4d0d5273297b8730943ab67a1bcb1818ac74154cec",
+    "pdf.py": "4b1c0ae176699794092479806195fb84283cac02999620406354d5b29630b339",
+    "sc_normalization.py": "70d5608d4ee3d885dfa2b106c6925fe827dffee5cb10a101714946b95f33cb4c"
+  },
+  "losses": {
+    "version": "2026-10-28-v1",
+    "average_divisor": 5,
+    "members": 10,
+    "ddof": 1,
+    "sc_variance_floor": 1e-12,
+    "sc_variance_weight": 1,
+    "physical_sc_mean": "sum of four family means; S1,S2,S3,S4",
+    "gaussian_sc_mean": "coefficient-count mean of available native counterparts",
+    "power": {
+      "bands": 16,
+      "window": "cosine2 ell+0.5; no row normalization",
+      "mean_weight": 10,
+      "variance_weight": 2.5,
+      "var_epsilon": "0.01*max(trainvar,1e-30)"
+    },
+    "pdf": {
+      "bins": 100,
+      "support_margin": 0.02,
+      "mean_weight": 1,
+      "variance_weight": 1,
+      "sigma_floor_rel": 0.05,
+      "variance_floor_rel": 0.0001
+    },
+    "mf": {
+      "thresholds": 65,
+      "limits": [
+        -4,
+        4
+      ],
+      "epsilon": 0.125,
+      "mean_weight": 1,
+      "variance_weight": 10,
+      "gradient_floor": "stop_gradient(1e-4*mean(q)+1e-12)",
+      "angular_beam": null
+    },
+    "lut": {
+      "knots": 8192,
+      "coordinates": "Gaussian quantiles",
+      "tails": "linear extrapolation",
+      "physical_monopole": "per synthesized member; differentiated",
+      "reference_recenter": false
+    }
+  },
+  "package_manifest_sha256": "cbe05976048310c09dee8b82abc0161d1bd95bf9a0c1658eeb69dc4e50c3e626"
+}
