@@ -191,6 +191,18 @@ until they are redrawn in the paper's style.
   ranks' orders on the host), halo exchanges 24 s per evaluation (11.6 +
   8.2 + 4.6), losses identical; device objective against host terms on 1
   and 3 ranks: same loss, gradient within 1.2e-16 of its maximum.
+  A100 with the terms on the device (`docs/gpu.md` section 5.3 at 22cefc6,
+  reports `benchmarks/terms/a100/n2048_B10_{host,device}.json`): hpc job
+  2423067 (build 4d10f1f), one A100-SXM4-80GB, nside 2048 x 10, production
+  options (level power 10, marginal 10000, kappa table weight 0.1,
+  kurtosis 1.0 on nside 32-2048, scatter 1), members from the nside-1024
+  syntheses, fields recomputed, 3 evaluations, 6 host threads: host terms
+  333.7 s, device terms 61.7 s (5.4 x), busy 16.2 -> 90.6 % (nvidia-smi
+  every 2 s, setup excluded), peak 67.5 -> 67.9 GB (cache 22.3 GB in
+  both), host work about 270 -> 3 s (copies 84.2, marginal 62.1, kappa
+  transform 23.3, kurtosis 11.3, level power 9.3), losses equal to 1e-15,
+  setup 330 s. The "17 times" against Datarmor uses the approximate
+  1070 s per evaluation of job 7775549 (Table `tab:runs`).
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
