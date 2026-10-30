@@ -956,6 +956,7 @@ name = "stl-gpu"
 version = "0.1.0"
 dependencies = [
  "cudarc",
+ "libloading 0.9.0",
  "npyz",
  "num-complex",
  "serde_json",

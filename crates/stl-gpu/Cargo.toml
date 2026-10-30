@@ -14,6 +14,8 @@ num-complex.workspace = true
 # --version`, or `CUDARC_CUDA_VERSION` (e.g. 11040 for a CUDA 11.4 driver),
 # else the latest.
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-version-from-build-system", "fallback-latest"] }
+# cuFFT for the harmonic transforms, loaded at run time (src/cufft.rs).
+libloading = "0.9"
 
 [dev-dependencies]
 stl-mpi = { path = "../stl-mpi", features = ["gpu"] }

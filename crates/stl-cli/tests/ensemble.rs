@@ -193,36 +193,71 @@ fn objective_matches_python() {
     assert!((an - fd).abs() <= 1e-2 * fd.abs(), "finite differences");
 }
 
-/// Wall time of the host parts of one member at nside 128 (`--ignored`).
+/// Wall time of the host terms of one member and one evaluation, part by
+/// part (`--ignored`; `STL_PROFILE_NSIDE`, default 128; `STL_THREADS`):
+/// the SHT passes, the Minkowski thresholds (the functionals minus their
+/// SHTs), the CIC PDF and the C_l.  Best of `STL_PROFILE_REPS` runs
+/// (default 3, 1 above nside 256).
 #[test]
 #[ignore]
-fn host_timings_nside128() {
-    use stl_cli::ensemble::fields::{band_powers, lp_windows, Minkowski};
+fn host_profile() {
+    use stl_cli::ensemble::fields::{band_powers, band_powers_vjp, lp_windows, Cic, Minkowski};
     use std::time::Instant;
-    let nside = 128;
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    let nside = env("STL_PROFILE_NSIDE").unwrap_or(128);
+    let reps = env("STL_PROFILE_REPS").unwrap_or(if nside > 256 { 1 } else { 3 });
+    let best = |f: &mut dyn FnMut()| {
+        (0..reps)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let t = Instant::now();
     let sht = Sht::new(nside, 3 * nside - 1);
-    let x: Vec<f64> = (0..sht.npix).map(|i| stl_cli::pixel_normal(3, i as i64)).collect();
-    let t = Instant::now();
+    let setup = t.elapsed().as_secs_f64();
+    // A lognormal-like field: the cost does not depend on its content.
+    let x: Vec<f64> = (0..sht.npix).map(|i| (0.5 * stl_cli::pixel_normal(3, i as i64)).exp() - 1.0).collect();
     let alm = sht.analysis(&x);
-    eprintln!("analysis {:.4} s", t.elapsed().as_secs_f64());
-    let t = Instant::now();
     let d = sht.derivatives(&alm);
-    eprintln!("derivatives {:.4} s", t.elapsed().as_secs_f64());
-    let t = Instant::now();
-    let g = sht.derivatives_vjp([&d[0], &d[1], &d[2], &d[3], &d[4]]);
-    eprintln!("derivatives_vjp {:.4} s", t.elapsed().as_secs_f64());
-    let t = Instant::now();
-    let _ = sht.analysis_vjp(&g);
-    eprintln!("analysis_vjp {:.4} s", t.elapsed().as_secs_f64());
+    let dv = sht.derivatives_vjp([&d[0], &d[1], &d[2], &d[3], &d[4]]);
+    let analysis = best(&mut || drop(sht.analysis(&x)));
+    let synthesis = best(&mut || drop(sht.analysis_vjp(&dv)));
+    let derivatives = best(&mut || drop(sht.derivatives(&alm)));
+    let derivatives_vjp = best(&mut || drop(sht.derivatives_vjp([&d[0], &d[1], &d[2], &d[3], &d[4]])));
     let (w, _) = lp_windows(3 * nside - 1);
-    let t = Instant::now();
-    let _ = band_powers(&sht, &w, &x);
-    eprintln!("band powers {:.4} s", t.elapsed().as_secs_f64());
+    let cot_w = vec![1.0; w.len()];
+    let power = best(&mut || drop(band_powers(&sht, &w, &x)));
+    let power_vjp = best(&mut || drop(band_powers_vjp(&sht, &w, &alm, &cot_w)));
+    let (lo, hi) = x.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    let cic = Cic::new(lo, hi, 100);
+    let cot_h = vec![1.0; 100];
+    let cic_forward = best(&mut || drop(cic.forward(&x)));
+    let cic_vjp = best(&mut || drop(cic.vjp(&x, &cot_h)));
     let mk = Minkowski::default();
-    let t = Instant::now();
     let (v, s) = mk.forward(&sht, &x);
-    eprintln!("minkowski forward {:.4} s", t.elapsed().as_secs_f64());
-    let t = Instant::now();
-    let _ = mk.vjp(&sht, &s, &v);
-    eprintln!("minkowski vjp {:.4} s", t.elapsed().as_secs_f64());
+    let mf_forward = best(&mut || drop(mk.forward(&sht, &x)));
+    let mf_vjp = best(&mut || drop(mk.vjp(&sht, &s, &v)));
+    // Per member and evaluation: C_l (analysis, synthesis), Minkowski
+    // (analysis, derivatives; derivatives_vjp, synthesis), CIC both ways.
+    let sht_total = 2.0 * analysis + derivatives + derivatives_vjp + 2.0 * synthesis;
+    let thresholds = (mf_forward - analysis - derivatives) + (mf_vjp - derivatives_vjp - synthesis);
+    let pdf = cic_forward + cic_vjp;
+    let report = serde_json::json!({
+        "nside": nside, "lmax": 3 * nside - 1, "threads": stl_cli::ensemble::fields::host_threads(), "reps": reps,
+        "setup": setup,
+        "seconds": {
+            "sht_analysis": analysis, "sht_synthesis": synthesis, "sht_derivatives": derivatives, "sht_derivatives_vjp": derivatives_vjp,
+            "power_forward": power, "power_vjp": power_vjp, "cic_forward": cic_forward, "cic_vjp": cic_vjp,
+            "mf_forward": mf_forward, "mf_vjp": mf_vjp,
+        },
+        "per_member_evaluation": {
+            "sht": sht_total, "mf_thresholds": thresholds, "pdf": pdf,
+            "power_only": power + power_vjp - analysis - synthesis,
+            "total": sht_total + thresholds + pdf + (power + power_vjp - analysis - synthesis),
+        },
+    });
+    println!("{report}");
 }

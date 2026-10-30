@@ -53,9 +53,10 @@ struct Sums {
     c: Vec<C64>,
 }
 
-const LN_SCALE: f64 = 600.0 * std::f64::consts::LN_2;
-const SCALE: f64 = 4.149515568880993e180; // 2^600
-const LIMIT: f64 = 2.037035976334486e90; // 2^300
+/// Scaling of the Legendre recursion (shared with the device transforms).
+pub const LN_SCALE: f64 = 600.0 * std::f64::consts::LN_2;
+pub const SCALE: f64 = 4.149515568880993e180; // 2^600
+pub const LIMIT: f64 = 2.037035976334486e90; // 2^300
 
 pub struct Sht {
     pub nside: usize,
@@ -184,6 +185,12 @@ impl Sht {
     /// NESTED index of every pixel in RING order.
     pub fn nest_of_ring(&self) -> &[u32] {
         &self.nest
+    }
+
+    /// `ln` of the `m`-dependent constant of `lambda_mm`, `m = 0..=lmax`
+    /// (the device transforms start their recursions from it).
+    pub fn log_mm(&self) -> &[f64] {
+        &self.log_mm
     }
 
     fn pairs(&self) -> usize {
