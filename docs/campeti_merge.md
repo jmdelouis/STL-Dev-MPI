@@ -316,7 +316,28 @@ cotangent, as in his code, and the CIC PDF has kinks.
 
 ### 8.5 Timings on garoupe (Tesla T4)
 
-See below (section 8.6, filled from the runs of 30 Oct).
+nside 128, ten members, targets from the ten Takahashi realisations
+r000-r009 (zs1, nside 2048 block-averaged to 128; `cal128.json`, 10 min 43 s
+on one CPU core, 0.9 GB), 3 L-BFGS iterations from the Gaussian random
+fields; garoupe /tmp/jmdeloui-campeti/runs:
+
+| Layout | s / evaluation | before keeping the Minkowski states |
+|---|---|---|
+| 1 T4, one batch of 10 (`STL_THREADS=12`) | 6.08 | 8.76 |
+| 2 T4, `--groups 2` (5 members per GPU, `STL_THREADS=6`) | 3.26 | 5.30 |
+| 3 T4, `--groups 5` (2 members per rank, 5 ranks, `STL_THREADS=2`) | 3.10 | |
+
+The losses of the three layouts agree to 2e-13.  On one T4 before the
+change: SC of g and kappa on the device 2.3 s, Minkowski functionals on the
+host 5.7 s (forward, replay and cotangent; 65 % of the evaluation), C_l and
+PDF 0.6 s.  The Minkowski states are now kept between the forward and the
+reverse pass (6 maps per member, up to 4 GiB per group; nside 2048
+recomputes them as the source) and the 65 Gaussians of a pixel come from
+a recurrence (results unchanged to 1e-13, section 8.3).  Peak device memory
+2 GB on one T4 (batch 10), host 0.65 GB.
+
+Full run as his (`--niter 2500 --max-eval 50000`, 3 T4, `--groups 5`):
+started 30 Oct 19:23, garoupe /tmp/jmdeloui-campeti/runs/full128.
 
 ### 8.6 What remains
 

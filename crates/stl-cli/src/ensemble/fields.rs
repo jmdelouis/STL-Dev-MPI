@@ -163,8 +163,15 @@ pub struct MinkowskiState {
     floor: f64,
 }
 
+/// Normal CDF; exactly 1 in double from z = 8.5 on, 0 below -38.5.
 fn ndtr(z: f64) -> f64 {
-    0.5 * libm::erfc(-z / std::f64::consts::SQRT_2)
+    if z >= 8.5 {
+        1.0
+    } else if z <= -38.5 {
+        0.0
+    } else {
+        0.5 * libm::erfc(-z / std::f64::consts::SQRT_2)
+    }
 }
 
 impl Default for Minkowski {
@@ -176,6 +183,33 @@ impl Default for Minkowski {
 impl Minkowski {
     pub fn count(&self) -> usize {
         3 * self.nu.len()
+    }
+
+    /// `f(t, z_t, exp(-z_t^2 / 2))` for every threshold, `z_t = (u - nu_t) /
+    /// eps`; the Gaussian by recurrence away from the threshold nearest to
+    /// `u` (equally spaced thresholds: two products instead of an exp).
+    #[inline(always)]
+    fn each_threshold(&self, u: f64, mut f: impl FnMut(usize, f64, f64)) {
+        let k = self.nu.len();
+        let h = self.nu[1] - self.nu[0];
+        let d = h / self.eps;
+        let q = (-d * d).exp();
+        let c = ((u - self.nu[0]) / h).round().clamp(0.0, (k - 1) as f64) as usize;
+        let zc = (u - self.nu[c]) / self.eps;
+        let gc = (-0.5 * zc * zc).exp();
+        f(c, zc, gc);
+        let (mut g, mut r) = (gc, (d * zc - 0.5 * d * d).exp());
+        for t in c + 1..k {
+            g *= r;
+            r *= q;
+            f(t, (u - self.nu[t]) / self.eps, g);
+        }
+        let (mut g, mut s) = (gc, (-d * zc - 0.5 * d * d).exp());
+        for t in (0..c).rev() {
+            g *= s;
+            s *= q;
+            f(t, (u - self.nu[t]) / self.eps, g);
+        }
     }
 
     /// Functionals `[3, 65]` (flattened) and the state.
@@ -195,13 +229,12 @@ impl Minkowski {
                 let q = d1 * d1 + d2 * d2;
                 let mag = (q + 1e-30).sqrt();
                 let curv = (2.0 * d1 * d2 * d12 - d1 * d1 * d22 - d2 * d2 * d11) / (q + floor);
-                for (t, nu) in self.nu.iter().enumerate() {
-                    let z = (u[p] - nu) / self.eps;
-                    let delta = (-0.5 * z * z).exp() * c;
+                self.each_threshold(u[p], |t, z, g| {
+                    let delta = g * c;
                     v[t] += ndtr(z);
                     v[k + t] += 0.25 * delta * mag;
                     v[2 * k + t] += delta * curv / (2.0 * std::f64::consts::PI);
-                }
+                });
             }
             v
         });
@@ -233,14 +266,13 @@ impl Minkowski {
                 let num = 2.0 * d1 * d2 * d12 - d1 * d1 * d22 - d2 * d2 * d11;
                 let curv = num / den;
                 let (mut aa, mut bb, mut g) = (0.0, 0.0, 0.0);
-                for (t, nu) in self.nu.iter().enumerate() {
-                    let z = (s.u[p] - nu) / self.eps;
-                    let delta = (-0.5 * z * z).exp() * c;
+                self.each_threshold(s.u[p], |t, z, e| {
+                    let delta = e * c;
                     let dprime = -z * delta / self.eps;
                     g += cot[t] * delta + cot[k + t] * dprime * mag / 4.0 + cot[2 * k + t] * dprime * curv / tau;
                     aa += cot[k + t] * delta / 4.0;
                     bb += cot[2 * k + t] * delta / tau;
-                }
+                });
                 let (aa, bb) = (aa / n, bb / n);
                 let i = p - a;
                 gu[i] = g / n;

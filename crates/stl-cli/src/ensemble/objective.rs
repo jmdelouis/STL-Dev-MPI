@@ -34,6 +34,10 @@ type C64 = Complex64;
 /// Blocks of the last evaluation, in the order GSC, PSC, PS, PDF, MF.
 pub const BLOCKS: [&str; 5] = ["gaussian_sc", "physical_sc", "power", "pdf", "mf"];
 
+/// Host memory for the Minkowski states of a group's members between the
+/// forward and the reverse pass (4 GiB: nside 2048 recomputes them).
+const MF_STATE_BYTES: usize = 4 << 30;
+
 pub struct EnsembleObjective<'o, 'a, C: Comm> {
     /// SC of g and of kappa: two objectives on the same partition (and device engine).
     pub g: &'o Objective<'a, C>,
@@ -210,10 +214,18 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
             hist.extend(self.cic.forward(row));
         }
         self.tick("power_pdf_forward", t);
+        // Minkowski states (six maps per member) kept for the cotangent when
+        // they take at most MF_STATE_BYTES, else recomputed (the source's replay).
         let t = Instant::now();
+        let keep = local * self.npix * 6 * 8 <= MF_STATE_BYTES;
         let mut mfv = Vec::with_capacity(local * nm);
+        let mut states = Vec::new();
         for row in kfull.chunks(self.npix) {
-            mfv.extend(self.mk.forward(&self.sht, row).0);
+            let (v, s) = self.mk.forward(&self.sht, row);
+            mfv.extend(v);
+            if keep {
+                states.push(s);
+            }
         }
         self.tick("mf_forward", t);
         let tg = &self.cal.targets;
@@ -231,9 +243,13 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         }
         self.tick("power_pdf_reverse", t);
         let t = Instant::now();
+        let mut kept = states.into_iter();
         for (m, row) in kfull.chunks(self.npix).enumerate() {
             let a = self.first_member + m;
-            let (_, state) = self.mk.forward(&self.sht, row);
+            let state = match kept.next() {
+                Some(s) => s,
+                None => self.mk.forward(&self.sht, row).1,
+            };
             let g3 = self.mk.vjp(&self.sht, &state, &cmf[a * nm..(a + 1) * nm]);
             hk[m * self.npix..(m + 1) * self.npix].iter_mut().zip(g3).for_each(|(o, v)| *o += v);
         }

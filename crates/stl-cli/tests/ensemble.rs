@@ -192,3 +192,37 @@ fn objective_matches_python() {
     // gradient, equal to this one above, differs from them the same way).
     assert!((an - fd).abs() <= 1e-2 * fd.abs(), "finite differences");
 }
+
+/// Wall time of the host parts of one member at nside 128 (`--ignored`).
+#[test]
+#[ignore]
+fn host_timings_nside128() {
+    use stl_cli::ensemble::fields::{band_powers, lp_windows, Minkowski};
+    use std::time::Instant;
+    let nside = 128;
+    let sht = Sht::new(nside, 3 * nside - 1);
+    let x: Vec<f64> = (0..sht.npix).map(|i| stl_cli::pixel_normal(3, i as i64)).collect();
+    let t = Instant::now();
+    let alm = sht.analysis(&x);
+    eprintln!("analysis {:.4} s", t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    let d = sht.derivatives(&alm);
+    eprintln!("derivatives {:.4} s", t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    let g = sht.derivatives_vjp([&d[0], &d[1], &d[2], &d[3], &d[4]]);
+    eprintln!("derivatives_vjp {:.4} s", t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    let _ = sht.analysis_vjp(&g);
+    eprintln!("analysis_vjp {:.4} s", t.elapsed().as_secs_f64());
+    let (w, _) = lp_windows(3 * nside - 1);
+    let t = Instant::now();
+    let _ = band_powers(&sht, &w, &x);
+    eprintln!("band powers {:.4} s", t.elapsed().as_secs_f64());
+    let mk = Minkowski::default();
+    let t = Instant::now();
+    let (v, s) = mk.forward(&sht, &x);
+    eprintln!("minkowski forward {:.4} s", t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    let _ = mk.vjp(&sht, &s, &v);
+    eprintln!("minkowski vjp {:.4} s", t.elapsed().as_secs_f64());
+}
