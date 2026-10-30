@@ -236,6 +236,8 @@ All tests run on both devices above with identical results.
 | `dia`: device DIA vs `conv_fwd` / `conv_adj` and the CPU (9 blocks, poles, 3-face vertices) | forward 0.000 x noise, adjoint <= 7e-16 relative (`docs/dia_convolution.md`) |
 | the whole `stl-gpu` suite with the default (DIA) and with `STL_GPU_CONV=stencils` | all pass |
 | `stats`: one engine shared by the full plan and a mean / var / S1 / S2 plan at batches 1 and 2 (target statistics, then alternated evaluations, as `stl-synth --kappa-table`) vs one engine each; the plan without S3 / S4 vs the full plan restricted to it (laptop) | identical to the bit (values, variances, gradients) |
+| `stats`: wavelet fields recomputed per block vs kept (`--gpu-fields`), the 8 fixtures, both geometry forms, 1 to 333 device blocks per level, the full plan and a mean / var / S1 / S2 plan, three evaluations (laptop) | identical to the bit (values, variances, stored moduli, map cotangents of every level) |
+| the whole `stl-gpu` suite with `STL_GPU_FIELDS=keep` and `=recompute` (laptop) | all pass |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
 | `synthesis`: WebSky kappa nside 64, 20 L-BFGS iterations (25 evaluations), `STL_RANKS` 1, 2, 3 | 25 / 25 loss values identical to STL-Dev at the printed precision, max relative difference 1.5e-12 to 1.8e-11 |
@@ -448,7 +450,68 @@ device is busy 33 % of the time on average). Ten members at nside 2048
 do not fit on one 80 GB device: their fields alone are 111 GB. `z_n` and
 `|z_n|` with the reverse chain are 77 % of the fields (2 x 10.7 of the
 27.6 doubles per pixel and member at `L = 4`), the maps 10 %, the stored
-moduli 13 %.
+moduli 13 %. Recomputing `z_n` and `|z_n|` per block brings them within
+the A100 (§5.2).
+
+### 5.2 Kept or recomputed wavelet fields (`--gpu-fields`)
+
+`stl-synth --gpu` with the DIA geometry, `--gpu-fields keep` against
+`recompute` (§2.2, §2.7), one device, blocks and cache sized from the
+device memory, commit 3177d9c. "fields" is the engine's estimate of the
+level fields at their peak (`gpu.field_bytes_estimate`), "rows" the
+decimation rows on the device, "cache" the geometry cache at the end;
+the peak is the engine's (whole device, CUDA context included). Reports
+in `benchmarks/fields/`.
+
+garoupe, one T4 (15 GB), nside 1024, `L = 4`, lognormal target, 3
+L-BFGS iterations (4 evaluations) from white noise, `--ensemble B`:
+
+| B | fields | s / evaluation | peak GB | fields GB | rows GB | cache GB | block rows (blocks at level 0) |
+|---|---|---|---|---|---|---|---|
+| 1 | keep | 22.56 | 12.03 | 2.36 | 2.98 | 5.19 | 194 187 (65) |
+| 1 | recompute | 23.14 | 11.35 | 0.75 | 2.98 | 5.95 | 227 598 (56) |
+| 2 | keep | 30.56 | 12.70 | 4.73 | 2.98 | 3.90 | 104 388 (121) |
+| 2 | recompute | 30.42 | 11.72 | 1.50 | 2.98 | 5.64 | 153 964 (82) |
+| 4 | keep | 48.91 | 14.54 | 9.45 | 2.98 | 1.27 | 19 086 (660) |
+| 4 | recompute | 46.18 | 11.93 | 3.01 | 2.98 | 4.77 | 84 451 (149) |
+
+hpc, one A100-SXM4-80GB, the Takahashi kappa ensemble of §5.1 at nside
+2048 (`--level-power-weight 5 --marginal-weight 5000 --kappa-table
+--kappa-weight 0.1`, members started from the nside-1024 syntheses), 2
+iterations (3 evaluations), 6 host threads (job 2404157):
+
+| B | fields | s / evaluation | setup s | peak GB | fields GB | rows GB | cache GB | block rows (blocks at level 0) | device busy |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 | keep | 163.2 | 324 | 75.1 | 47.3 | 11.9 | 13.1 | 173 901 (290) | 14 % |
+| 5 | recompute | 162.6 | 322 | 63.8 | 15.0 | 11.9 | 30.9 | 431 433 (117) | 14 % |
+| 10 | keep | does not fit (fields 94.5 GB) | | | | | | | |
+| 10 | recompute | 332.8 | 341 | 67.5 | 30.1 | 11.9 | 22.3 | 175 644 (287) | 11 % |
+
+The recomputation costs one wavelet convolution of the maps per block of
+the reverse sweep: 0.3 to 0.6 s per evaluation on the T4 at nside 1024,
+0.6 s on the A100 at nside 2048 (`gpu_reverse_conv` 11.9 -> 13.9 s over
+the 2048 x 5 run). The memory it frees goes to larger blocks and a larger
+geometry cache, which recompute fewer DIA coefficients: with one member
+`recompute` is 2.6 % slower, with two members as fast, with four 5.6 %
+faster (the kept fields leave 1.3 GB of cache and blocks of 19 086 rows
+on the T4). At nside 2048 x 5 both take the same time (163 s per
+evaluation, against 395 s with the bound stencils in §5.1); the fields
+go from 47.3 to 15.0 GB, a third, and the peak from 75.1 to 63.8 GB. The
+losses of the two modes agree to 2e-15 relative on the T4 and 2e-16 on
+the A100 (different block boundaries; with the same blocks they are
+identical, §3), and at nside 2048 x 5 to 1e-15 with the bound-stencil
+run of §5.1.
+
+Ten members at nside 2048 now fit on one A100: 67.5 GB at the peak,
+of which the level fields 30.1 GB (45 %), the DIA geometry cache 22.3 GB
+(33 %: masks of every block and the coefficients of some), the
+decimation rows 11.9 GB (18 %) and the rest (one block's transients,
+topology, CUDA context) 3.2 GB. An evaluation takes 333 s, twice the 5
+members', but the device is busy 11 % of the time: the engine's phases
+(target statistics, synthesis and kappa sweeps) add up to 70 s per
+evaluation, the rest is host work of the objective (ensemble, level-power,
+marginal and kappa terms, L-BFGS) on 10 maps of 50 M pixels with 6
+threads.
 
 ## 6. Limitations and next steps
 
@@ -460,13 +523,18 @@ moduli 13 %.
   the same cell and drops the transposition (3 x less memory whole, 100 x
   less between sweeps); measured 2.5-2.7 x faster per evaluation on the
   T4 and 1.6-2.6 x on the A100 (§5.0), it is the default.
-- **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
-  for nside 2048 on one rank): nside 2048 needs two T4s. They could be
-  computed on the device per sweep instead of stored. The level fields
-  are dominated by `z_n` and `|z_n|` (77 % at `L = 4`, §5.1): computing
-  `|z_n|` per block from `z_n`, and `z_n` of the reverse sweep per block
-  from the maps (one more convolution per block), would bring 10 members
-  at nside 2048 within an 80 GB device and leave the geometry cache room.
+- **Memory.** With `z_n` and `|z_n|` recomputed per block (§5.2) the
+  level fields are 60 bytes per pixel and member at `L = 4`, and the
+  decimation rows (~200 bytes per held cell, 11.9 GB for nside 2048 on
+  one rank, independent of the members) are the next item: they could be
+  computed on the device per sweep instead of stored. In the forward
+  sweep `|z_0|` is still held over the level for its decimations (`B C L
+  H_0` doubles); pushing each block's moduli down the decimation chain as
+  the CPU pieces do would remove it, and freeing `m[d][n]` once the
+  reverse sweep has passed level `n` would lower the reverse peak too.
+- **Host work.** At nside 2048 the A100 is busy 11 to 14 % of the time
+  (§5.2): the objective's host terms and L-BFGS on the members' maps, with
+  6 threads, take three quarters of an evaluation.
 - **Exchanges** copy whole level fields between device and host (MPI is
   not CUDA-aware on garoupe): packing only the halo cells on the device
   would cut the transfers by the halo fraction.
