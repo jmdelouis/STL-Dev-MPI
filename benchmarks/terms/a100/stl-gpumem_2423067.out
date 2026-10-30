@@ -1,0 +1,58 @@
+job 2423067: compute-114-15, GPU 0, 6 cpus, 4d10f1f objective terms on the device
+0, NVIDIA A100-SXM4-80GB, 81920 MiB, 0 MiB
+== n2048_B10_device 12:39:41
+  s/eval 61.675 evals 3 setup 336.6 fields recompute peak GB [67.87] cache GB [22.27] busy % during evaluations 90.6 smi max MiB 66515.0
+  loss [280856.8239147943, 280856.743096612, 280856.37901263806]
+  host_evaluations                    178.10 s     59.37 s/eval
+  host_synthesis_objective            133.81 s     44.60 s/eval
+  reverse                             115.80 s     38.60 s/eval
+  forward                              93.67 s     31.22 s/eval
+  gpu_setup_topology                   72.67 s     24.22 s/eval
+  gpu_geometry_weights                 48.80 s     16.27 s/eval
+  gpu_reverse_adjoint                  48.29 s     16.10 s/eval
+  host_kappa_objective                 35.40 s     11.80 s/eval
+  gpu_forward_conv                     34.31 s     11.44 s/eval
+  gpu_reverse_conv                     33.81 s     11.27 s/eval
+  gpu_geometry                         19.53 s      6.51 s/eval
+  gpu_reverse_coefficients             12.29 s      4.10 s/eval
+  gpu_forward_coefficients              7.15 s      2.38 s/eval
+  host_lbfgs                            6.92 s      2.31 s/eval
+  device_transfers                      6.41 s      2.14 s/eval
+  gpu_host_lists                        5.83 s      1.94 s/eval
+  gpu_load                              2.13 s      0.71 s/eval
+  gpu_forward_decimation                2.07 s      0.69 s/eval
+  host_marginal                         1.55 s      0.52 s/eval
+  host_kappa_transform                  0.68 s      0.23 s/eval
+  gpu_reverse_chain                     0.48 s      0.16 s/eval
+  analysis_vjp                          0.36 s      0.12 s/eval
+  host_kurtosis                         0.22 s      0.07 s/eval
+== n2048_B10_host 12:53:32
+  s/eval 333.683 evals 3 setup 331.23 fields recompute peak GB [67.46] cache GB [22.27] busy % during evaluations 16.2 smi max MiB 64299.0
+  loss [280856.823914794, 280856.7430966118, 280856.3790126377]
+  host_evaluations                    995.51 s    331.84 s/eval
+  host_synthesis_objective            391.93 s    130.64 s/eval
+  host_kappa_objective                284.42 s     94.81 s/eval
+  host_to_layout                      252.60 s     84.20 s/eval
+  host_marginal                       186.38 s     62.13 s/eval
+  reverse                             116.43 s     38.81 s/eval
+  forward                              94.04 s     31.35 s/eval
+  gpu_setup_topology                   72.01 s     24.00 s/eval
+  host_kappa_transform                 69.75 s     23.25 s/eval
+  gpu_geometry_weights                 49.80 s     16.60 s/eval
+  gpu_reverse_adjoint                  48.29 s     16.10 s/eval
+  gpu_reverse_conv                     34.33 s     11.44 s/eval
+  host_kurtosis                        33.89 s     11.30 s/eval
+  gpu_forward_conv                     33.62 s     11.21 s/eval
+  host_level_power                     27.96 s      9.32 s/eval
+  gpu_geometry                         19.42 s      6.47 s/eval
+  gpu_reverse_coefficients             12.12 s      4.04 s/eval
+  gpu_forward_coefficients              7.14 s      2.38 s/eval
+  gpu_host_lists                        5.67 s      1.89 s/eval
+  host_lbfgs                            5.54 s      1.85 s/eval
+  gpu_download                          3.96 s      1.32 s/eval
+  gpu_load                              3.61 s      1.20 s/eval
+  gpu_forward_decimation                2.10 s      0.70 s/eval
+  host_owned_gradient                   2.00 s      0.67 s/eval
+  gpu_reverse_chain                     0.47 s      0.16 s/eval
+  analysis_vjp                          0.37 s      0.12 s/eval
+done Fri Oct 30 01:21:05 PM CET 2026

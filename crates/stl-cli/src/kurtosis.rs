@@ -15,8 +15,8 @@ pub struct Kurtosis {
     /// Levels of the term (0: finest) and the target's `K_n` there.
     pub levels: Vec<usize>,
     pub target: Vec<f64>,
-    npix: usize,
-    members: usize,
+    pub(crate) npix: usize,
+    pub(crate) members: usize,
 }
 
 /// Per row and level of the term: the details and the global `V_n`, `K_n`.

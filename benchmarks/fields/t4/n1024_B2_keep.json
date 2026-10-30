@@ -1,0 +1,208 @@
+{
+  "J": 9,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 11354,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 0.007791200317812451,
+    "loss_final_scatter_term": 0.0,
+    "member_files": [
+      "n1024_B2_keep_m000_synthesis_nested.npy",
+      "n1024_B2_keep_m001_synthesis_nested.npy"
+    ],
+    "members": 2,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 486.3485136474339,
+        "scatter_over_ergodic_variance": 3.9657410938135413,
+        "scatter_rms_sigma": 1.4081443629496129
+      },
+      "S2": {
+        "residual_rms_sigma": 425.89394146698413,
+        "scatter_over_ergodic_variance": 1.710426854068222,
+        "scatter_rms_sigma": 0.92477750136674
+      },
+      "S3": {
+        "residual_rms_sigma": 189.32727963491632,
+        "scatter_over_ergodic_variance": 1.8920218175090004,
+        "scatter_rms_sigma": 0.9726309211383829
+      },
+      "S4": {
+        "residual_rms_sigma": 113.37644059044003,
+        "scatter_over_ergodic_variance": 1.8258780665100225,
+        "scatter_rms_sigma": 0.9554784316011606
+      },
+      "mean": {
+        "residual_rms_sigma": 0.6915032433285135,
+        "scatter_over_ergodic_variance": 0.12999430618340177,
+        "scatter_rms_sigma": 0.25494539237197616
+      },
+      "var": {
+        "residual_rms_sigma": 0.4390353691805602,
+        "scatter_over_ergodic_variance": 0.33015129888719175,
+        "scatter_rms_sigma": 0.40629502758906105
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 0.0
+  },
+  "evaluations": 4,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 36,
+      "max_sigma": 1594.8200352027654,
+      "rms_sigma": 687.7977811195982
+    },
+    "S2": {
+      "count": 36,
+      "max_sigma": 1336.198981062699,
+      "rms_sigma": 602.3035682525148
+    },
+    "S3": {
+      "count": 720,
+      "max_sigma": 1414.607546210382,
+      "rms_sigma": 267.7456733657858
+    },
+    "S4": {
+      "count": 10560,
+      "max_sigma": 1301.0443075252683,
+      "rms_sigma": 160.3328060125207
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 0.9090429939690999,
+      "rms_sigma": 0.9090429939690999
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 0.23527178304214427,
+      "rms_sigma": 0.23527178304214427
+    }
+  },
+  "fits": [
+    "n1024_B2_keep_target.fits",
+    "n1024_B2_keep_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 104388,
+    "blocks_per_level": [
+      121,
+      31,
+      8,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "dia",
+    "decimation_rows_bytes": 2983290304,
+    "device": "Tesla T4",
+    "device_ordinal": 1,
+    "devices_visible": 3,
+    "field_bytes_estimate": 4725491712,
+    "fields": "keep",
+    "geometry_cache": "transposition",
+    "geometry_cache_budget_bytes": 3898165401,
+    "geometry_cache_used_bytes_per_rank": [
+      3896965100
+    ],
+    "memory_peak_bytes_per_rank": [
+      12696944640
+    ],
+    "memory_total_bytes": 15843721216
+  },
+  "init": null,
+  "kappa": null,
+  "kernel_size": 5,
+  "kurtosis": null,
+  "level_power": {
+    "levels_nside": [],
+    "loss_final_term": 0.0,
+    "variance_over_target": [],
+    "weight": 0.0
+  },
+  "loss_final_map": 0.007791200317812451,
+  "loss_first": 0.0077912385899519,
+  "loss_history": [
+    0.0077912385899519,
+    0.007791238207227352,
+    0.0077912347627092865,
+    0.007791200317812451
+  ],
+  "loss_last": 0.007791200317812451,
+  "marginal": {
+    "loss_final_term": 0.0,
+    "weight": 0.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      12582912,
+      3145728,
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 4831838208,
+    "maps_and_gradients": 536868864,
+    "stored_moduli_and_cotangents": 715751424
+  },
+  "memory_floor_bytes_per_rank": [
+    6084458496
+  ],
+  "memory_peak_bytes_per_rank": [
+    6668111872
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 1.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 3,
+  "nside": 1024,
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    4687855616
+  ],
+  "seconds": 122.25,
+  "seconds_per_evaluation": 30.562,
+  "setup_seconds": 130.89,
+  "target": {
+    "file": "/tmp/jmdeloui-gpumem/field_nside1024_nested.npy",
+    "mean": 1.0726939215723523,
+    "std": 0.41679432563670893
+  },
+  "timers_seconds": {
+    "analysis_vjp": 0.09,
+    "forward": 67.03,
+    "gpu_forward_coefficients": 3.76,
+    "gpu_forward_conv": 11.31,
+    "gpu_forward_decimation": 1.94,
+    "gpu_geometry": 13.24,
+    "gpu_geometry_weights": 67.56,
+    "gpu_reverse_adjoint": 16.7,
+    "gpu_reverse_chain": 0.12,
+    "gpu_reverse_coefficients": 8.61,
+    "gpu_reverse_conv": 5.63,
+    "gpu_reverse_exchange": 0.12,
+    "gpu_setup_topology": 20.99,
+    "reverse": 62.62
+  },
+  "variables": "map",
+  "weights": "none"
+}

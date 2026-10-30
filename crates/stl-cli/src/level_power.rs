@@ -28,8 +28,8 @@ pub struct LevelPower {
     /// `V_n` of the target, finest level first.
     pub target: Vec<f64>,
     pub levels: usize,
-    npix: usize,
-    members: usize,
+    pub(crate) npix: usize,
+    pub(crate) members: usize,
 }
 
 impl LevelPower {

@@ -158,6 +158,45 @@ fn geometry_cache_policies_agree() {
     }
 }
 
+/// Wavelet fields recomputed per block in the reverse sweep give, to the
+/// bit, what the kept fields give: statistics, variances, stored moduli and
+/// map cotangents of every level, over two evaluations, with either
+/// geometry and with one or several device blocks per level; also for a
+/// plan without S3 / S4.
+#[test]
+fn recomputed_fields_match_kept_fields() {
+    use stl_gpu::FieldStore;
+    let Some(gpu) = gpu() else { return };
+    for conv in CONVS {
+        for (case, block_rows) in cases("stats", "stats").into_iter().zip([37usize, 1 << 20, 500].into_iter().cycle()) {
+            let s = setup(&case);
+            let x = case.f64("map0");
+            let g = complex(&case, "gradient");
+            let short = build_plan(case.int("J") as usize, s.geo.l, &s.cfg.j_to_dg, s.channels, None, &Family::ALL[..4]);
+            let g_short: Vec<Complex64> =
+                (0..s.batch).flat_map(|b| short.iter().map(|c| g[b * s.plan.len() + s.plan.iter().position(|p| p == c).unwrap()]).collect::<Vec<_>>()).collect();
+            let run = |fields: FieldStore| {
+                let part = Partition::serial(&s.geo, s.cfg.levels());
+                let opts = GpuOptions { block_rows, conv, fields, ..Default::default() };
+                let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
+                assert_eq!(e.field_store(), fields);
+                let mut out = Vec::new();
+                for (plan, g) in [(&s.plan, &g), (&short, &g_short), (&s.plan, &g)] {
+                    e.load(&Serial, &x);
+                    let (v, var) = e.forward(&Serial, plan, true);
+                    let m: Vec<Vec<f64>> = e.m.keys().map(|&(d, n)| e.m_host(d, n)).collect();
+                    let mg: Vec<Vec<f64>> = e.reverse(&Serial, plan, g).iter().map(|f| gpu.download(f)).collect();
+                    out.push((flat(&v), var, m, mg));
+                }
+                (out, e.blocks_per_level())
+            };
+            let ((kept, blocks), (recomputed, _)) = (run(FieldStore::Keep), run(FieldStore::Recompute));
+            eprintln!("{} ({}): {blocks:?} device blocks", case.name(), conv.name());
+            assert!(kept == recomputed, "{} ({}): recomputed fields differ from kept fields", case.name(), conv.name());
+        }
+    }
+}
+
 /// The DIA geometry against the bound stencils: the same operator, so the
 /// same statistics, variances and gradients to the summation orders.
 #[test]

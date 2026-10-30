@@ -1,0 +1,154 @@
+build 10:50:31 feb832c stl-synth --gpu: the device objective with several ranks per group; optional phase sync
+built 10:50:42
+== p1024_sync 10:50:42: nside 1024, 10 members, 1 ranks on GPUs 1, terms device, phase sync 1
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+  s/eval 107.621 evals 4 setup 159.23 fields recompute peak GB [13.61] cache GB [2.17] busy % during evaluations 95.4
+  loss [346949.0820019691, 346948.87065655313, 346947.9185767003, 346937.4511885556]
+  host_evaluations                    425.62 s    106.41 s/eval
+  host_synthesis_objective            304.96 s     76.24 s/eval
+  reverse                             270.72 s     67.68 s/eval
+  forward                             199.60 s     49.90 s/eval
+  gpu_geometry_weights                176.60 s     44.15 s/eval
+  host_kappa_objective                107.70 s     26.93 s/eval
+  gpu_reverse_adjoint                  92.69 s     23.17 s/eval
+  gpu_forward_conv                     59.55 s     14.89 s/eval
+  gpu_reverse_coefficients             49.43 s     12.36 s/eval
+  gpu_reverse_conv                     46.78 s     11.70 s/eval
+  gpu_setup_topology                   22.56 s      5.64 s/eval
+  gpu_forward_coefficients             19.40 s      4.85 s/eval
+  gpu_geometry                         13.77 s      3.44 s/eval
+  gpu_forward_decimation                8.01 s      2.00 s/eval
+  device_transfers                      6.77 s      1.69 s/eval
+  host_lbfgs                            4.86 s      1.22 s/eval
+  host_marginal                         4.86 s      1.22 s/eval
+  gpu_load                              4.42 s      1.10 s/eval
+  gpu_host_lists                        4.07 s      1.02 s/eval
+  host_kurtosis                         0.94 s      0.23 s/eval
+  analysis_vjp                          0.81 s      0.20 s/eval
+  gpu_reverse_chain                     0.60 s      0.15 s/eval
+  host_kappa_transform                  0.31 s      0.08 s/eval
+== p1024_nosync 11:02:54: nside 1024, 10 members, 1 ranks on GPUs 1, terms device, phase sync 0
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+  s/eval 106.114 evals 4 setup 158.73 fields recompute peak GB [14.14] cache GB [2.17] busy % during evaluations 95.7
+  loss [346949.0820019691, 346948.87065655313, 346947.9185767003, 346937.4511885556]
+  host_evaluations                    419.66 s    104.92 s/eval
+  gpu_geometry_weights                357.09 s     89.27 s/eval
+  host_synthesis_objective            299.58 s     74.89 s/eval
+  reverse                             265.98 s     66.50 s/eval
+  forward                             199.94 s     49.98 s/eval
+  host_kappa_objective                105.92 s     26.48 s/eval
+  gpu_forward_coefficients             81.41 s     20.35 s/eval
+  gpu_setup_topology                   21.17 s      5.29 s/eval
+  gpu_geometry                         11.35 s      2.84 s/eval
+  gpu_reverse_coefficients              8.40 s      2.10 s/eval
+  device_transfers                      7.23 s      1.81 s/eval
+  host_marginal                         4.84 s      1.21 s/eval
+  host_lbfgs                            4.79 s      1.20 s/eval
+  gpu_host_lists                        3.43 s      0.86 s/eval
+  gpu_reverse_conv                      2.47 s      0.62 s/eval
+  gpu_forward_conv                      1.20 s      0.30 s/eval
+  gpu_load                              0.96 s      0.24 s/eval
+  host_kurtosis                         0.94 s      0.23 s/eval
+  host_level_power                      0.84 s      0.21 s/eval
+  host_kappa_transform                  0.31 s      0.08 s/eval
+  gpu_reverse_adjoint                   0.30 s      0.07 s/eval
+== p2048_host 11:14:56: nside 2048, 5 members, 3 ranks on GPUs 0,1,2, terms host, phase sync 1
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+  s/eval 184.704 evals 4 setup 249.87 fields recompute peak GB [13.33, 13.3, 13.44] cache GB [3.03, 2.96, 3.03] busy % during evaluations 49.5
+  loss [1702595.2883592623, 1702589.7560363207, 1702539.9697781045, 1702290.9152550518]
+  host_evaluations                    727.88 s    181.97 s/eval
+  host_synthesis_objective            354.12 s     88.53 s/eval
+  reverse                             266.96 s     66.74 s/eval
+  forward                             249.73 s     62.43 s/eval
+  gpu_geometry_weights                211.33 s     52.83 s/eval
+  host_kappa_objective                170.65 s     42.66 s/eval
+  host_marginal                       120.53 s     30.13 s/eval
+  gpu_reverse_adjoint                  64.40 s     16.10 s/eval
+  gpu_setup_topology                   56.95 s     14.24 s/eval
+  gpu_forward_decimation               47.75 s     11.94 s/eval
+  gpu_forward_conv                     41.20 s     10.30 s/eval
+  gpu_reverse_conv                     32.69 s      8.17 s/eval
+  host_kurtosis                        32.41 s      8.10 s/eval
+  gpu_reverse_coefficients             32.09 s      8.02 s/eval
+  gpu_geometry                         29.63 s      7.41 s/eval
+  gpu_reverse_exchange                 29.32 s      7.33 s/eval
+  host_to_layout                       27.30 s      6.83 s/eval
+  host_level_power                     25.69 s      6.42 s/eval
+  gpu_load                             22.91 s      5.73 s/eval
+  host_kappa_transform                 22.81 s      5.70 s/eval
+  gpu_forward_coefficients             14.11 s      3.53 s/eval
+  host_lbfgs                           10.94 s      2.73 s/eval
+  gpu_reverse_chain                     8.41 s      2.10 s/eval
+  gpu_download                          5.39 s      1.35 s/eval
+  analysis_vjp                          3.95 s      0.99 s/eval
+  host_owned_gradient                   2.90 s      0.72 s/eval
+  gpu_host_lists                        2.11 s      0.53 s/eval
+== p2048_dev 11:33:33: nside 2048, 5 members, 3 ranks on GPUs 0,1,2, terms device, phase sync 1
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+  s/eval 134.562 evals 4 setup 253.93 fields recompute peak GB [13.44, 13.37, 13.51] cache GB [3.03, 2.96, 3.03] busy % during evaluations 68.7
+  loss [1702595.2883592623, 1702589.756036321, 1702539.9697781045, 1702290.9152550518]
+  host_evaluations                    530.14 s    132.53 s/eval
+  host_synthesis_objective            320.04 s     80.01 s/eval
+  reverse                             270.25 s     67.56 s/eval
+  forward                             247.25 s     61.81 s/eval
+  gpu_geometry_weights                208.35 s     52.09 s/eval
+  host_kappa_objective                133.49 s     33.37 s/eval
+  host_marginal                        67.65 s     16.91 s/eval
+  gpu_reverse_adjoint                  63.93 s     15.98 s/eval
+  gpu_setup_topology                   56.82 s     14.21 s/eval
+  gpu_forward_decimation               46.35 s     11.59 s/eval
+  gpu_forward_conv                     43.57 s     10.89 s/eval
+  gpu_reverse_conv                     32.97 s      8.24 s/eval
+  gpu_reverse_exchange                 32.92 s      8.23 s/eval
+  gpu_reverse_coefficients             31.86 s      7.96 s/eval
+  gpu_geometry                         29.97 s      7.49 s/eval
+  gpu_load                             18.37 s      4.59 s/eval
+  gpu_forward_coefficients             14.05 s      3.51 s/eval
+  gpu_reverse_chain                     8.20 s      2.05 s/eval
+  host_lbfgs                            8.11 s      2.03 s/eval
+  device_transfers                      6.58 s      1.65 s/eval
+  analysis_vjp                          4.05 s      1.01 s/eval
+  host_kurtosis                         1.76 s      0.44 s/eval
+  gpu_host_lists                        1.38 s      0.34 s/eval
+  host_level_power                      0.30 s      0.07 s/eval
+  host_kappa_transform                  0.22 s      0.06 s/eval
+== p2048_dev_nosync 11:48:53: nside 2048, 5 members, 3 ranks on GPUs 0,1,2, terms device, phase sync 0
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+  s/eval 134.277 evals 4 setup 247.41 fields recompute peak GB [13.67, 13.67, 13.64] cache GB [3.03, 2.96, 3.03] busy % during evaluations 68.9
+  loss [1702595.2883592623, 1702589.756036321, 1702539.9697781045, 1702290.9152550518]
+  host_evaluations                    528.85 s    132.21 s/eval
+  gpu_geometry_weights                321.79 s     80.45 s/eval
+  host_synthesis_objective            316.67 s     79.17 s/eval
+  reverse                             261.97 s     65.49 s/eval
+  forward                             251.65 s     62.91 s/eval
+  host_kappa_objective                132.43 s     33.11 s/eval
+  host_marginal                        70.32 s     17.58 s/eval
+  gpu_forward_coefficients             58.41 s     14.60 s/eval
+  gpu_setup_topology                   56.69 s     14.17 s/eval
+  gpu_forward_decimation               46.58 s     11.64 s/eval
+  gpu_reverse_exchange                 35.05 s      8.76 s/eval
+  gpu_geometry                         29.66 s      7.42 s/eval
+  gpu_load                             18.30 s      4.58 s/eval
+  host_lbfgs                            8.26 s      2.06 s/eval
+  gpu_reverse_chain                     8.10 s      2.02 s/eval
+  device_transfers                      7.83 s      1.96 s/eval
+  gpu_reverse_coefficients              5.40 s      1.35 s/eval
+  analysis_vjp                          3.75 s      0.94 s/eval
+  gpu_forward_conv                      3.16 s      0.79 s/eval
+  gpu_host_lists                        2.14 s      0.54 s/eval
+  gpu_reverse_conv                      1.42 s      0.35 s/eval
+  host_kurtosis                         0.92 s      0.23 s/eval
+  host_level_power                      0.45 s      0.11 s/eval
+  gpu_reverse_adjoint                   0.24 s      0.06 s/eval
+  host_kappa_transform                  0.23 s      0.06 s/eval
+ALLDONE 12:04:02

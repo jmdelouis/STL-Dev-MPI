@@ -14,9 +14,14 @@ use stl_mpi::Comm;
 /// `comm`, ordered by (value, id): this rank's part of the global order and
 /// the global position of its first element.
 fn sort_global<C: Comm>(v: &[f64], ids: &[i64], comm: &C) -> (Vec<(f64, i64)>, usize) {
-    let p = comm.size();
     let mut local: Vec<(f64, i64)> = v.iter().copied().zip(ids.iter().copied()).collect();
     local.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    distribute(local, comm)
+}
+
+/// The global order from this rank's pairs `local`, sorted by (value, id).
+fn distribute<C: Comm>(local: Vec<(f64, i64)>, comm: &C) -> (Vec<(f64, i64)>, usize) {
+    let p = comm.size();
     // Splitters from 4 P regular samples per rank.
     let k = 4 * p;
     let samples: Vec<f64> = if local.is_empty() { Vec::new() } else { (0..k).map(|i| local[i * local.len() / k].0).collect() };
@@ -38,10 +43,10 @@ pub struct Marginal {
     pub weight: f64,
     /// This rank's part of the sorted target values (standardised) and the
     /// global position of its first one, for every rank.
-    chunk: Vec<f64>,
+    pub(crate) chunk: Vec<f64>,
     chunk_starts: Vec<usize>,
-    npix: usize,
-    members: usize,
+    pub(crate) npix: usize,
+    pub(crate) members: usize,
 }
 
 impl Marginal {
@@ -57,9 +62,24 @@ impl Marginal {
     /// Target value of the global rank of every owned value of `row`
     /// (global pixels `start..start + row.len()`).
     fn matched<C: Comm>(&self, row: &[f64], start: usize, comm: &C) -> Vec<f64> {
-        let p = comm.size();
         let ids: Vec<i64> = (0..row.len()).map(|i| (start + i) as i64).collect();
         let (mine, first) = sort_global(row, &ids, comm);
+        self.matched_order(mine, first, start, row.len(), comm)
+    }
+
+    /// [`matched`](Self::matched) from the row's local order: `perm` lists its
+    /// positions by (value, position), as the device sort gives them.
+    pub(crate) fn matched_sorted<C: Comm>(&self, row: &[f64], perm: &[u32], start: usize, comm: &C) -> Vec<f64> {
+        let local: Vec<(f64, i64)> = perm.iter().map(|&q| (row[q as usize], (start + q as usize) as i64)).collect();
+        let (mine, first) = distribute(local, comm);
+        self.matched_order(mine, first, start, row.len(), comm)
+    }
+
+    /// Target values of the owned pixels of a row (`len` from global pixel
+    /// `start`) from this rank's part `mine` of the global order, starting at
+    /// global position `first`.
+    fn matched_order<C: Comm>(&self, mine: Vec<(f64, i64)>, first: usize, start: usize, len: usize, comm: &C) -> Vec<f64> {
+        let p = comm.size();
         // Target values of the global positions [first, first + len) of every rank.
         let firsts = comm.allgather_i64(first as i64);
         let lens = comm.allgather_i64(mine.len() as i64);
@@ -77,7 +97,7 @@ impl Marginal {
         for (&(_, id), &t) in mine.iter().zip(&targets) {
             back[starts.partition_point(|&s| s <= id) - 1].extend([id as f64, t]);
         }
-        let mut out = vec![0.0; row.len()];
+        let mut out = vec![0.0; len];
         for m in comm.alltoallv_f64(back) {
             for c in m.chunks(2) {
                 out[c[0] as usize - start] = c[1];

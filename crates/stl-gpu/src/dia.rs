@@ -335,6 +335,29 @@ impl DiaGeometry {
         out: Arg,
         out_stride: usize,
     ) {
+        self.forward_mapped(gpu, grid, rows, diag, x, NULL, x_stride, rows_in, row0, n, opos, out, out_stride);
+    }
+
+    /// [`forward`](Self::forward) reading grid cell `j` at `x[r x_stride +
+    /// xmap[j]]` (`i32`; -1: skipped), e.g. a field held on a block's
+    /// convolution rows only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_mapped(
+        &self,
+        gpu: &Gpu,
+        grid: &Grid,
+        rows: &CudaSlice<i64>,
+        diag: &DeviceDiagonals,
+        x: Arg,
+        xmap: Arg,
+        x_stride: usize,
+        rows_in: usize,
+        row0: usize,
+        n: usize,
+        opos: Arg,
+        out: Arg,
+        out_stride: usize,
+    ) {
         assert!(row0 + n <= self.k);
         gpu.launch1(
             "dia_fwd",
@@ -354,6 +377,7 @@ impl DiaGeometry {
                 Arg::I64(grid.own.1),
                 Arg::I64(grid.own.2),
                 x,
+                xmap,
                 x_stride.into(),
                 (rows_in as i32).into(),
                 row0.into(),
