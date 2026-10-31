@@ -239,9 +239,10 @@ fn device_terms_match_the_host() {
     assert!(e < 1e-12, "gradient {e:e}");
 }
 
-/// Wall time of the harmonic terms of one member on the device, as
-/// `host_profile` (`--ignored`, `--features gpu`): the transforms one by
-/// one, then the forward and reverse passes of the three terms.
+/// Wall time of the harmonic terms on the device, as `host_profile`
+/// (`--ignored`, `--features gpu`): the transforms of one map one by one,
+/// then the forward and reverse passes of the three terms for
+/// `STL_PROFILE_MEMBERS` members (default 1).
 #[cfg(feature = "gpu")]
 #[test]
 #[ignore]
@@ -282,17 +283,25 @@ fn device_profile() {
     let cic = Cic::new(lo, hi, 100);
     let mk = Minkowski::default();
     let mut terms = GpuTerms::new(gpu.clone(), &sht, &mk).unwrap();
-    let (cps, cpdf, cmf) = (vec![1.0; w.len()], vec![1.0; 100], vec![1.0; mk.count()]);
+    // `members` copies of the map: the terms of one evaluation of a group.
+    let members = env("STL_PROFILE_MEMBERS").unwrap_or(1);
+    let xs: Vec<f64> = (0..members).flat_map(|_| x.iter().copied()).collect();
+    let rows = |v: Vec<f64>| -> Vec<f64> { (0..members).flat_map(|_| v.iter().copied()).collect() };
+    let (cps, cpdf, cmf) = (rows(vec![1.0; w.len()]), rows(vec![1.0; 100]), rows(vec![1.0; mk.count()]));
     let mut fwd = [0.0; 2];
-    let forward = best(&mut || fwd = terms.forward(&x, &w, &cic).3);
+    let forward = best(&mut || fwd = terms.forward(&xs, &w, &cic).3);
     let mut rev = [0.0; 2];
+    terms.take_phases();
     let both = best(&mut || {
-        terms.forward(&x, &w, &cic);
-        rev = terms.reverse(&x, &w, &cic, &cps, &cpdf, &cmf).1;
+        terms.forward(&xs, &w, &cic);
+        rev = terms.reverse(&xs, &w, &cic, &cps, &cpdf, &cmf).1;
     });
     let reverse = both - forward;
+    // Per member and evaluation (STL_SHT_PHASES).
+    let phases = terms.take_phases().map(|p| p.into_iter().map(|(k, v)| (k, v / (reps * members) as f64)).collect::<std::collections::BTreeMap<_, _>>());
     let report = serde_json::json!({
         "nside": nside, "lmax": 3 * nside - 1, "device": gpu.name, "reps": reps, "setup": setup,
+        "members": members, "gemm": dev.uses_gemm(), "phases_of_the_terms": phases,
         "seconds": {
             "sht_analysis": analysis, "sht_synthesis": synthesis, "sht_derivatives": derivatives, "sht_derivatives_vjp": derivatives_vjp,
             "forward": forward, "forward_power_pdf": fwd[0], "forward_mf": fwd[1],
@@ -300,7 +309,7 @@ fn device_profile() {
         },
         "per_member_evaluation": {
             "sht": analysis + derivatives + derivatives_vjp + synthesis,
-            "total": forward + reverse,
+            "total": (forward + reverse) / members as f64,
         },
     });
     println!("{report}");

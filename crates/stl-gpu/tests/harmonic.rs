@@ -77,3 +77,40 @@ fn device_transforms_match_the_host() {
         eprintln!("nside {nside} lmax {lmax}: worst {worst:.2e}");
     }
 }
+
+/// The batched transforms (`*_many`, several maps per Legendre GEMM) against
+/// `stl_core::sht` map by map.
+#[test]
+fn batched_transforms_match_the_host() {
+    let Some(gpu) = gpu() else { return };
+    for (nside, lmax) in [(4usize, 11usize), (16, 47), (64, 191)] {
+        let sht = Sht::new(nside, lmax);
+        let dev = GpuSht::new(&gpu, &sht).expect("device transforms");
+        let k = 3;
+        let alms: Vec<Vec<Complex64>> = (0..k).map(|i| random_alm(&sht, 3 + 2 * i as u64)).collect();
+        let xs: Vec<Vec<f64>> = (0..k).map(|i| noise(sht.npix, 50 + i as u64)).collect();
+        let cots: Vec<Vec<f64>> = (0..k).map(|i| (0..5).flat_map(|j| noise(sht.npix, 70 + 5 * i as u64 + j)).collect()).collect();
+        let da: Vec<_> = alms.iter().map(|a| gpu.upload(&flat(a))).collect();
+        let dx: Vec<_> = xs.iter().map(|x| gpu.upload(x)).collect();
+        let dc: Vec<_> = cots.iter().map(|c| gpu.upload(c)).collect();
+        let (ra, rx, rc): (Vec<_>, Vec<_>, Vec<_>) = (da.iter().collect(), dx.iter().collect(), dc.iter().collect());
+        let check = |name: &str, got: Vec<stl_gpu::CudaSlice<f64>>, want: Vec<Vec<f64>>| {
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let e = rel(&gpu.download(g), w);
+                eprintln!("nside {nside} lmax {lmax} {name} {i}: {e:.2e}");
+                assert!(e < 1e-12, "nside {nside} lmax {lmax} {name} {i}: {e:e}");
+            }
+        };
+        check("synthesis", dev.synthesis_many(&gpu, &ra), alms.iter().map(|a| sht.synthesis(a)).collect());
+        check("analysis", dev.analysis_many(&gpu, &rx), xs.iter().map(|x| flat(&sht.analysis(x))).collect());
+        check("derivatives", dev.derivatives_many(&gpu, &ra), alms.iter().map(|a| sht.derivatives(a).concat()).collect());
+        let want: Vec<Vec<f64>> = cots
+            .iter()
+            .map(|c| {
+                let c: Vec<&[f64]> = c.chunks(sht.npix).collect();
+                flat(&sht.derivatives_vjp([c[0], c[1], c[2], c[3], c[4]]))
+            })
+            .collect();
+        check("derivatives vjp", dev.derivatives_vjp_many(&gpu, &rc), want);
+    }
+}

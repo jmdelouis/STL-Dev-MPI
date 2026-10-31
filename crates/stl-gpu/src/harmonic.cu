@@ -594,3 +594,183 @@ extern "C" __global__ void cic_vjp(const double* x, i64 n, double lo, double dx,
     if (i + 1 >= 0 && i + 1 < bins) v += cot[i + 1];
     g[p] = v / norm;
 }
+
+// ---------------------------------------------------------------------------
+// Batched Legendre sums as GEMMs (GpuSht with cuBLAS).  For a block of m
+// [m0, m0 + gridDim.y) and each parity q of l - m, the table
+// T_q(m)[p, j] = lambda_{l m}(ring pair p), l = m + q + 2 j, is built once
+// (leg_table: the scaled recursion of sht_leg_syn, 0 where it is still
+// below range) and shared by the G members and the sums of a stage through
+// one DGEMM per (m, q).  cum[2 (m - m0) + q] counts the table rows before
+// (m, q) in the block: the table of (m, q) starts at P cum (P ring pairs,
+// the equator last), its coefficients X at N cum (N columns, [n_q, N]
+// column-major), its ring values O at (2 (m - m0) + q) P N ([P, N]).
+// Column ((kind G) + g) 2 + ri holds the real (ri = 0) or imaginary part
+// of member g.  Synthesis kinds: a_lm, l (l + 1) a_lm, l a_lm and
+// c_{l+1} a_{l+1, m}; the derivative sum is B = (x S_2 - S_3) / s, since
+// dlambda_l = l x lambda_l - c_l lambda_{l-1}.  Adjoint kinds: A, C,
+// x B / s and B / s, then a_lm = Y_0 + l (l + 1) Y_1 + l Y_2 - c_l Y_3(l - 1).
+// The sums differ from sht_leg_syn / sht_leg_adj by rounding (order of the
+// GEMM; B and the ring combinations formed before the division).
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ i64 leg_rows(i64 lmax, i64 m, int q) {
+    return q ? (lmax - m + 1) / 2 : (lmax - m) / 2 + 1;
+}
+
+// Grid (ceil(P / blockDim), m-block).
+extern "C" __global__ void leg_table(
+    i64 m0, i64 lmax, const double* coef, const double* log_mm, const double* cs, const double* lnsin, i64 P,
+    double rc_lo, double rc_c300, double rc_ln, double rc_scale, double rc_limit, const i64* cum, double* T)
+{
+    RecConst rc = {rc_lo, rc_c300, rc_ln, rc_scale, rc_limit};
+    i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    i64 m = m0 + blockIdx.y;
+    if (p >= P) return;
+    double cosv = cs[p];
+    const double* cf = coef + 3 * alm_index(lmax, m, m);
+    double* t0 = T + P * cum[2 * (m - m0)];
+    double* t1 = T + P * cum[2 * (m - m0) + 1];
+    double prev = 0.0, cur;
+    int k;
+    rec_start(m, lnsin[p], log_mm, rc, &cur, &k);
+    for (i64 l = m; l <= lmax; l++) {
+        int ok = l == m ? k == 0 : rec_step(cf + 3 * (l - m), cosv, &prev, &cur, &k, rc);
+        double v = ok ? cur : 0.0;
+        i64 j = (l - m) >> 1;
+        if ((l - m) & 1) t1[j * P + p] = v;
+        else t0[j * P + p] = v;
+    }
+}
+
+__device__ __forceinline__ void leg_put(double* x, i64 n, i64 j, int kind, int G, int g, double2 v) {
+    i64 col = ((i64)kind * G + g) * 2;
+    x[col * n + j] = v.x;
+    x[(col + 1) * n + j] = v.y;
+}
+
+__device__ __forceinline__ double2 leg_get(const double* o, i64 n, i64 j, int kind, int G, int g) {
+    i64 col = ((i64)kind * G + g) * 2;
+    return make_double2(o[col * n + j], o[(col + 1) * n + j]);
+}
+
+// Synthesis coefficients X of G members (rows of nalm complex a_lm).
+// Grid (ceil((lmax + 1) / blockDim), m-block).
+extern "C" __global__ void leg_pack_syn(const double2* alm, i64 nalm, int G, int kinds, i64 m0, i64 lmax, const double* coef, const i64* cum, double* X) {
+    i64 m = m0 + blockIdx.y;
+    i64 l = m + (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (l > lmax) return;
+    int q = (int)((l - m) & 1);
+    i64 j = (l - m) >> 1, n = leg_rows(lmax, m, q);
+    i64 N = 2 * (i64)G * kinds;
+    double* x = X + N * cum[2 * (m - m0) + q];
+    i64 i = alm_index(lmax, l, m);
+    double lf = (double)l;
+    double cn = l < lmax ? coef[3 * (i + 1) + 2] : 0.0;
+    for (int g = 0; g < G; g++) {
+        double2 a = alm[g * nalm + i];
+        leg_put(x, n, j, 0, G, g, a);
+        if (kinds == 4) {
+            double2 an = l < lmax ? alm[g * nalm + i + 1] : make_double2(0.0, 0.0);
+            leg_put(x, n, j, 1, G, g, c_scale(a, lf * (lf + 1.0)));
+            leg_put(x, n, j, 2, G, g, c_scale(a, lf));
+            leg_put(x, n, j, 3, G, g, c_scale(an, cn));
+        }
+    }
+}
+
+// Ring sums [g][m][ring] (rows of `stride` complex) of G members from the
+// GEMM values O: north ring p, south ring nr - 1 - p.  Grid (ceil(P /
+// blockDim), m-block).
+extern "C" __global__ void leg_unpack_syn(
+    const double* O, int G, int kinds, i64 m0, i64 P, i64 nr, i64 pairs, const double* cs, const double* sn,
+    double2* A, double2* B, double2* C, i64 stride)
+{
+    i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    i64 m = m0 + blockIdx.y;
+    if (p >= P) return;
+    i64 N = 2 * (i64)G * kinds;
+    const double* o0 = O + (2 * (m - m0)) * P * N;
+    const double* o1 = o0 + P * N;
+    double x = cs[p], s = sn[p];
+    int south = p < pairs;
+    i64 rn = m * nr + p, rs = m * nr + (nr - 1 - p);
+    for (int g = 0; g < G; g++) {
+        i64 row = g * stride;
+        double2 e = leg_get(o0, P, p, 0, G, g), o = leg_get(o1, P, p, 0, G, g);
+        A[row + rn] = c_add(e, o);
+        if (south) A[row + rs] = c_sub(e, o);
+        if (kinds == 4) {
+            e = leg_get(o0, P, p, 1, G, g);
+            o = leg_get(o1, P, p, 1, G, g);
+            C[row + rn] = c_add(e, o);
+            if (south) C[row + rs] = c_sub(e, o);
+            double2 e2 = leg_get(o0, P, p, 2, G, g), o2 = leg_get(o1, P, p, 2, G, g);
+            double2 e3 = leg_get(o0, P, p, 3, G, g), o3 = leg_get(o1, P, p, 3, G, g);
+            B[row + rn] = c_div(c_sub(c_scale(c_add(e2, o2), x), c_add(e3, o3)), s);
+            if (south) B[row + rs] = c_div(c_sub(c_scale(c_sub(e2, o2), -x), c_sub(e3, o3)), s);
+        }
+    }
+}
+
+// Adjoint columns T ([P, N] per (m, q)) of G members from their ring sums.
+// Grid (ceil(P / blockDim), m-block).
+extern "C" __global__ void leg_pack_adj(
+    const double2* A, const double2* B, const double2* C, i64 stride, int G, int kinds, i64 m0, i64 P, i64 nr, i64 pairs,
+    const double* cs, const double* sn, double* T)
+{
+    i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    i64 m = m0 + blockIdx.y;
+    if (p >= P) return;
+    i64 N = 2 * (i64)G * kinds;
+    double* t0 = T + (2 * (m - m0)) * P * N;
+    double* t1 = t0 + P * N;
+    double x = cs[p], s = sn[p];
+    int south = p < pairs;
+    i64 rn = m * nr + p, rs = m * nr + (nr - 1 - p);
+    double2 z = make_double2(0.0, 0.0);
+    for (int g = 0; g < G; g++) {
+        i64 row = g * stride;
+        double2 n = A[row + rn], v = south ? A[row + rs] : z;
+        leg_put(t0, P, p, 0, G, g, c_add(n, v));
+        leg_put(t1, P, p, 0, G, g, c_sub(n, v));
+        if (kinds == 4) {
+            n = C[row + rn];
+            v = south ? C[row + rs] : z;
+            leg_put(t0, P, p, 1, G, g, c_add(n, v));
+            leg_put(t1, P, p, 1, G, g, c_sub(n, v));
+            n = B[row + rn];
+            v = south ? B[row + rs] : z;
+            leg_put(t0, P, p, 2, G, g, c_div(c_scale(c_sub(n, v), x), s));
+            leg_put(t1, P, p, 2, G, g, c_div(c_scale(c_add(n, v), x), s));
+            leg_put(t0, P, p, 3, G, g, c_div(c_add(n, v), s));
+            leg_put(t1, P, p, 3, G, g, c_div(c_sub(n, v), s));
+        }
+    }
+}
+
+// a_lm of G members (rows of nalm complex) from the adjoint GEMM values Y.
+// Grid (ceil((lmax + 1) / blockDim), m-block).
+extern "C" __global__ void leg_unpack_adj(const double* Y, int G, int kinds, i64 m0, i64 lmax, const double* coef, const i64* cum, double2* alm, i64 nalm) {
+    i64 m = m0 + blockIdx.y;
+    i64 l = m + (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (l > lmax) return;
+    int q = (int)((l - m) & 1);
+    i64 j = (l - m) >> 1, n = leg_rows(lmax, m, q);
+    i64 N = 2 * (i64)G * kinds;
+    const double* y = Y + N * cum[2 * (m - m0) + q];
+    i64 i = alm_index(lmax, l, m);
+    double lf = (double)l, cl = coef[3 * i + 2];
+    // The other parity, at the row of l - 1.
+    const double* y1 = Y + N * cum[2 * (m - m0) + (1 - q)];
+    i64 n1 = leg_rows(lmax, m, 1 - q), j1 = (l - 1 - m) >> 1;
+    for (int g = 0; g < G; g++) {
+        double2 v = leg_get(y, n, j, 0, G, g);
+        if (kinds == 4) {
+            v = c_add(v, c_scale(leg_get(y, n, j, 1, G, g), lf * (lf + 1.0)));
+            v = c_add(v, c_scale(leg_get(y, n, j, 2, G, g), lf));
+            if (l > m) v = c_sub(v, c_scale(leg_get(y1, n1, j1, 3, G, g), cl));
+        }
+        alm[g * nalm + i] = v;
+    }
+}

@@ -4,6 +4,7 @@
 //! halo / ghost exchanges of `stl_core::engine::Exchange` between ranks.
 //! See `docs/gpu.md`.
 
+pub mod cublas;
 pub mod cufft;
 pub mod device;
 pub mod dia;

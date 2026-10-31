@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"));
 
-const KERNELS: [&str; 64] = [
+const KERNELS: [&str; 69] = [
     "ring_thetas",
     "geom_build",
     "geom_pack",
@@ -68,6 +68,11 @@ const KERNELS: [&str; 64] = [
     "sht_scale_m",
     "sht_add_scaled_m",
     "sht_combine",
+    "leg_table",
+    "leg_pack_syn",
+    "leg_unpack_syn",
+    "leg_pack_adj",
+    "leg_unpack_adj",
     "sht_power",
     "sht_power_vjp",
     "px_sums",
