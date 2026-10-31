@@ -317,6 +317,12 @@ impl GpuSht {
     /// Map cotangent of the analysis whose `a_lm` gave the `C_l`, from the
     /// cotangent `dcl` of the `C_l` (`Sht::power_vjp` then `analysis_vjp`).
     pub fn power_vjp_map(&self, gpu: &Gpu, alm: &CudaSlice<f64>, dcl: &[f64]) -> CudaSlice<f64> {
+        self.synthesis(gpu, &self.power_vjp_coefficients(gpu, alm, dcl))
+    }
+
+    /// The coefficients `c` of [`power_vjp_map`](Self::power_vjp_map) before
+    /// the synthesis (`Omega (power_vjp) / mult`): the map cotangent is `Y c`.
+    pub fn power_vjp_coefficients(&self, gpu: &Gpu, alm: &CudaSlice<f64>, dcl: &[f64]) -> CudaSlice<f64> {
         assert_eq!(dcl.len(), self.lmax + 1);
         let d = gpu.upload(dcl);
         let c = gpu.zeros::<f64>(2 * self.nalm);
@@ -326,7 +332,36 @@ impl GpuSht {
             256,
             &[gpu.a(alm), self.lmax.into(), gpu.a(&d), self.area.into(), (self.area / 2.0).into(), gpu.a(&c)],
         );
-        self.synthesis(gpu, &c)
+        c
+    }
+
+    /// `c += s Omega a / mult` (the coefficients of [`analysis_vjp`](Self::analysis_vjp)
+    /// of `s a`, added to those of another synthesis).
+    pub fn add_analysis_vjp_coefficients(&self, gpu: &Gpu, c: &mut CudaSlice<f64>, a: &CudaSlice<f64>, s: f64) {
+        assert_eq!(c.len(), 2 * self.nalm);
+        assert_eq!(a.len(), 2 * self.nalm);
+        gpu.launch(
+            "sht_add_scaled_m",
+            ((self.lmax + 1).div_ceil(256) as u32, (self.lmax + 1) as u32),
+            256,
+            &[gpu.a(c), gpu.a(a), self.lmax.into(), (s * self.area).into(), (s * self.area / 2.0).into()],
+        );
+    }
+
+    /// `p a + q b` of two packed `a_lm`.
+    pub fn combine(&self, gpu: &Gpu, a: &CudaSlice<f64>, p: f64, b: &CudaSlice<f64>, q: f64) -> CudaSlice<f64> {
+        assert_eq!(a.len(), b.len());
+        let out = gpu.zeros::<f64>(a.len());
+        gpu.launch1("sht_combine", a.len(), &[gpu.a(a), p.into(), gpu.a(b), q.into(), a.len().into(), gpu.a(&out)]);
+        out
+    }
+
+    /// `sum_p y_p (Y c)_p` for `y` whose analysis is `ay` (`Y^T y = mult
+    /// Y* y = mult ay / Omega`) and `c` the coefficients of an
+    /// [`analysis_vjp`](Self::analysis_vjp) of `a` (`c = Omega a / mult`): the
+    /// real dot product of `ay` and `a`.
+    pub fn analysis_vjp_dot(&self, gpu: &Gpu, ay: &CudaSlice<f64>, a: &CudaSlice<f64>) -> f64 {
+        pixel_sum(gpu, gpu.a(ay), gpu.a(a), 2 * self.nalm, 0.0, 3)
     }
 
     /// The five covariant derivative maps `[5, npix]` (`Sht::derivatives`).

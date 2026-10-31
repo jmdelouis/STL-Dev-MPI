@@ -387,6 +387,22 @@ extern "C" __global__ void sht_scale_m(double2* alm, i64 lmax, double f0, double
     alm[i] = c_scale(alm[i], m == 0 ? f0 : f1);
 }
 
+// c[(l, m)] += a[(l, m)] (m == 0 ? f0 : f1).  Grid as sht_scale_m.
+extern "C" __global__ void sht_add_scaled_m(double2* c, const double2* a, i64 lmax, double f0, double f1) {
+    i64 m = blockIdx.y;
+    i64 l = m + (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (l > lmax) return;
+    i64 i = alm_index(lmax, l, m);
+    c[i] = c_add(c[i], c_scale(a[i], m == 0 ? f0 : f1));
+}
+
+// out = p a + q b over n doubles.
+extern "C" __global__ void sht_combine(const double* a, double p, const double* b, double q, i64 n, double* out) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = p * a[i] + q * b[i];
+}
+
 // C_l = sum_m mult |a_lm|^2 / (2 l + 1), m in increasing order (Sht::power).
 extern "C" __global__ void sht_power(const double2* alm, i64 lmax, double* cl) {
     i64 l = (i64)blockIdx.x * blockDim.x + threadIdx.x;

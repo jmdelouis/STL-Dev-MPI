@@ -296,16 +296,16 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
     }
 
     #[cfg(feature = "gpu")]
-    fn device_reverse(&self, cps: &[f64], cpdf: &[f64], cmf: &[f64]) -> Option<Vec<f64>> {
+    fn device_reverse(&self, kfull: &[f64], cps: &[f64], cpdf: &[f64], cmf: &[f64]) -> Option<Vec<f64>> {
         let d = self.gpu_terms.as_ref()?;
-        let (hk, secs) = d.borrow().reverse(&self.windows, &self.cic, cps, cpdf, cmf);
+        let (hk, secs) = d.borrow_mut().reverse(kfull, &self.windows, &self.cic, cps, cpdf, cmf);
         self.add_time("power_pdf_reverse", secs[0]);
         self.add_time("mf_reverse", secs[1]);
         Some(hk)
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn device_reverse(&self, _: &[f64], _: &[f64], _: &[f64]) -> Option<Vec<f64>> {
+    fn device_reverse(&self, _: &[f64], _: &[f64], _: &[f64], _: &[f64]) -> Option<Vec<f64>> {
         None
     }
 
@@ -338,7 +338,7 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         let (mf, cmf) = mf_loss(&self.gather_rows(&mfv, nm), &tg.mf_mean, &tg.mf_var);
         let (a, b) = (self.first_member, self.first_member + local);
         let (cps, cpdf, cmf) = (&cps[a * nb..b * nb], &cpdf[a * bins..b * bins], &cmf[a * nm..b * nm]);
-        let hk = match self.device_reverse(cps, cpdf, cmf) {
+        let hk = match self.device_reverse(&kfull, cps, cpdf, cmf) {
             Some(h) => h,
             None => self.host_reverse(&kfull, kept, cps, cpdf, cmf),
         };

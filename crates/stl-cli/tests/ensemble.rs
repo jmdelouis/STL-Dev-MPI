@@ -286,7 +286,11 @@ fn device_profile() {
     let mut fwd = [0.0; 2];
     let forward = best(&mut || fwd = terms.forward(&x, &w, &cic).3);
     let mut rev = [0.0; 2];
-    let reverse = best(&mut || rev = terms.reverse(&w, &cic, &cps, &cpdf, &cmf).1);
+    let both = best(&mut || {
+        terms.forward(&x, &w, &cic);
+        rev = terms.reverse(&x, &w, &cic, &cps, &cpdf, &cmf).1;
+    });
+    let reverse = both - forward;
     let report = serde_json::json!({
         "nside": nside, "lmax": 3 * nside - 1, "device": gpu.name, "reps": reps, "setup": setup,
         "seconds": {
@@ -295,7 +299,7 @@ fn device_profile() {
             "reverse": reverse, "reverse_power_pdf": rev[0], "reverse_mf": rev[1],
         },
         "per_member_evaluation": {
-            "sht": 2.0 * analysis + derivatives + derivatives_vjp + 2.0 * synthesis,
+            "sht": analysis + derivatives + derivatives_vjp + synthesis,
             "total": forward + reverse,
         },
     });
