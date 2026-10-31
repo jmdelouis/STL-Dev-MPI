@@ -50,6 +50,8 @@ run:
   --ps-variance-upper X upper band centre of the C_l variance term (default 383 at nside 128;
                         required otherwise)
   --history-size N      L-BFGS history (default 10)
+  --checkpoint N        every N evaluations, the maps of the lowest loss so far: PREFIX_checkpoint_mMMM_*
+                        and PREFIX_checkpoint.json (restart with --init PREFIX_checkpoint_m{m}_gaussian_nested.npy)
   --harmonic cpu|gpu    where the C_l, PDF and Minkowski terms run (default gpu with --gpu;
                         the device needs cuFFT, libcufft.so or STL_CUFFT)
   --out PREFIX          PREFIX.json, PREFIX_mMMM_gaussian_nested.npy, PREFIX_mMMM_physical_nested.npy
@@ -76,6 +78,7 @@ pub struct Args {
     pub init: Option<String>,
     pub ps_variance_upper: Option<f64>,
     pub history_size: usize,
+    pub checkpoint: usize,
     pub out: Option<String>,
     pub block_pixels: usize,
     pub ranks: usize,
@@ -129,6 +132,7 @@ impl Args {
                 "--init" => a.init = Some(it.next().ok_or("--init needs a path")?.clone()),
                 "--ps-variance-upper" => a.ps_variance_upper = Some(it.next().ok_or("--ps-variance-upper needs a value")?.parse().map_err(|_| "--ps-variance-upper: a number")?),
                 "--history-size" => a.history_size = num(it.next(), k)?,
+                "--checkpoint" => a.checkpoint = num(it.next(), k)?,
                 "--out" => a.out = Some(it.next().ok_or("--out needs a value")?.clone()),
                 "--block-pixels" => a.block_pixels = num(it.next(), k)?,
                 "--ranks" => a.ranks = num(it.next(), k)?,
@@ -366,12 +370,57 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
     let root = comm.rank() == 0;
     let blocks_history = std::cell::RefCell::new(Vec::new());
     let eval_seconds = std::cell::RefCell::new(Vec::new());
+    let prefix = args.out.as_ref().unwrap();
+    // Whole Gaussian and physical maps of this group's members from the owned
+    // slices, written by the group's rank 0 (through a temporary name).
+    let write_members = |x: &[f64], prefix: &str| -> Result<(), String> {
+        let g = obj.whole(x);
+        let (kappa, _) = obj.physical(&g);
+        if gcomm.rank() == 0 {
+            for (m, (gr, kr)) in g.chunks(npix).zip(kappa.chunks(npix)).enumerate() {
+                let id = first + m;
+                for (kind, map) in [("gaussian", gr), ("physical", kr)] {
+                    let path = format!("{prefix}_m{id:03}_{kind}_nested.npy");
+                    write_npy(&PathBuf::from(format!("{path}.tmp")), map).map_err(|e| e.to_string())?;
+                    std::fs::rename(format!("{path}.tmp"), &path).map_err(|e| format!("{path}: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    };
+    // Lowest loss so far: (loss, owned slices, evaluation); the evaluation last written.
+    let mut best = (f64::INFINITY, Vec::new(), 0usize);
+    let mut written = 0usize;
     let started = Instant::now();
     let f = |p: &[f64]| {
         let t = Instant::now();
         let out = obj.loss_and_grad(p);
         eval_seconds.borrow_mut().push(t.elapsed().as_secs_f64());
         blocks_history.borrow_mut().push(obj.last.borrow().map(|b| b.loss));
+        if args.checkpoint > 0 {
+            let n = eval_seconds.borrow().len();
+            if out.0 < best.0 {
+                best.1.clear();
+                best.1.extend_from_slice(p);
+                (best.0, best.2) = (out.0, n);
+            }
+            if n % args.checkpoint == 0 && best.2 != written {
+                let ck = format!("{prefix}_checkpoint");
+                match write_members(&best.1, &ck) {
+                    Ok(()) if root => {
+                        let state = json!({"evaluation": best.2, "loss": best.0, "blocks": blocks_history.borrow()[best.2 - 1],
+                            "evaluations_done": n, "seconds": started.elapsed().as_secs_f64(),
+                            "restart": format!("--init {ck}_m{{m}}_gaussian_nested.npy")});
+                        if let Err(e) = std::fs::write(format!("{ck}.json"), serde_json::to_string_pretty(&state).unwrap()) {
+                            eprintln!("stl-ensemble: {ck}.json: {e}");
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(e) => eprintln!("stl-ensemble: checkpoint: {e}"),
+                }
+                written = best.2;
+            }
+        }
         out
     };
     let print = |i: usize, loss: f64, t: f64| {
@@ -389,16 +438,7 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
     // Final maps of this group's members (whole maps on every rank of the group).
     let (final_loss, _) = obj.loss_and_grad(&x);
     let final_blocks = *obj.last.borrow();
-    let g = obj.whole(&x);
-    let (kappa, _) = obj.physical(&g);
-    let prefix = args.out.as_ref().unwrap();
-    if gcomm.rank() == 0 {
-        for (m, (gr, kr)) in g.chunks(npix).zip(kappa.chunks(npix)).enumerate() {
-            let id = first + m;
-            write_npy(&PathBuf::from(format!("{prefix}_m{id:03}_gaussian_nested.npy")), gr).map_err(|e| e.to_string())?;
-            write_npy(&PathBuf::from(format!("{prefix}_m{id:03}_physical_nested.npy")), kr).map_err(|e| e.to_string())?;
-        }
-    }
+    write_members(&x, prefix)?;
     let peak = comm.allreduce_max(proc_memory("VmHWM:") as f64);
     #[allow(unused_mut)]
     let mut device_memory = serde_json::Value::Null;
@@ -415,7 +455,7 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
         "nside": nside, "scales": cal.scales, "orientations": 4, "kernel": 5, "members": members, "groups": groups,
         "ranks": comm.size(), "calibration": path, "references": cal.references, "bootstrap_ids": cal.bootstrap_ids,
         "ps_variance_upper": cutoff, "niter": args.niter, "max_eval": args.max_eval, "history_size": args.history_size,
-        "init": args.init, "seed": seed, "gpu": gpu_info, "harmonic": if obj.device_terms() { "gpu" } else { "cpu" },
+        "checkpoint": args.checkpoint, "init": args.init, "seed": seed, "gpu": gpu_info, "harmonic": if obj.device_terms() { "gpu" } else { "cpu" },
         "evaluations": history.len(), "seconds": seconds, "setup_seconds": setup_seconds,
         "seconds_per_evaluation": per_eval, "first_evaluation_seconds": evals.first(),
         "loss_history": &history, "blocks": BLOCKS, "blocks_history": &*blocks_history.borrow(),
