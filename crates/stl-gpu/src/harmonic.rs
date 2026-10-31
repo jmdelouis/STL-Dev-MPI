@@ -13,8 +13,9 @@
 //!   thread per (m, ring pair) for the synthesis, one block per (m, chunk
 //!   of rings) for its transpose.
 //!
-//! The ring FFTs go through cuFFT (one batched plan per ring length: the
-//! polar pairs and the equatorial rings).  Complex buffers are
+//! The ring FFTs go through cuFFT: one batched plan per ring length (the
+//! polar pairs and the equatorial rings), and for the five derivative maps
+//! of a member one plan per polar ring length over the five maps.  Complex buffers are
 //! `CudaSlice<f64>` of interleaved (re, im) pairs.  The orders of the sums
 //! and the differences with the host are listed in `harmonic.cu`: the
 //! results agree with `stl_core::sht` to rounding.
@@ -49,6 +50,14 @@ struct FftClass {
     plan: Handle,
     /// First pixel (RING order) of the first ring of the batch.
     first: usize,
+}
+
+/// One polar ring length for the five derivative maps of a member at once
+/// (five transforms `npix` apart), run on the north and the south ring.
+struct FftRings {
+    plan: Handle,
+    north: usize,
+    south: usize,
 }
 
 /// Rows `l = m + q + 2 j <= lmax` of parity `q`.
@@ -127,6 +136,7 @@ pub struct GpuSht {
     coef: CudaSlice<f64>,
     fft: &'static CuFft,
     classes: Vec<FftClass>,
+    rings5: Vec<FftRings>,
     _work: CudaSlice<u8>,
     chunks: usize,
     area: f64,
@@ -143,6 +153,9 @@ pub const PHASES: [&str; 4] = ["legendre_tables", "legendre_gemms", "legendre_co
 impl Drop for GpuSht {
     fn drop(&mut self) {
         for c in &self.classes {
+            self.fft.destroy(c.plan);
+        }
+        for c in &self.rings5 {
             self.fft.destroy(c.plan);
         }
         if let Some(g) = &self.gemm {
@@ -190,10 +203,17 @@ impl GpuSht {
             work_bytes = work_bytes.max(bytes);
             classes.push(FftClass { plan, first });
         }
+        let mut rings5 = Vec::with_capacity(nside.saturating_sub(1));
+        for i in 1..nside {
+            let (n, s) = (&sht.rings[i - 1], &sht.rings[nr - i]);
+            let (plan, bytes) = fft.plan_z2z(n.nphi, 5, npix, stream)?;
+            work_bytes = work_bytes.max(bytes);
+            rings5.push(FftRings { plan, north: n.start, south: s.start });
+        }
         let work = gpu.zeros::<u8>(work_bytes.max(16));
         let wp = gpu.ptr(&work);
-        for c in &classes {
-            unsafe { fft.set_work_area(c.plan, wp)? };
+        for c in classes.iter().map(|c| c.plan).chain(rings5.iter().map(|c| c.plan)) {
+            unsafe { fft.set_work_area(c, wp)? };
         }
         let gemm = if std::env::var("STL_SHT").as_deref() == Ok("kernels") {
             None
@@ -225,6 +245,7 @@ impl GpuSht {
             coef,
             fft,
             classes,
+            rings5,
             _work: work,
             chunks: (pairs + 1).div_ceil(ADJ_RINGS),
             area: sht.area(),
@@ -482,10 +503,23 @@ impl GpuSht {
         }
         let base = gpu.ptr(h);
         let dir = if inverse { INVERSE } else { FORWARD };
-        for o in 0..k {
-            for c in &self.classes {
-                let p = base + ((o * self.npix + c.first) * 16) as u64;
-                unsafe { self.fft.exec_z2z(c.plan, p, dir) }.unwrap_or_else(|e| panic!("{e}"));
+        let exec = |plan, first: usize| unsafe { self.fft.exec_z2z(plan, base + (first * 16) as u64, dir) }.unwrap_or_else(|e| panic!("{e}"));
+        if k == 5 {
+            // The polar rings of the five maps by length (north, then south),
+            // the equatorial rings map by map.
+            for c in &self.rings5 {
+                exec(c.plan, c.north);
+                exec(c.plan, c.south);
+            }
+            let eq = self.classes.last().unwrap();
+            for o in 0..k {
+                exec(eq.plan, o * self.npix + eq.first);
+            }
+        } else {
+            for o in 0..k {
+                for c in &self.classes {
+                    exec(c.plan, o * self.npix + c.first);
+                }
             }
         }
         self.phase(gpu, 3, &mut t);

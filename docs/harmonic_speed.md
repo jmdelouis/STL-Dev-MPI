@@ -193,6 +193,14 @@ nside 1024, the states kept):
 | b, kernels (`STL_SHT=kernels`), batches of 5 | 9.27 | FFTs 0.59 |
 | b + a, GEMMs, batches of one | 7.53 | 2.00, 2.92, 0.58 |
 | b + a, GEMMs, batches of five | 6.86 | 1.02, 3.25, 0.58 |
+| the same, ring FFTs of the five derivative maps batched | 6.73 | 0.90, 3.68, 0.33 |
+
+The batched ring FFTs use one cuFFT plan per polar ring length over the
+five derivative maps of a member: 2 (nside - 1) + 5 launches instead of
+5 nside.  The transforms take 1.5 GB of device memory at 1024 (the
+1 GiB table of a block of m, the plans and their work area).  The device
+transforms agree with DUCC (fixture `sht_n16`, one map and a batch of
+two) to 6e-14, with the GEMMs and with the kernels.
 
 The T4 does little FP64 (0.25 TFLOPS).  Its DGEMMs run at about half that
 peak (3.9 x 10^11 operations per member at 1024 take 3.25 s), so sharing

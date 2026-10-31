@@ -64,6 +64,46 @@ fn sht_matches_ducc() {
     assert!(worst < 1e-12, "SHT against DUCC: {worst:e}");
 }
 
+/// The device transforms (`GpuSht`: GEMM Legendre sums, or the kernels with
+/// `STL_SHT=kernels`) against DUCC, one map and a batch of two.
+#[cfg(feature = "gpu")]
+#[test]
+fn device_sht_matches_ducc() {
+    use stl_gpu::harmonic::GpuSht;
+    let Some(gpu) = device() else { return };
+    let case = "sht_n16";
+    let sht = Sht::new(16, 47);
+    let dev = GpuSht::new(&gpu, &sht).unwrap();
+    let flat = |a: &[Complex64]| -> Vec<f64> { a.iter().flat_map(|c| [c.re, c.im]).collect() };
+    let cplx = |v: Vec<f64>| -> Vec<Complex64> { v.chunks(2).map(|p| Complex64::new(p[0], p[1])).collect() };
+    let x = gpu.upload(&f(case, "x"));
+    let acot = gpu.upload(&flat(&c(case, "acot")));
+    let alm = gpu.upload(&flat(&c(case, "alm")));
+    let cot = gpu.upload(&(0..5).flat_map(|k| f(case, &format!("cot{k}"))).collect::<Vec<f64>>());
+    let deriv: Vec<f64> = (0..5).flat_map(|k| f(case, &format!("deriv{k}"))).collect();
+    let mut worst = 0f64;
+    let mut check = |name: &str, err: f64| {
+        eprintln!("device {name}: {err:e} (gemm {})", dev.uses_gemm());
+        worst = worst.max(err);
+    };
+    for (i, a) in dev.analysis_many(&gpu, &[&x, &x]).iter().enumerate() {
+        let a = cplx(gpu.download(a));
+        check(&format!("analysis {i}"), relc(&a, &c(case, "alm")));
+        check(&format!("power {i}"), rel(&sht.power(&a), &f(case, "cl")));
+    }
+    for (i, m) in dev.synthesis_many(&gpu, &[&acot, &acot]).iter().enumerate() {
+        check(&format!("synthesis {i}"), rel(&gpu.download(m), &f(case, "synthesis")));
+    }
+    check("analysis_vjp", rel(&gpu.download(&dev.analysis_vjp(&gpu, &acot)), &f(case, "analysis_vjp")));
+    for (i, d) in dev.derivatives_many(&gpu, &[&alm, &alm]).iter().enumerate() {
+        check(&format!("derivatives {i}"), rel(&gpu.download(d), &deriv));
+    }
+    for (i, a) in dev.derivatives_vjp_many(&gpu, &[&cot, &cot]).iter().enumerate() {
+        check(&format!("derivative_vjp {i}"), relc(&cplx(gpu.download(a)), &c(case, "deriv_vjp")));
+    }
+    assert!(worst < 1e-12, "device SHT against DUCC: {worst:e}");
+}
+
 /// The calibration of the fixture's references against the Python one.
 #[test]
 fn calibration_matches_python() {
@@ -268,8 +308,10 @@ fn device_profile() {
     };
     let t = Instant::now();
     let sht = Sht::new(nside, 3 * nside - 1);
+    let free = gpu.memory().0;
     let dev = GpuSht::new(&gpu, &sht).unwrap();
     let setup = t.elapsed().as_secs_f64();
+    let sht_bytes = free.saturating_sub(gpu.memory().0);
     let x: Vec<f64> = (0..sht.npix).map(|i| (0.5 * stl_cli::pixel_normal(3, i as i64)).exp() - 1.0).collect();
     let dx = gpu.upload(&x);
     let alm = dev.analysis(&gpu, &dx);
@@ -301,7 +343,7 @@ fn device_profile() {
     let phases = terms.take_phases().map(|p| p.into_iter().map(|(k, v)| (k, v / (reps * members) as f64)).collect::<std::collections::BTreeMap<_, _>>());
     let report = serde_json::json!({
         "nside": nside, "lmax": 3 * nside - 1, "device": gpu.name, "reps": reps, "setup": setup,
-        "members": members, "gemm": dev.uses_gemm(), "phases_of_the_terms": phases,
+        "members": members, "gemm": dev.uses_gemm(), "phases_of_the_terms": phases, "sht_device_bytes": sht_bytes,
         "seconds": {
             "sht_analysis": analysis, "sht_synthesis": synthesis, "sht_derivatives": derivatives, "sht_derivatives_vjp": derivatives_vjp,
             "forward": forward, "forward_power_pdf": fwd[0], "forward_mf": fwd[1],
