@@ -554,8 +554,8 @@ C_l of the ten.)
 
 ### 10.3 Initial fields
 
-The suggested warm start from the nside-128 run (`tools`-free script
-`warm1024.py` in the run directory) was tried.  Per member, the a_lm of
+The suggested warm start from the nside-128 run (script `warm1024.py`,
+kept in the run directory) was tried.  Per member, the a_lm of
 its 128 Gaussian map were rescaled to the 1024 Gaussian C_l of the
 calibration, kept up to l = 128, and tapered (cos^2 in power) to l = 256
 into a Gaussian random field with those C_l.  The expected C_l is the 1024
