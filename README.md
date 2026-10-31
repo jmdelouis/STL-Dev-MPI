@@ -263,8 +263,11 @@ until they are redrawn in the paper's style.
   4d10f1f: DIA, fields recomputed, objective terms on the device, 6 host
   threads; 100 iterations, 108 evaluations at 74.5 s, 2 h 24 with setup
   and histogram matching, peak 67.8 GB, loss 212 to 19.2; `syn.json`
-  timers `host_lbfgs` 1630 s, `host_marginal` 56 s); step 3, A100 job
-  2535705 (+150 iterations, running). Datarmor job 7775550 runs the same
+  timers `host_lbfgs` 1630 s, `host_marginal` 56 s), analysed against
+  r000-r009 after 200 iterations: `figures/cv10_n2048_a100step2.txt`,
+  `figures/mf_levels_n2048_a100step2.txt` (step-1 columns included;
+  copies of `runs/` of the main checkout); step 3, A100 job 2535705 (+150
+  iterations, running; loss 8.6 after 73 evaluations). Datarmor job 7775550 runs the same
   step 2 at about 1070 s per evaluation (the "14 times"). The Irene jobs
   6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
   Datarmor chain).
