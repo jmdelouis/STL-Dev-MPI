@@ -20,11 +20,12 @@
 //! for those terms).
 
 use super::calibration::Calibration;
-use super::fields::{band_powers, band_powers_vjp, lp_windows, Cic, Minkowski, MinkowskiState};
+use super::fields::{band_powers, band_powers_vjp, lp_windows, par_chunks, par_zip, Cic, Minkowski, MinkowskiState};
 #[cfg(feature = "gpu")]
 use super::gpu_terms::GpuTerms;
 use super::losses::{mf_loss, pdf_loss, power_loss, sc_loss, Block, ScCoordinates};
 use num_complex::Complex64;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -144,40 +145,43 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         self.gather_rows(&flat, 2 * self.plan.len()).chunks(2).map(|p| C64::new(p[0], p[1])).collect()
     }
 
-    /// Whole maps `[local, npix]` from the owned slices `[local, owned]`.
-    pub fn whole(&self, x: &[f64]) -> Vec<f64> {
+    /// Whole maps `[local, npix]` from the owned slices `[local, owned]`
+    /// (`x` itself on one rank).
+    pub fn whole<'x>(&self, x: &'x [f64]) -> Cow<'x, [f64]> {
         let (s, e) = self.g.owned();
         let (s, e) = (s as usize, e as usize);
         if self.g.comm.size() == 1 {
-            return x.to_vec();
+            return Cow::Borrowed(x);
         }
         let mut full = vec![0.0; self.local() * self.npix];
         for (m, row) in x.chunks(e - s).enumerate() {
             full[m * self.npix + s..m * self.npix + e].copy_from_slice(row);
         }
         self.g.comm.allreduce_sum(&mut full);
-        full
+        Cow::Owned(full)
     }
 
-    fn owned(&self, full: &[f64]) -> Vec<f64> {
+    /// Owned slices of whole maps (`full` itself on one rank).
+    fn owned<'f>(&self, full: &'f [f64]) -> Cow<'f, [f64]> {
         let (s, e) = self.g.owned();
-        full.chunks(self.npix).flat_map(|row| row[s as usize..e as usize].iter().copied()).collect()
+        if self.g.comm.size() == 1 {
+            return Cow::Borrowed(full);
+        }
+        Cow::Owned(full.chunks(self.npix).flat_map(|row| row[s as usize..e as usize].iter().copied()).collect())
     }
 
-    /// `kappa = f(g) - mean(f(g))` and `f'(g)` of whole maps.
+    /// `kappa = f(g) - mean(f(g))` and `f'(g)` of whole maps: the pixels on
+    /// the host threads, each member's mean summed in pixel order.
     pub fn physical(&self, g: &[f64]) -> (Vec<f64>, Vec<f64>) {
-        let mut k = Vec::with_capacity(g.len());
-        let mut d = Vec::with_capacity(g.len());
-        for row in g.chunks(self.npix) {
-            let start = k.len();
-            for &v in row {
-                let (a, b) = self.cal.lut.inverse(v);
-                k.push(a);
-                d.push(b);
+        let (mut k, mut d) = (vec![0.0; g.len()], vec![0.0; g.len()]);
+        par_zip(&mut k, &mut d, |lo, ks, ds| {
+            for (i, (a, b)) in ks.iter_mut().zip(ds.iter_mut()).enumerate() {
+                (*a, *b) = self.cal.lut.inverse(g[lo + i]);
             }
-            let mean = k[start..].iter().sum::<f64>() / self.npix as f64;
-            k[start..].iter_mut().for_each(|v| *v -= mean);
-        }
+        });
+        let means: Vec<f64> = k.chunks(self.npix).map(|row| row.iter().sum::<f64>() / self.npix as f64).collect();
+        let npix = self.npix;
+        par_chunks(&mut k, |lo, ks| ks.iter_mut().enumerate().for_each(|(i, v)| *v -= means[(lo + i) / npix]));
         (k, d)
     }
 
@@ -341,19 +345,19 @@ impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
         // kappa cotangent -> g: f'(g) (c - mean(c)), member by member.
         let t = Instant::now();
         let hk = self.owned(&hk);
-        gk.iter_mut().zip(&hk).for_each(|(a, b)| *a += b);
+        par_chunks(&mut gk, |lo, gs| gs.iter_mut().enumerate().for_each(|(i, a)| *a += hk[lo + i]));
         let owned = gk.len() / local.max(1);
         let sums: Vec<f64> = gk.chunks(owned.max(1)).map(|r| r.iter().sum()).collect();
         let mut sums = sums;
         self.g.comm.allreduce_sum(&mut sums);
         let sl = self.owned(&slope);
-        for (m, (row, srow)) in gk.chunks(owned.max(1)).zip(sl.chunks(owned.max(1))).enumerate() {
-            let mean = sums[m] / self.npix as f64;
-            for (i, (c, d)) in row.iter().zip(srow).enumerate() {
-                grad[m * owned + i] += d * (c - mean);
+        let npix = self.npix as f64;
+        par_chunks(&mut grad, |lo, gs| {
+            for (i, v) in gs.iter_mut().enumerate() {
+                let p = lo + i;
+                *v = (*v + sl[p] * (gk[p] - sums[p / owned.max(1)] / npix)) / 5.0;
             }
-        }
-        grad.iter_mut().for_each(|v| *v /= 5.0);
+        });
         self.tick("host_chain", t);
         let blocks = [gsc, psc, ps, pdf, mf];
         *self.last.borrow_mut() = blocks;

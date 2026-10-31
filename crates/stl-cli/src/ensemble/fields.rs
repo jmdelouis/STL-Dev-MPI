@@ -49,6 +49,30 @@ pub fn chunked<T: Send>(n: usize, chunk: usize, f: impl Fn(usize, usize) -> T + 
     out.into_iter().map(|(_, v)| v).collect()
 }
 
+/// `f(lo, part)` over contiguous parts of `out` (`part = out[lo..]`), one
+/// per host thread: for element-wise passes (no sums).
+pub fn par_chunks(out: &mut [f64], f: impl Fn(usize, &mut [f64]) + Sync) {
+    let per = out.len().div_ceil(host_threads().min(out.len().div_ceil(CHUNK)).max(1)).max(1);
+    std::thread::scope(|s| {
+        for (k, part) in out.chunks_mut(per).enumerate() {
+            let f = &f;
+            s.spawn(move || f(k * per, part));
+        }
+    });
+}
+
+/// [`par_chunks`] over the same parts of two slices of one length.
+pub fn par_zip(a: &mut [f64], b: &mut [f64], f: impl Fn(usize, &mut [f64], &mut [f64]) + Sync) {
+    assert_eq!(a.len(), b.len());
+    let per = a.len().div_ceil(host_threads().min(a.len().div_ceil(CHUNK)).max(1)).max(1);
+    std::thread::scope(|s| {
+        for (k, (pa, pb)) in a.chunks_mut(per).zip(b.chunks_mut(per)).enumerate() {
+            let f = &f;
+            s.spawn(move || f(k * per, pa, pb));
+        }
+    });
+}
+
 const CHUNK: usize = 1 << 14;
 
 /// The 16 unnormalised cosine-squared windows of the C_l bands and their
