@@ -508,3 +508,93 @@ and kappa).  Device memory of the harmonic terms at nside 2048: about
 Legendre sums, the partial a_lm) plus 2.4 GB of Minkowski state per kept
 member: it fits next to the engine on an 80 GB device, not on a T4.
 To be measured; no A100 run was made for this.
+
+## 10. nside 1024 (garoupe, 31 Oct 2026, preliminary)
+
+Request of J.-M. Delouis: a run of his method at nside 1024, judged with
+`cv10.py` and `mf_levels.py` against the ten realisations, as our recipe
+at 1024 (Datarmor, 600 iterations).  Code of this branch (harmonic terms on
+the device); build in the garoupe home, run directory
+`/export/home1/jmdeloui/stl-campeti/n1024` (garoupe's local data disk: the
+home has a 10 GB quota).
+
+### 10.1 Calibration
+
+`stl-ensemble calibrate --references r000 ... r009 --nside 1024 --gpu`
+on the ten Takahashi realisations at 1024 (zs1,
+`/tmp/jmdeloui-irene1024/real`, the maps the judgement tools read): 13 min
+on garoupe (SC statistics on one T4, harmonic terms on the 12 host
+threads), 8.8 GB of host memory, `cal1024.json` 3.7 MB.  The maps are
+already at 1024: `degrade` only rounds them to `f32`.
+
+### 10.2 C_l variance cutoff: 3071 (`--ps-variance-upper 3071`)
+
+The source keeps the variance term of the 16 log C_l bands whose centre
+lies in [20, 383] at nside 128, where 383 = `3 nside - 1`: every band
+from l = 20 to the native limit.  It leaves the 2048 value open.  At
+1024 the same rule gives 3071, and the realisations show why the high
+bands must stay: their band powers scatter by 8-15 % at every l, far
+above the Gaussian prediction, the non-Gaussian (halo, super-sample)
+covariance of lensing.  A cutoff at 383 would leave the six bands that
+the 1024 run adds without any variance constraint, and an ensemble of
+nearly Gaussian small scales would keep the Gaussian scatter there:
+
+| Band centre l | Relative scatter of r000-r009 | Gaussian prediction | Ratio |
+|---|---|---|---|
+| 23 | 0.144 | 0.056 | 2.6 |
+| 61 | 0.169 | 0.021 | 8.2 |
+| 163 | 0.142 | 0.0078 | 18 |
+| 434 | 0.123 | 0.0030 | 41 |
+| 1155 | 0.104 | 0.0012 | 90 |
+| 3071 | 0.084 | 0.0006 | 134 |
+
+(Band powers with the objective's windows, C_l by `healpy.anafast`;
+Gaussian prediction `sqrt(sum_l W_l^2 2 C_l^2 / (2 l + 1))` with the mean
+C_l of the ten.)
+
+### 10.3 Initial fields
+
+The suggested warm start from the nside-128 run (`tools`-free script
+`warm1024.py` in the run directory) was tried.  Per member, the a_lm of
+its 128 Gaussian map were rescaled to the 1024 Gaussian C_l of the
+calibration, kept up to l = 128, and tapered (cos^2 in power) to l = 256
+into a Gaussian random field with those C_l.  The expected C_l is the 1024
+one at every l, and the degraded fields correlate at 0.80-0.83 with the
+128 members.  It starts higher than the default Gaussian random fields:
+
+| Initial fields | Loss | Gaussian SC | Physical SC | C_l | PDF | Minkowski |
+|---|---|---|---|---|---|---|
+| warm start from the 128 run | 1000.6 | 2144 | 2250 | 4.06 | 6.17 | 599 |
+| Gaussian random fields (default) | 831.9 | 2169 | 1498 | 4.84 | 2.45 | 485 |
+
+Gaussianisation does not commute with block averaging.  The large scales
+of a 128 Gaussian map (the Gaussianised 128 kappa) are therefore not the
+large scales of a 1024 Gaussian map, and kappa = f_1024(g) spoils the
+physical statistics.  The run starts from the method's own default.  At
+1024 the SC mean terms dominate the loss: their sigmas are the
+white-noise standard errors `sqrt(V / N)`, 8 times smaller than at 128
+for a coefficient of the finest level.  Losses at different nsides are
+therefore not comparable.
+
+### 10.4 Cost on garoupe and layout
+
+Ten members on two T4, two MPI groups of five (`--groups 2`, 4 host threads
+per rank, `--gpu-fields recompute`, `STL_GPU_CACHE_MB=1536`).  Two ranks
+do not fit on one T4 at 1024: 12.4-13.2 GB per rank, of which 3.0 GB of
+decimation rows, the SC fields, the harmonic transients and the Minkowski
+states of the five members.  The third T4 stays free.  One evaluation
+takes 177 s:
+
+| Term (5 members per GPU) | s / evaluation |
+|---|---|
+| SC of g | 60.7 |
+| SC of kappa | 53.5 |
+| Minkowski functionals (forward 21.6, reverse 23.6) | 45.1 |
+| C_l and PDF (forward 5.6, reverse 4.6) | 10.2 |
+| physical map and chain on the host | 7.4 |
+
+Setup 3.7 min, host memory 10.9 GB per rank.  The 2500 iterations of the
+source (about 2900 evaluations) would take about 6 days.  The first
+segment runs at most 400 iterations / 450 evaluations (about 22 h, from
+31 Oct 09:02).  A later segment restarts from its Gaussian maps
+(`--init`, the L-BFGS history is lost) or moves to an A100.
