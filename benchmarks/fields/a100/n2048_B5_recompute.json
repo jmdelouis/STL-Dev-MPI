@@ -1,0 +1,313 @@
+{
+  "J": 10,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 15042,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 75174.54805964182,
+    "loss_final_scatter_term": 2890.294399961737,
+    "member_files": [
+      "n2048_B5_recompute_m000_synthesis_nested.npy",
+      "n2048_B5_recompute_m001_synthesis_nested.npy",
+      "n2048_B5_recompute_m002_synthesis_nested.npy",
+      "n2048_B5_recompute_m003_synthesis_nested.npy",
+      "n2048_B5_recompute_m004_synthesis_nested.npy"
+    ],
+    "members": 5,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 639.8319808415165,
+        "scatter_over_ergodic_variance": 45.56494266159412,
+        "scatter_rms_sigma": 6.037545372854378
+      },
+      "S2": {
+        "residual_rms_sigma": 636.2204981243558,
+        "scatter_over_ergodic_variance": 65.11579118719932,
+        "scatter_rms_sigma": 7.217522632438322
+      },
+      "S3": {
+        "residual_rms_sigma": 112.75115837879507,
+        "scatter_over_ergodic_variance": 3.673703989509105,
+        "scatter_rms_sigma": 1.7143404538210276
+      },
+      "S4": {
+        "residual_rms_sigma": 113.47809206418945,
+        "scatter_over_ergodic_variance": 6.186921428339918,
+        "scatter_rms_sigma": 2.2247555242479695
+      },
+      "mean": {
+        "residual_rms_sigma": 0.5987160521540291,
+        "scatter_over_ergodic_variance": 0.07239134869856066,
+        "scatter_rms_sigma": 0.24065136392476263
+      },
+      "var": {
+        "residual_rms_sigma": 1079.4075297629229,
+        "scatter_over_ergodic_variance": 3.470462037561214,
+        "scatter_rms_sigma": 1.6662441687966898
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 1.0
+  },
+  "evaluations": 3,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 40,
+      "max_sigma": 4275.649647570146,
+      "rms_sigma": 1430.6441062567756
+    },
+    "S2": {
+      "count": 40,
+      "max_sigma": 4282.911518195398,
+      "rms_sigma": 1422.540736851943
+    },
+    "S3": {
+      "count": 880,
+      "max_sigma": 1681.1142124111882,
+      "rms_sigma": 252.09011040269345
+    },
+    "S4": {
+      "count": 14080,
+      "max_sigma": 6912.958615125519,
+      "rms_sigma": 253.6959581998305
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 1.2258626190321198,
+      "rms_sigma": 1.2258626190321198
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 2413.6257362516503,
+      "rms_sigma": 2413.6257362516503
+    }
+  },
+  "fits": [
+    "n2048_B5_recompute_target.fits",
+    "n2048_B5_recompute_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 431433,
+    "blocks_per_level": [
+      117,
+      30,
+      8,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "dia",
+    "decimation_rows_bytes": 11933262984,
+    "device": "NVIDIA A100-SXM4-80GB",
+    "device_ordinal": 0,
+    "devices_visible": 1,
+    "field_bytes_estimate": 15043353600,
+    "fields": "recompute",
+    "geometry_cache": "transposition",
+    "geometry_cache_budget_bytes": 30924722790,
+    "geometry_cache_used_bytes_per_rank": [
+      30923328596
+    ],
+    "memory_peak_bytes_per_rank": [
+      63798378496
+    ],
+    "memory_total_bytes": 85094825984
+  },
+  "init": {
+    "file": "/home/jmdeloui/stl-mpi/ens/runs/n1024/synthesis_gauss_m{m}_nested.npy",
+    "noise_std": 0.46186249997521617,
+    "nside": 1024,
+    "per_member": true
+  },
+  "kappa": {
+    "coefficients": 82,
+    "families": [
+      "mean",
+      "var",
+      "S1",
+      "S2"
+    ],
+    "final_residual_in_ergodic_sigma": {
+      "S1": {
+        "count": 40,
+        "max_sigma": 3147.099713655558,
+        "rms_sigma": 1075.1594933951137
+      },
+      "S2": {
+        "count": 40,
+        "max_sigma": 984.4720336179998,
+        "rms_sigma": 327.5499560106367
+      },
+      "mean": {
+        "count": 1,
+        "max_sigma": 1407.9473048335526,
+        "rms_sigma": 1407.9473048335526
+      },
+      "var": {
+        "count": 1,
+        "max_sigma": 586.9986993748812,
+        "rms_sigma": 586.9986993748812
+      }
+    },
+    "kappa_mean": 1.4497756526121785e-9,
+    "kappa_std": 0.0006050869643837434,
+    "loss_final_term": 64459.95058910263,
+    "s3_coefficients": 0,
+    "s3_levels_nside": null,
+    "s3_weight": 0.0,
+    "table": "/home/jmdeloui/stl-mpi/ens/prep/n2048/knots.npy",
+    "weight": 0.1
+  },
+  "kernel_size": 5,
+  "kurtosis": {
+    "all_levels_nside": [
+      2048,
+      1024,
+      512,
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "final_excess_mean_over_members": [
+      1701.6464813435693,
+      3390.2521298840925,
+      1014.2449449572962,
+      661.6058921221569,
+      454.0602038359486,
+      504.44464938822205,
+      97.6347529894723,
+      22.8993813260172,
+      3.8630452330692693
+    ],
+    "levels_nside": null,
+    "loss_final_term": 0.0,
+    "of": "kappa",
+    "target_excess": [
+      1834.4373711889261,
+      1326.3689730072233,
+      855.8121589192534,
+      512.5470090709657,
+      340.0320336881409,
+      100.47969475748165,
+      50.04478539340214,
+      15.085777784009682,
+      3.9764869648873535
+    ],
+    "weight": 0.0
+  },
+  "level_power": {
+    "levels_nside": [
+      2048,
+      1024,
+      512,
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "loss_final_term": 5.514748082258124,
+    "variance_over_target": [
+      0.7500822711611836,
+      1.3882155290988496,
+      1.476318464514882,
+      1.5328762278961,
+      1.3835313369821667,
+      1.2777949516824834,
+      1.2251498716375069,
+      1.2207647494444382,
+      1.2345992944365138
+    ],
+    "weight": 5.0
+  },
+  "loss_final_map": 142582.684089756,
+  "loss_first": 142583.3093968309,
+  "loss_history": [
+    142583.3093968309,
+    142583.1958032524,
+    142582.68408975538
+  ],
+  "loss_last": 142582.68408975538,
+  "marginal": {
+    "loss_final_term": 52.376292967542675,
+    "weight": 5000.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      50331648,
+      12582912,
+      3145728,
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 48318382080,
+    "maps_and_gradients": 5368704000,
+    "stored_moduli_and_cotangents": 7158067200
+  },
+  "memory_floor_bytes_per_rank": [
+    60845153280
+  ],
+  "memory_peak_bytes_per_rank": [
+    46694305792
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 1.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 2,
+  "nside": 2048,
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    19653849088
+  ],
+  "seconds": 487.74,
+  "seconds_per_evaluation": 162.58,
+  "setup_seconds": 322.08,
+  "target": {
+    "file": "/home/jmdeloui/stl-mpi/ens/prep/n2048/target_gauss_nested.npy",
+    "mean": -1.609906285582031e-14,
+    "std": 0.9999999865983763
+  },
+  "timers_seconds": {
+    "analysis_vjp": 0.18,
+    "forward": 69.5,
+    "gpu_forward_coefficients": 3.59,
+    "gpu_forward_conv": 19.73,
+    "gpu_forward_decimation": 1.2,
+    "gpu_geometry": 18.41,
+    "gpu_geometry_weights": 42.87,
+    "gpu_reverse_adjoint": 23.04,
+    "gpu_reverse_chain": 0.36,
+    "gpu_reverse_coefficients": 5.54,
+    "gpu_reverse_conv": 13.86,
+    "gpu_reverse_exchange": 0.06,
+    "gpu_setup_topology": 74.8,
+    "reverse": 61.52
+  },
+  "variables": "map",
+  "weights": "ergodic"
+}

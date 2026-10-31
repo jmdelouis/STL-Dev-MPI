@@ -1,0 +1,33 @@
+build 08:28:18 3177d9c docs/gpu.md: kept or recomputed wavelet fields, memory per mode
+built 08:28:53
+== n1024_B1_keep 08:28:55
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:02.02
+	Maximum resident set size (kbytes): 5871768
+  fields keep s/eval 22.559 setup 139.76 peak GB [12.03] smi max MiB 11884 field est GB 2.36 rows GB 2.98 cache transposition [5.19] budget GB 5.21 block rows 194187 blocks [65, 17, 5] loss [0.007773551611009382, 0.007773550858209194, 0.007773544083018809, 0.00777351017349106]
+  {"forward": 58.78, "gpu_forward_coefficients": 2.08, "gpu_forward_conv": 7.86, "gpu_forward_decimation": 1.06, "gpu_geometry": 12.95, "gpu_geometry_weights": 63.12, "gpu_reverse_adjoint": 9.56, "gpu_reverse_chain": 0.05, "gpu_reverse_coefficients": 4.29, "gpu_reverse_conv": 2.91, "gpu_reverse_exchange": 0.06, "gpu_setup_topology": 28.63, "reverse": 45.72}
+== n1024_B1_recompute 08:32:58
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:55.53
+	Maximum resident set size (kbytes): 5868612
+  fields recompute s/eval 23.135 setup 130.88 peak GB [11.35] smi max MiB 11372 field est GB 0.75 rows GB 2.98 cache transposition [5.95] budget GB 6.08 block rows 227598 blocks [56, 14, 4] loss [0.007773551611009395, 0.007773550858209209, 0.0077735440830188195, 0.007773510173491071]
+  {"forward": 58.81, "gpu_forward_coefficients": 2.09, "gpu_forward_conv": 7.86, "gpu_forward_decimation": 1.28, "gpu_geometry": 12.83, "gpu_geometry_weights": 62.86, "gpu_reverse_adjoint": 9.81, "gpu_reverse_chain": 0.06, "gpu_reverse_coefficients": 4.32, "gpu_reverse_conv": 4.87, "gpu_reverse_exchange": 0.2, "gpu_setup_topology": 22.11, "reverse": 47.94}
+== n1024_B2_keep 08:36:53
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:29.05
+	Maximum resident set size (kbytes): 6511828
+  fields keep s/eval 30.562 setup 130.89 peak GB [12.7] smi max MiB 12332 field est GB 4.73 rows GB 2.98 cache transposition [3.9] budget GB 3.9 block rows 104388 blocks [121, 31, 8] loss [0.0077912385899519, 0.007791238207227352, 0.0077912347627092865, 0.007791200317812451]
+  {"forward": 67.03, "gpu_forward_coefficients": 3.76, "gpu_forward_conv": 11.31, "gpu_forward_decimation": 1.94, "gpu_geometry": 13.24, "gpu_geometry_weights": 67.56, "gpu_reverse_adjoint": 16.7, "gpu_reverse_chain": 0.12, "gpu_reverse_coefficients": 8.61, "gpu_reverse_conv": 5.63, "gpu_reverse_exchange": 0.12, "gpu_setup_topology": 20.99, "reverse": 62.62}
+== n1024_B2_recompute 08:41:23
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:29.47
+	Maximum resident set size (kbytes): 6504016
+  fields recompute s/eval 30.421 setup 132.5 peak GB [11.72] smi max MiB 11404 field est GB 1.5 rows GB 2.98 cache transposition [5.64] budget GB 5.64 block rows 153964 blocks [82, 21, 6] loss [0.007791238589951899, 0.007791238207227343, 0.007791234762709278, 0.007791200317812451]
+  {"forward": 65.28, "gpu_forward_coefficients": 3.73, "gpu_forward_conv": 11.26, "gpu_forward_decimation": 1.9, "gpu_geometry": 13.08, "gpu_geometry_weights": 64.77, "gpu_reverse_adjoint": 16.44, "gpu_reverse_chain": 0.12, "gpu_reverse_coefficients": 8.7, "gpu_reverse_conv": 7.65, "gpu_reverse_exchange": 0.08, "gpu_setup_topology": 21.83, "reverse": 63.1}
+== n1024_B4_keep 08:45:52
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 5:55.32
+	Maximum resident set size (kbytes): 8584100
+  fields keep s/eval 48.907 setup 134.77 peak GB [14.54] smi max MiB 13836 field est GB 9.45 rows GB 2.98 cache transposition [1.27] budget GB 1.28 block rows 19086 blocks [660, 165, 42] loss [0.007771330228728335, 0.007771330039867559, 0.007771328340121353, 0.0077713198329104945]
+  {"forward": 90.85, "gpu_forward_coefficients": 7.04, "gpu_forward_conv": 20.16, "gpu_forward_decimation": 3.33, "gpu_geometry": 14.09, "gpu_geometry_weights": 83.03, "gpu_reverse_adjoint": 28.78, "gpu_reverse_chain": 0.23, "gpu_reverse_coefficients": 18.59, "gpu_reverse_conv": 12.3, "gpu_reverse_exchange": 0.02, "gpu_setup_topology": 22.51, "reverse": 98.26}
+== n1024_B4_recompute 08:51:48
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 5:43.94
+	Maximum resident set size (kbytes): 8484456
+  fields recompute s/eval 46.177 setup 135.94 peak GB [11.93] smi max MiB 11500 field est GB 3.01 rows GB 2.98 cache transposition [4.77] budget GB 4.79 block rows 84451 blocks [149, 38, 10] loss [0.007771330228728326, 0.007771330039867542, 0.0077713283401213635, 0.0077713198329104885]
+  {"forward": 81.85, "gpu_forward_coefficients": 7.17, "gpu_forward_conv": 18.91, "gpu_forward_decimation": 3.51, "gpu_geometry": 13.48, "gpu_geometry_weights": 71.28, "gpu_reverse_adjoint": 30.72, "gpu_reverse_chain": 0.23, "gpu_reverse_coefficients": 17.54, "gpu_reverse_conv": 13.49, "gpu_reverse_exchange": 0.1, "gpu_setup_topology": 23.93, "reverse": 95.35}
+ALLDONE 08:57:32

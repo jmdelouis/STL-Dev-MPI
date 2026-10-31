@@ -302,20 +302,41 @@ impl<'a> LocalEngine<'a> {
                 m.insert((d, n), vec![0.0; rows * part.layouts[n].len()]);
             }
         }
-        let overlap = part.overlap;
         let mut engine = LocalEngine { geo, cfg, part, ex, batch, channels, maps: vec![x], m, gm: BTreeMap::new() };
-        for d in 0..levels - 1 {
-            let mut next = engine.decimate(d);
-            match overlap {
-                None => ex.halo(d + 1, &mut next, bc),
+        engine.decimate_levels();
+        engine
+    }
+
+    /// Loads another map `x` `[B, C, |layout 0|]` into this engine, which
+    /// keeps its geometry and partition: the coarser maps are rebuilt and
+    /// the stored moduli zeroed (the forward sweep accumulates into them),
+    /// as for a new engine on `x`.
+    pub fn reload(&mut self, x: &[f64]) {
+        assert_eq!(x.len(), self.batch * self.channels * self.part.layouts[0].len());
+        self.maps.truncate(1);
+        self.maps[0].copy_from_slice(x);
+        self.ex.halo(0, &mut self.maps[0], self.batch * self.channels);
+        self.decimate_levels();
+        for v in self.m.values_mut() {
+            v.fill(0.0);
+        }
+        self.gm.clear();
+    }
+
+    /// `maps[1..]`: the decimations of `maps[0]` (halo exchanged).
+    fn decimate_levels(&mut self) {
+        let bc = self.batch * self.channels;
+        for d in 0..self.cfg.levels() - 1 {
+            let mut next = self.decimate(d);
+            match self.part.overlap {
+                None => self.ex.halo(d + 1, &mut next, bc),
                 // Each process decimated its owned cells of the first coarse
                 // level (zero elsewhere): the sum is the whole level.
-                Some(o) if d + 1 == o.coarse => ex.allreduce(&mut next),
+                Some(o) if d + 1 == o.coarse => self.ex.allreduce(&mut next),
                 Some(_) => {}
             }
-            engine.maps.push(next);
+            self.maps.push(next);
         }
-        engine
     }
 
     pub fn levels(&self) -> usize {

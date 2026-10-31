@@ -46,10 +46,16 @@ run time: the crate builds without a CUDA toolkit.
 ### 2.2 Fields and blocks
 
 Every level's fields live on the device over the rank's layout (owned
-cells + halo, the `Partition` of `stl-mpi`): maps, wavelet fields `z_n` and
-moduli `|z_n|` (kept from the forward sweep for the reverse one), stored
-moduli `m[d][n]`, and in the reverse sweep their cotangents `gm[d][n]` and
-the map cotangents. A level is processed by **device blocks**: contiguous
+cells + halo, the `Partition` of `stl-mpi`): maps, stored moduli
+`m[d][n]`, and in the reverse sweep their cotangents `gm[d][n]` and the map
+cotangents. The wavelet fields `z_n` and moduli `|z_n|` are either kept
+over the layout from the forward sweep for the reverse one
+(`--gpu-fields keep`), or recomputed by every block of the reverse sweep
+from the level's map, as the CPU engine does (`--gpu-fields recompute`:
+the forward sweep then holds `|z_n|` of the level it is on only, for its
+decimations to the coarser levels); `auto`, the default, keeps them when
+that takes at most half of the free device memory (§2.7). Both give the
+same values to the bit. A level is processed by **device blocks**: contiguous
 ranges of owned cells (up to 2^20, sized from the free memory), each with
 its convolution rows `a1` = block + one convolution halo, as on the CPU but
 hundreds of times larger. The layouts do not depend on the block size
@@ -58,11 +64,16 @@ halo as the CPU blocks.
 
 Per block, forward: `z` on `a1` (one convolution reading the level's map),
 `|z|`, the second wavelets on the block for the levels its coefficients
-need, the coefficient partial sums. Reverse: the coefficient cotangents
-(accumulated per target in plan order), the adjoints of the second
-wavelets into the modulus cotangents on `a1`, the modulus VJP, the
-stored-moduli cotangents, the chain from the coarser levels, the wavelet
-adjoint into the map cotangent.
+need, the coefficient partial sums. Reverse: with `recompute`, `z` and
+`|z|` on `a1` again (the second wavelet of `|z_n|` reads the block's own
+copy through the map from grid cells to `a1` rows that its adjoint already
+uses); the coefficient cotangents (accumulated per target in plan order),
+the adjoints of the second wavelets into the modulus cotangents on `a1`,
+the modulus VJP, the stored-moduli cotangents, the chain from the coarser
+levels (the last transposed decimation applied to the block's own rows),
+the wavelet adjoint into the map cotangent. A row of `z` or `|z|` is the
+same whichever block computes it (its geometry and summation order do not
+depend on the block), hence the identity of `keep` and `recompute`.
 
 ### 2.3 Convolution geometry on the device
 
@@ -146,6 +157,55 @@ functions of the geometry; the decimation chain (whole rows instead of
 pieces) and its Horner reverse; the convolution adjoint (lane-strided);
 the coefficient partial sums (chunked tree); block boundaries.
 
+### 2.6b The objective's terms on the device (`--gpu-terms device`)
+
+`stl-synth --gpu` evaluates the whole objective on the device
+(`stl-cli/src/device_terms.rs`, kernels in `stl_gpu::terms`), not only
+the statistics' sweeps:
+
+- the synthesis sweep reads the members' maps from the device and leaves
+  its gradient there (`GpuEvaluator::forward_device`, `gradient_device`,
+  `take_map`);
+- the level power and the kurtosis per level build the 4-children pyramid
+  of the maps (or of kappa) on the device, its moments by chunks, and add
+  their gradients there;
+- the pixel marginal sorts every member on the device (a stable LSD radix
+  sort on the `f64::total_cmp` order of the values, the pixel index as
+  payload: the order of the host's sort by value then pixel) and adds
+  `coef (x - t)` at the sorted positions;
+- the kappa transform (PCHIP of the table) and its derivative are
+  computed there, and the kappa sweep and kurtosis read kappa from the
+  device.
+
+The host keeps the losses on the statistics, the reductions of the
+terms' sums over pixels (small vectors, with the communicators) and
+L-BFGS. Every element-wise expression is the host's, in its order, so
+the pyramid, the gradients of the level power and kurtosis, the marginal
+and the kappa transform are identical to the bit; the sums over pixels
+go by chunks of 65 536 cells reduced in a fixed tree and added in chunk
+order (the loss and gradient agree with the host path to 2e-16 relative,
+§3). During a sweep nothing but the engine's fields is on the device: the
+synthesis gradient waits on the host during the kappa sweep, the maps go
+up again for kappa's derivative afterwards, and the sort's buffers live
+between the sweeps; the engine's memory budget, hence its cache, is the
+host path's. Transfers go through a page-locked buffer (maps up twice,
+gradient down twice and up once per evaluation with the kappa
+statistics). With several ranks per group every rank works on its owned
+slice (copied to and from the engine's layout on the device), the
+pyramid's moments are summed over the ranks, and the marginal sorts each
+member's slice on the device and merges the ranks' orders on the host
+(the distributed sample sort without its local sort). `--gpu-terms host`,
+`--minkowski-weight` or `--freeze-nside` keep the host path.
+`STL_GPU_PHASE_SYNC=0` drops the engine's synchronisation at the end of
+every phase (the phase timers then count launches only): measured gains
+are below 1.5 % (§5.3), so it stays on.
+
+L-BFGS (`stl_core::lbfgs`) runs its vector operations (dot products,
+axpy, the line points, copies) on the host threads by chunks of 65 536
+elements; a dot product adds its chunks' sums in chunk order, independent
+of the number of threads (`STL_THREADS`, else the available CPUs), and a
+slice of one chunk is summed sequentially as before.
+
 ### 2.7 Memory per rank
 
 **One engine per rank.** A `GpuEngine` evaluates any plan and batch on
@@ -164,23 +224,37 @@ reuse the cached geometry.
 Level fields (`B` members, `C` channels, `L` orientations, `H_n` held
 cells of level `n`), doubles per held cell of level `n`:
 
-| Field | Doubles | Plans |
-|---|---|---|
-| maps and map cotangents | `2 B C` | all |
-| `z_n` (complex) | `2 B C L` | all |
-| `\|z_n\|`, and the chain of the reverse sweep (transient) | `2 B C L` | with S3 or S4 |
-| stored moduli `m[d][n]` and cotangents `gm[d][n]` | `2 n B C L` | with S3 or S4 |
+| Field | Doubles | Plans | Held |
+|---|---|---|---|
+| maps and map cotangents | `2 B C` | all | maps always, cotangents in the reverse sweep |
+| stored moduli `m[d][n]` and cotangents `gm[d][n]` | `2 n B C L` | with S3 or S4 | `m` always, `gm` in the reverse sweep |
+| `z_n` (complex) | `2 B C L` | all | `keep` only |
+| `\|z_n\|` | `B C L` | with S3 or S4 | `keep`; `recompute`: level `n` while the forward sweep is on it |
+| chain of the reverse sweep | `B C L` on levels 1 and 2 | with S3 or S4 | transient |
 
 A plan without S3 or S4 (the default kappa families `mean,var,S1,S2`)
 reads neither `|z_n|` nor the stored moduli: its sweeps neither compute
 them (no modulus decimation chain, no reverse chain) nor allocate them.
 Over the pyramid (`H_n ~ 4^-n H_0`, `sum H_n = 4/3 H_0`, `sum n H_n =
-4/9 H_0`) the full plan needs `8 B C H_0 (8/3 + 56 L / 9)` bytes: 220
-bytes per pixel and member at `L = 4`, 2.8 GB per member at nside 1024,
-11.1 GB at nside 2048 (one rank). The decimation rows and block topology
+4/9 H_0`) the full plan needs at its peak (the reverse sweep)
+
+- `keep`: `8 B C H_0 (8/3 + L (4 + 8/9 + 5/16))` bytes, 188 bytes per
+  pixel and member at `L = 4`: 2.4 GB per member at nside 1024, 9.5 GB at
+  nside 2048 (one rank);
+- `recompute`: `8 B C H_0 (8/3 + L (8/9 + 5/16))` bytes, 60 bytes per pixel
+  and member at `L = 4` (the forward sweep peaks a little lower, `8 B C H_0
+  (4/3 + 13 L / 9)`, with `|z_0|`): 0.75 GB per member at nside 1024, 3.0
+  GB at nside 2048, a third of `keep`.
+
+Until the reverse chain was applied per block it was held on all the owned
+cells of a level, `B C L H_0` more doubles at level 0, which made `keep`
+220 bytes per pixel and member. The decimation rows and block topology
 add about 200 bytes per held cell (independent of `B`), the transients of
 one block (its geometry while built, second wavelets and their
-cotangents) are sized by the block, which is sized from the free memory.
+cotangents, with `recompute` its `z` and `|z|`) are sized by the block,
+which is sized from the free memory. The report gives the field estimate
+(`gpu.field_bytes_estimate`) and the decimation rows on the device
+(`gpu.decimation_rows_bytes`).
 The geometry cache then takes 4/5 of what is free after all that
 (`STL_GPU_CACHE_MB` overrides it): the device peak in the report
 (`gpu.memory_peak_bytes_per_rank`, whole device, CUDA context included)
@@ -211,6 +285,10 @@ All tests run on both devices above with identical results.
 | `dia`: device DIA vs `conv_fwd` / `conv_adj` and the CPU (9 blocks, poles, 3-face vertices) | forward 0.000 x noise, adjoint <= 7e-16 relative (`docs/dia_convolution.md`) |
 | the whole `stl-gpu` suite with the default (DIA) and with `STL_GPU_CONV=stencils` | all pass |
 | `stats`: one engine shared by the full plan and a mean / var / S1 / S2 plan at batches 1 and 2 (target statistics, then alternated evaluations, as `stl-synth --kappa-table`) vs one engine each; the plan without S3 / S4 vs the full plan restricted to it (laptop) | identical to the bit (values, variances, gradients) |
+| `stats`: wavelet fields recomputed per block vs kept (`--gpu-fields`), the 8 fixtures, both geometry forms, 1 to 333 device blocks per level, the full plan and a mean / var / S1 / S2 plan, three evaluations (laptop) | identical to the bit (values, variances, stored moduli, map cotangents of every level) |
+| the whole `stl-gpu` suite with `STL_GPU_FIELDS=keep` and `=recompute` (laptop) | all pass |
+| `terms`: the device radix sort vs a host sort by value then index (sizes 1 to 2^20 around the tile and scan boundaries, ties, signed zeros, extremes); pyramid, level-power and kurtosis gradients (with and without the kappa chain), marginal, `g += a b` vs the host expressions; staged transfers (laptop) | sort: the same permutation; gradients and marginal identical to the bit; moments and marginal loss <= 1e-13 relative |
+| `stl-cli` `device_objective_matches_host_terms`: the device objective vs the host terms on the same sweeps, nside 64, 2 members, every term (ensemble with scatter, level power, marginal, kappa statistics, kurtosis of kappa), two maps, 1 and 3 thread ranks sharing the device (laptop) | kappa transform identical to the bit; loss identical at 16 digits, gradient <= 1.2e-16 of its maximum |
 | `multirank`: synthetic nside 128, 1 / 2 / 3 ranks | statistics <= 1.6e-15, gradients <= 3e-16 |
 | `synthesis`: objective (loss and gradient, three consecutive maps, state reused) vs CPU, 1 / 2 / 3 ranks, nside 64, 128, 256 | loss <= 1.1e-13, gradient <= 2.1e-12 relative |
 | `synthesis`: WebSky kappa nside 64, 20 L-BFGS iterations (25 evaluations), `STL_RANKS` 1, 2, 3 | 25 / 25 loss values identical to STL-Dev at the printed precision, max relative difference 1.5e-12 to 1.8e-11 |
@@ -233,7 +311,10 @@ directory; `bench.sh` runs the benchmarks below.
 
 Options: `--gpu-block-rows N` (owned cells per device block),
 `--gpu-conv dia|stencils` (form of the convolution geometry, default
-`STL_GPU_CONV` else `dia`),
+`STL_GPU_CONV` else `dia`), `--gpu-fields auto|keep|recompute` (wavelet
+fields kept between the sweeps or recomputed per block, default
+`STL_GPU_FIELDS` else `auto`, §2.7), `--gpu-terms device|host` (the
+objective's terms on the device, the default, or on the host, §2.6b),
 `--gpu-cache auto|full|transposition|none`, `STL_GPU_CACHE_MB` (cache
 budget), `STL_GPU_THREADS` (host threads of the setup per rank),
 `STL_GPU_DEVICE`, `STL_GPU_SYNC=1` (synchronise after every kernel, to
@@ -377,6 +458,206 @@ configurations (fixed device blocks; with blocks sized from the device
 memory the block boundaries, hence the last bits, depend on the memory
 free at start-up in both builds).
 
+hpc, Takahashi kappa ensemble (gaussianised target, `L = 4`, one rank,
+`--weights ergodic --scatter-weight 1 --kappa-table knots.npy
+--kappa-weight 0.1`, level-power and marginal weights 10 and 10000 at
+nside 1024, 5 and 5000 at nside 2048, start from the syntheses of the
+previous nside, 2 L-BFGS iterations = 3 evaluations), device blocks and
+cache sized from the free memory. Peak: whole device, CUDA context
+included (GB = 1e9 bytes); cache: policy chosen by `auto`, then its final
+size (`geometry_cache_used_bytes_per_rank`) or, for c15e8ec, the budget of
+each engine. Host threads of the setup: 16 on the H200, 6 on the A100
+(`STL_GPU_THREADS`, the CPUs free on the A100 node). The H200 runs (26
+October) started from earlier syntheses than the A100 ones, so their
+losses differ.
+
+| Device | nside x members | Build | `STL_GPU_CACHE_MB` | s / evaluation | setup s | peak GB | cache |
+|---|---|---|---|---|---|---|---|
+| H200 (141 GB) | 1024 x 10 | c15e8ec | unset | out of device memory | | | |
+| H200 | 1024 x 10 | c15e8ec | 16000 | 44.5 | 108 | 98.0 | budget 16.8 GB per engine |
+| H200 | 2048 x 5 | c15e8ec | 6000 | 156.7 | 521 | 139.2 | budget 6.3 GB per engine |
+| A100 (80 GB) | 1024 x 10 | c15e8ec | unset | out of device memory | | | |
+| A100 | 1024 x 10 | c15e8ec | 6000 | 86.6 | 156 | 70.2 | transposition, budget 6.3 GB per engine |
+| A100 | 1024 x 10 | shared engine | unset | 64.4 | 86 | 62.8 | transposition, 28.4 GB |
+| A100 | 2048 x 5 | shared engine | unset | 394.7 | 446 | 77.7 | transposition, 8.6 GB |
+
+On the same A100 at nside 1024 the shared engine runs without a cap,
+takes 26 % less time per evaluation and 45 % less setup (one topology
+instead of one per engine), with a peak 7.4 GB lower although its one
+cache (28.4 GB) is larger than the 6.3 GB budgets of all of c15e8ec's
+engines together; its losses are c15e8ec's to 3e-16 (different block
+boundaries). The device is busy 18 % of the time on average (`nvidia-smi`
+every 20 s; 28 % for c15e8ec): its phase timers add up to 55 s of the
+193 s of the three evaluations, the rest is host work with the 6 threads
+of this node. Its 62.8 GB are the fields of the 10 members (27.7 GB,
+§2.7), the decimation rows and topology (~3.4 GB), one block's transients
+(252 260 rows, ~2.4 GB) and the cache, which takes the rest. At nside
+2048 the 5 members fit on the A100 (c15e8ec needed 139 GB on the H200):
+their fields (55.5 GB) and the decimation rows (~13 GB) leave 8.6 GB to
+the cache, a small part of the geometry's transposition (~108 GB), so
+the geometry is rebuilt for every block at every sweep (527 blocks at
+level 0): 924 s of the device phase timers, against 73 s for the
+convolutions, adjoints, decimations and coefficients together (the
+device is busy 33 % of the time on average). Ten members at nside 2048
+do not fit on one 80 GB device: their fields alone are 111 GB. `z_n` and
+`|z_n|` with the reverse chain are 77 % of the fields (2 x 10.7 of the
+27.6 doubles per pixel and member at `L = 4`), the maps 10 %, the stored
+moduli 13 %. Recomputing `z_n` and `|z_n|` per block brings them within
+the A100 (§5.2).
+
+### 5.2 Kept or recomputed wavelet fields (`--gpu-fields`)
+
+`stl-synth --gpu` with the DIA geometry, `--gpu-fields keep` against
+`recompute` (§2.2, §2.7), one device, blocks and cache sized from the
+device memory, commit 3177d9c. "fields" is the engine's estimate of the
+level fields at their peak (`gpu.field_bytes_estimate`), "rows" the
+decimation rows on the device, "cache" the geometry cache at the end;
+the peak is the engine's (whole device, CUDA context included). Reports
+in `benchmarks/fields/`.
+
+garoupe, one T4 (15 GB), nside 1024, `L = 4`, lognormal target, 3
+L-BFGS iterations (4 evaluations) from white noise, `--ensemble B`:
+
+| B | fields | s / evaluation | peak GB | fields GB | rows GB | cache GB | block rows (blocks at level 0) |
+|---|---|---|---|---|---|---|---|
+| 1 | keep | 22.56 | 12.03 | 2.36 | 2.98 | 5.19 | 194 187 (65) |
+| 1 | recompute | 23.14 | 11.35 | 0.75 | 2.98 | 5.95 | 227 598 (56) |
+| 2 | keep | 30.56 | 12.70 | 4.73 | 2.98 | 3.90 | 104 388 (121) |
+| 2 | recompute | 30.42 | 11.72 | 1.50 | 2.98 | 5.64 | 153 964 (82) |
+| 4 | keep | 48.91 | 14.54 | 9.45 | 2.98 | 1.27 | 19 086 (660) |
+| 4 | recompute | 46.18 | 11.93 | 3.01 | 2.98 | 4.77 | 84 451 (149) |
+
+hpc, one A100-SXM4-80GB, the Takahashi kappa ensemble of §5.1 at nside
+2048 (`--level-power-weight 5 --marginal-weight 5000 --kappa-table
+--kappa-weight 0.1`, members started from the nside-1024 syntheses), 2
+iterations (3 evaluations), 6 host threads (job 2404157):
+
+| B | fields | s / evaluation | setup s | peak GB | fields GB | rows GB | cache GB | block rows (blocks at level 0) | device busy |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 | keep | 163.2 | 324 | 75.1 | 47.3 | 11.9 | 13.1 | 173 901 (290) | 14 % |
+| 5 | recompute | 162.6 | 322 | 63.8 | 15.0 | 11.9 | 30.9 | 431 433 (117) | 14 % |
+| 10 | keep | does not fit (fields 94.5 GB) | | | | | | | |
+| 10 | recompute | 332.8 | 341 | 67.5 | 30.1 | 11.9 | 22.3 | 175 644 (287) | 11 % |
+
+The recomputation costs one wavelet convolution of the maps per block of
+the reverse sweep: 0.3 to 0.6 s per evaluation on the T4 at nside 1024,
+0.6 s on the A100 at nside 2048 (`gpu_reverse_conv` 11.9 -> 13.9 s over
+the 2048 x 5 run). The memory it frees goes to larger blocks and a larger
+geometry cache, which recompute fewer DIA coefficients: with one member
+`recompute` is 2.6 % slower, with two members as fast, with four 5.6 %
+faster (the kept fields leave 1.3 GB of cache and blocks of 19 086 rows
+on the T4). At nside 2048 x 5 both take the same time (163 s per
+evaluation, against 395 s with the bound stencils in §5.1); the fields
+go from 47.3 to 15.0 GB, a third, and the peak from 75.1 to 63.8 GB. The
+losses of the two modes agree to 2.7e-15 relative on both devices
+(different block boundaries; with the same blocks they are identical,
+§3), and at nside 2048 x 5 to 2.3e-15 with the bound-stencil run of
+§5.1.
+
+Ten members at nside 2048 now fit on one A100: 67.5 GB at the peak,
+of which the level fields 30.1 GB (45 %), the DIA geometry cache 22.3 GB
+(33 %: masks of every block and the coefficients of some), the
+decimation rows 11.9 GB (18 %) and the rest (one block's transients,
+topology, CUDA context) 3.2 GB. An evaluation takes 333 s, twice the 5
+members', but the device is busy 11 % of the time: the engine's phases
+(target statistics, synthesis and kappa sweeps) add up to 70 s per
+evaluation, the rest is host work of the objective (ensemble, level-power,
+marginal and kappa terms, L-BFGS) on 10 maps of 50 M pixels with 6
+threads. §5.3 moves that work to the device.
+
+### 5.3 The objective's terms on the device (`--gpu-terms`)
+
+The terms of the production recipe at nside 1024 on garoupe, one T4:
+target the nside-2048 gaussianised Takahashi map averaged over groups of
+4 children, 10 members from the nside-256 ensemble (`--init-noise` auto),
+`--L 4 --weights ergodic --scatter-weight 1 --level-power-weight 10
+--marginal-weight 10000 --kappa-table knots1024.npy --kappa-weight 0.1
+--kurtosis-weight 1.0 --kurtosis-nside 32-1024`, 3 iterations (4
+evaluations), wavelet fields recomputed (`auto`), 12 host threads. The
+timers (`timers_seconds`, per evaluation) are wall times of the
+evaluation's parts: the objectives with their sweeps, the terms with
+their gradient sums, L-BFGS the rest of the run. Reports in
+`benchmarks/terms/t4/`.
+
+| | host terms (f65ce8e) | device terms, room reserved (96c6bf1) | device terms (cceca63) |
+|---|---|---|---|
+| s / evaluation | 205.1 | 129.6 | 107.5 |
+| device busy (whole run, setup included) | 42 % | 67 % | 65 % |
+| synthesis objective (sweeps + copies) | 93.7 | 85.6 | 76.2 |
+| kappa objective | 46.7 | 35.3 | 26.9 |
+| marginal | 35.1 | 1.2 | 1.2 |
+| kurtosis | 8.8 | 0.07 | 0.23 |
+| kappa transform | 8.5 | 0.01 | 0.08 |
+| level power | 7.2 | 0.02 | 0.02 |
+| copies to and from the engine's layout, transfers | 19.0 | 1.8 | 1.7 |
+| L-BFGS | 4.8 | 5.6 | 1.2 |
+
+The losses of the three runs agree to 1e-15 relative at every evaluation.
+The host work (terms, copies, L-BFGS) took 83 s of the 205 s, the
+marginal's sorts 35 s of them; on the device the terms take 1.5 s.
+Keeping room for the terms' buffers on the device (96c6bf1) took it from
+the geometry cache and cost the sweeps about 20 s per evaluation (DIA
+coefficients recomputed more often on the T4); with nothing but the
+engine's fields during the sweeps (cceca63) they get the host path's
+cache again. L-BFGS on 12 threads takes a quarter of its single-thread
+time. What is left, 100 s of the 107 s, is the engine's sweeps.
+
+Device occupancy during the evaluations alone (feb832c, `nvidia-smi`
+every 2 s, setup excluded; `benchmarks/terms/t4/*_feb832c.json`): the T4
+is busy 95.4 % of the time at 1024 x 10 with the device terms (107.6 s
+per evaluation). Without the per-phase synchronisation
+(`STL_GPU_PHASE_SYNC=0`) 106.1 s and 95.7 %: the device is saturated.
+
+nside 2048 x 5 over the three T4 of garoupe (3 thread ranks, one T4
+each, 4 host threads per rank, 13.3-13.7 GB per T4, the same terms with
+`--kurtosis-nside 32-2048` and `knots2048.npy`), 4 evaluations:
+
+| | host terms | device terms | device terms, no phase sync |
+|---|---|---|---|
+| s / evaluation | 184.7 | 134.6 | 134.3 |
+| device busy during the evaluations | 49.5 % | 68.7 % | 68.9 % |
+| marginal | 30.1 | 16.9 | 17.6 |
+| kurtosis, kappa transform, level power | 20.2 | 0.6 | 0.6 |
+| copies to and from the engine's layout, transfers | 8.9 | 1.7 | 1.7 |
+| L-BFGS | 2.7 | 2.0 | 2.0 |
+
+The losses of the three runs are identical at every evaluation to 2e-16.
+With several ranks the device waits for what still crosses the host: the
+merge of the ranks' orders in the marginal (17 s; the local sorts are on
+the devices) and the engine's halo exchanges, which copy whole level
+fields through the host (decimations 11.6 s, reverse exchanges 8.2 s,
+load 4.6 s per evaluation). A single-rank run, as the production runs on
+one A100, has neither.
+
+hpc, one A100-SXM4-80GB, nside 2048 x 10 with the options of the
+production step (`--level-power-weight 10 --marginal-weight 10000
+--kappa-table --kappa-weight 0.1 --kurtosis-weight 1.0 --kurtosis-nside
+32-2048 --scatter-weight 1`), members started from the nside-1024
+syntheses (as job 2404157), 2 iterations (3 evaluations), 6 host threads,
+wavelet fields recomputed (`auto`), job 2423067 (4d10f1f):
+
+| | host terms | device terms |
+|---|---|---|
+| s / evaluation | 333.7 | 61.7 |
+| device busy during the evaluations | 16.2 % | 90.6 % |
+| peak GB (cache) | 67.5 (22.3) | 67.9 (22.3) |
+| synthesis objective | 130.6 | 44.6 |
+| kappa objective | 94.8 | 11.8 |
+| copies to the engine's layout | 84.2 | (none) |
+| marginal | 62.1 | 0.5 |
+| kappa transform | 23.3 | 0.2 |
+| kurtosis | 11.3 | 0.07 |
+| level power | 9.3 | (< 0.05) |
+| gradient download and copy, transfers | 2.0 | 2.1 |
+| L-BFGS | 1.9 | 2.3 |
+
+The evaluation is 5.4 times faster and the device busy 91 % of the time
+instead of 16 %; the losses agree to 1e-15 relative and the peak memory
+is the same (the engine's budget, hence its cache, is unchanged). The
+host terms' work, about 270 s per evaluation, becomes 3 s; the engine's
+sweeps (synthesis and kappa) take the rest of the 62 s. Setup (topology, target statistics,
+initial maps) takes 330 s in both, once per run.
+
 ## 6. Limitations and next steps
 
 - **FP64 throughput.** On the T4 the stencil kernel (interpolation of
@@ -387,12 +668,28 @@ free at start-up in both builds).
   the same cell and drops the transposition (3 x less memory whole, 100 x
   less between sweeps); measured 2.5-2.7 x faster per evaluation on the
   T4 and 1.6-2.6 x on the A100 (§5.0), it is the default.
-- **Memory.** The decimation rows cost ~200 bytes per held cell (13 GB
-  for nside 2048 on one rank): nside 2048 needs two T4s. They could be
-  computed on the device per sweep instead of stored.
+- **Memory.** With `z_n` and `|z_n|` recomputed per block (§5.2) the
+  level fields are 60 bytes per pixel and member at `L = 4`, and the
+  decimation rows (~200 bytes per held cell, 11.9 GB for nside 2048 on
+  one rank, independent of the members) are the next item: they could be
+  computed on the device per sweep instead of stored. In the forward
+  sweep `|z_0|` is still held over the level for its decimations (`B C L
+  H_0` doubles); pushing each block's moduli down the decimation chain as
+  the CPU pieces do would remove it, and freeing `m[d][n]` once the
+  reverse sweep has passed level `n` would lower the reverse peak too.
+- **Host work.** At nside 2048 the A100 was busy 11 to 16 % of the time
+  with the objective's terms on the host (§5.2, §5.3); they now run on the
+  device and it is busy 91 % of the time (§5.3). L-BFGS stays on the host (its history, 2 x 10 x 4 GB at
+  nside 2048 x 10, does not fit next to the fields): its two-loop
+  recursion reads the history twice per iteration on the host threads.
+  The engine's own host work (contribution lists of the coefficient
+  cotangents per block, partial sums brought back per block) and its
+  synchronisation at the end of every phase are the next.
 - **Exchanges** copy whole level fields between device and host (MPI is
   not CUDA-aware on garoupe): packing only the halo cells on the device
-  would cut the transfers by the halo fraction.
+  would cut the transfers by the halo fraction. At nside 2048 x 5 over
+  three T4 they cost 24 s of the 135 s of an evaluation (§5.3), with the
+  marginal's merge of the ranks' orders on the host (17 s).
 - **Setup** on the host: `build_partition` (CPU code of stl-mpi) and the
   decimation rows dominate on garoupe's 12 slow cores (1 to 5 minutes at
   nside 1024 to 2048); both could move to the device.

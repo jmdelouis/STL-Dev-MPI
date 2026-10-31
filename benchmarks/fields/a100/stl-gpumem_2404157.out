@@ -1,0 +1,15 @@
+job 2404157: compute-114-15, GPU 0, nside 2048, 3177d9c fields kept or recomputed per block
+0, NVIDIA A100-SXM4-80GB, 81920 MiB, 0 MiB
+== n2048_B10_recompute 08:29:50
+  fields recompute s/eval 332.757 setup 340.97 peak GB [67.46] smi max MiB 64331 busy % 11 field est GB 30.09 rows GB 11.93 cache transposition [22.27] budget GB 22.27 block rows 175644 blocks [287, 72, 18]
+  loss [280774.1256024231, 280774.0449272282, 280773.6814874106]
+  {"forward": 93.99, "gpu_forward_coefficients": 7.16, "gpu_forward_conv": 34.01, "gpu_forward_decimation": 2.07, "gpu_geometry": 19.63, "gpu_geometry_weights": 49.43, "gpu_reverse_adjoint": 48.53, "gpu_reverse_chain": 0.47, "gpu_reverse_coefficients": 12.04, "gpu_reverse_conv": 33.89, "gpu_reverse_exchange": 0.04, "gpu_setup_topology": 75.05, "reverse": 116.2}
+== n2048_B5_recompute 08:57:15
+  fields recompute s/eval 162.58 setup 322.08 peak GB [63.8] smi max MiB 59211 busy % 14 field est GB 15.04 rows GB 11.93 cache transposition [30.92] budget GB 30.92 block rows 431433 blocks [117, 30, 8]
+  loss [142583.3093968309, 142583.1958032524, 142582.68408975538]
+  {"forward": 69.5, "gpu_forward_coefficients": 3.59, "gpu_forward_conv": 19.73, "gpu_forward_decimation": 1.2, "gpu_geometry": 18.41, "gpu_geometry_weights": 42.87, "gpu_reverse_adjoint": 23.04, "gpu_reverse_chain": 0.36, "gpu_reverse_coefficients": 5.54, "gpu_reverse_conv": 13.86, "gpu_reverse_exchange": 0.06, "gpu_setup_topology": 74.8, "reverse": 61.52}
+== n2048_B5_keep 09:13:18
+  fields keep s/eval 163.219 setup 324.48 peak GB [75.11] smi max MiB 71755 busy % 14 field est GB 47.26 rows GB 11.93 cache transposition [13.13] budget GB 13.15 block rows 173901 blocks [290, 73, 19]
+  loss [142583.30939683114, 142583.19580325278, 142582.68408975535]
+  {"forward": 68.52, "gpu_forward_coefficients": 3.51, "gpu_forward_conv": 15.65, "gpu_forward_decimation": 1.08, "gpu_geometry": 19.76, "gpu_geometry_weights": 46.2, "gpu_reverse_adjoint": 24.95, "gpu_reverse_chain": 0.23, "gpu_reverse_coefficients": 6.83, "gpu_reverse_conv": 11.95, "gpu_reverse_exchange": 0.03, "gpu_setup_topology": 75.21, "reverse": 64.3}
+done Fri Oct 30 09:29:29 AM CET 2026

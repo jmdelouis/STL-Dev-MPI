@@ -13,14 +13,17 @@ use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Family};
 use stl_core::stencil::Gauge;
 use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
-use stl_mpi::synthesis::{ergodic_weights, run_lbfgs, run_lbfgs_with, Ensemble, Objective};
+use stl_mpi::synthesis::{ergodic_weights, run_lbfgs_with, Ensemble, Objective};
 use stl_mpi::Comm;
 
+#[cfg(feature = "gpu")]
+mod device_terms;
 mod kappa;
 mod kurtosis;
 mod level_power;
 mod marginal;
 pub mod minkowski;
+pub mod ensemble;
 use kappa::Transform;
 use kurtosis::Kurtosis;
 use level_power::LevelPower;
@@ -110,6 +113,14 @@ stl-synth --target MAP [options]
   --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
                         docs/dia_convolution.md) or 'stencils' (bound stencils and their
                         transposition); default STL_GPU_CONV, else dia
+  --gpu-fields F        wavelet fields z_n, |z_n| of every level 'keep' (from the forward sweep to
+                        the reverse one) or 'recompute' (per block in the reverse sweep, as the CPU
+                        engine; ~3 L doubles less per pixel and map), or 'auto': keep when it takes
+                        at most half of the free device memory; default STL_GPU_FIELDS, else auto
+  --gpu-terms T         where the objective's terms run with --gpu: 'device' (default: the members'
+                        maps go to the device once per evaluation; level power, marginal, kappa
+                        transform, kurtosis and the gradient sums run there; one rank per group,
+                        no Minkowski term or frozen scales, else 'host') or 'host'
   --quiet               no line per evaluation
 ";
 
@@ -180,6 +191,10 @@ pub struct Args {
     pub gpu_cache: String,
     /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
     pub gpu_conv: Option<String>,
+    /// `--gpu-fields` (`None`: `STL_GPU_FIELDS`, else auto).
+    pub gpu_fields: Option<String>,
+    /// `--gpu-terms host`: the objective's terms on the host.
+    pub gpu_terms_host: bool,
 }
 
 impl Args {
@@ -225,6 +240,8 @@ impl Args {
             gpu_block_rows: 0,
             gpu_cache: "auto".into(),
             gpu_conv: None,
+            gpu_fields: None,
+            gpu_terms_host: false,
         };
         let mut it = argv.iter();
         let num = |v: Option<&String>, k: &str| -> Result<usize, String> {
@@ -338,6 +355,19 @@ impl Args {
                         _ => return Err("--gpu-conv is 'stencils' or 'dia'".into()),
                     }
                 }
+                "--gpu-fields" => {
+                    a.gpu_fields = match it.next().map(String::as_str) {
+                        Some(v @ ("auto" | "keep" | "recompute")) => Some(v.to_string()),
+                        _ => return Err("--gpu-fields is 'auto', 'keep' or 'recompute'".into()),
+                    }
+                }
+                "--gpu-terms" => {
+                    a.gpu_terms_host = match it.next().map(String::as_str) {
+                        Some("device") => false,
+                        Some("host") => true,
+                        _ => return Err("--gpu-terms is 'device' or 'host'".into()),
+                    }
+                }
                 "-h" | "--help" => return Err(USAGE.into()),
                 other => return Err(format!("unknown option {other}\n\n{USAGE}")),
             }
@@ -447,6 +477,12 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     // One device engine per rank, sized for this group's members and shared
     // by every objective (target statistics, synthesis, kappa term): one
     // topology, geometry cache and set of level fields on the device.
+    // The objective's terms on the device too (`--gpu-terms device`), when
+    // they apply.
+    #[cfg(feature = "gpu")]
+    let device_terms = args.gpu
+        && !args.gpu_terms_host
+        && device_terms::applies(args.minkowski_weight > 0.0, args.freeze_nside.is_some());
     #[cfg(feature = "gpu")]
     let device = if args.gpu {
         let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), local_members)?;
@@ -694,55 +730,117 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             println!("[rust-local P={}] evaluation {:4}  loss = {loss:.6e}  t = {t:7.1} s", comm.size(), i + 1);
         }
     };
-    let history = if args.niter == 0 {
+    // Wall time of every part of an evaluation (host_*: the terms with their
+    // gradient accumulation, the objectives with their device sweeps).
+    let host_timers: std::cell::RefCell<std::collections::BTreeMap<&'static str, f64>> = Default::default();
+    let tick = |name: &'static str, since: Instant| *host_timers.borrow_mut().entry(name).or_default() += since.elapsed().as_secs_f64();
+    // The whole objective on the device (--gpu-terms device): its own
+    // evaluators on the shared engine.
+    #[allow(unused_mut)]
+    let mut device_history: Option<Vec<f64>> = None;
+    #[cfg(feature = "gpu")]
+    if let (Some(dev), true, true) = (&device, device_terms, args.niter > 0) {
+        let kappa = kappa_tf.as_ref().filter(|_| kens.is_some() || kurtosis.is_some()).map(|tf| device_terms::KappaPart {
+            transform: tf,
+            ensemble: kens.as_ref(),
+            evaluator: kens.as_ref().map(|_| dev.share(&kplan, local_members)),
+        });
+        let mut dobj = device_terms::DeviceObjective::new(
+            &obj,
+            (members > 1).then_some(&ens),
+            dev.share(&plan, local_members),
+            kappa,
+            level_power.as_ref(),
+            marginal.as_ref(),
+            kurtosis.as_ref(),
+            cross.as_ref(),
+        );
+        let f = |p: &[f64]| {
+            let t = Instant::now();
+            let out = dobj.loss_and_grad(p, &tick);
+            tick("host_evaluations", t);
+            out
+        };
+        device_history = Some(run_lbfgs_with(comm, &mut x, &opts, f, print));
+    }
+    let history = if let Some(h) = device_history {
+        h
+    } else if args.niter == 0 {
         Vec::new()
     } else if members == 1 && level_power.is_none() && kens.is_none() && marginal.is_none() && kurtosis.is_none() && minkowski.is_none() && freeze.is_none() {
-        run_lbfgs(&obj, &mut x, &opts, print)
+        let f = |p: &[f64]| {
+            let t = Instant::now();
+            let out = obj.loss_and_grad(p);
+            tick("host_evaluations", t);
+            out
+        };
+        run_lbfgs_with(comm, &mut x, &opts, f, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
+            let t_eval = Instant::now();
+            let t = Instant::now();
             let (mut loss, mut g) = if members == 1 { obj.loss_and_grad(p) } else { ens.loss_and_grad(p) };
+            tick("host_synthesis_objective", t);
             if let Some(lp) = &level_power {
+                let t = Instant::now();
                 let (l2, g2) = lp.loss_and_grad(p, e - s, gcomm, cross.as_ref());
                 loss += l2;
                 g.iter_mut().zip(&g2).for_each(|(a, b)| *a += b);
+                tick("host_level_power", t);
             }
             if let Some(mg) = &marginal {
+                let t = Instant::now();
                 let (lm, gm) = mg.loss_and_grad(p, e - s, s, gcomm, cross.as_ref());
                 loss += lm;
                 g.iter_mut().zip(&gm).for_each(|(a, b)| *a += b);
+                tick("host_marginal", t);
             }
             // Terms on kappa = f(g): cotangent on kappa, chained by f'(g).
+            let t = Instant::now();
             let kd = match &kappa_tf {
                 Some(tf) if kens.is_some() || kurtosis.is_some() || minkowski.is_some() => Some(tf.apply(p)),
                 _ => None,
             };
+            tick("host_kappa_transform", t);
             if let (Some((k, dk)), Some(ke)) = (&kd, &kens) {
+                let t = Instant::now();
                 let (lk, gk) = ke.loss_and_grad(k);
                 loss += lk;
                 g.iter_mut().zip(gk.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d);
+                tick("host_kappa_objective", t);
             }
             if let Some(ku) = &kurtosis {
+                let t = Instant::now();
                 let (l4, g4) = ku.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
                 loss += l4;
                 match &kd {
                     Some((_, dk)) => g.iter_mut().zip(g4.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
                     None => g.iter_mut().zip(&g4).for_each(|(a, b)| *a += b),
                 }
+                tick("host_kurtosis", t);
             }
             if let Some(mk) = &minkowski {
+                let t = Instant::now();
                 let (l5, g5) = mk.loss_and_grad(kd.as_ref().map_or(p, |(k, _)| k.as_slice()), e - s, gcomm, cross.as_ref());
                 loss += l5;
                 match &kd {
                     Some((_, dk)) => g.iter_mut().zip(g5.iter().zip(dk)).for_each(|(a, (b, d))| *a += b * d),
                     None => g.iter_mut().zip(&g5).for_each(|(a, b)| *a += b),
                 }
+                tick("host_minkowski", t);
             }
             project(&mut g);
+            drop(kd);
+            tick("host_evaluations", t_eval);
             (loss, g)
         };
         run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
     };
     let seconds = started.elapsed().as_secs_f64();
+    // L-BFGS: what the evaluations leave of the run (two-loop recursion,
+    // line search, copies of the variable).
+    let lbfgs_seconds = seconds - host_timers.borrow().get("host_evaluations").copied().unwrap_or(0.0);
+    host_timers.borrow_mut().insert("host_lbfgs", lbfgs_seconds);
     let calls_after = obj.exchange_calls();
     let per_eval = |a: u64, b: u64| ((b - a) as f64 / history.len().max(1) as f64 * 10.0).round() / 10.0;
     let mpi_calls = serde_json::json!({
@@ -896,6 +994,9 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     for (k, v) in device_timers {
         timers.insert(k.to_string(), serde_json::json!((v * 100.0).round() / 100.0));
     }
+    for (k, v) in host_timers.borrow().iter() {
+        timers.insert(k.to_string(), serde_json::json!((v * 100.0).round() / 100.0));
+    }
     let device_peaks = comm.allgather_i64(device_memory.map_or(0, |m| m.0 as i64));
     #[allow(unused_mut)]
     let mut cache_used = 0i64;
@@ -1035,7 +1136,7 @@ mod gpu {
     use stl_core::engine::{EngineConfig, Partition};
     use stl_core::local::LocalGeometry;
     use stl_core::plan::Coefficient;
-    use stl_gpu::{ConvForm, GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
+    use stl_gpu::{ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuEvaluator, GpuOptions};
 
     /// The device engine of the rank, sized for `batch` maps (the largest
     /// batch it evaluates), as the evaluator of `plan` at that batch (other
@@ -1056,6 +1157,9 @@ mod gpu {
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }
+        if let Some(f) = &args.gpu_fields {
+            opts.fields = FieldStore::parse(f).ok_or("--gpu-fields: unknown policy")?;
+        }
         if let Some(mb) = std::env::var("STL_GPU_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
             opts.cache_bytes = mb << 20;
         }
@@ -1071,6 +1175,9 @@ mod gpu {
             "block_rows": engine.block_rows(),
             "geometry_cache": engine.geometry_cache().0.name(),
             "conv_form": engine.conv_form().name(),
+            "fields": engine.field_store().name(),
+            "field_bytes_estimate": engine.memory_parts().0,
+            "decimation_rows_bytes": engine.memory_parts().1,
             "geometry_cache_budget_bytes": engine.geometry_cache().1,
         });
         Ok((GpuEvaluator::new(engine, plan), info))
