@@ -230,8 +230,25 @@ until they are redrawn in the paper's style.
   1024, SHT 57 / 79 / 87 %), exactness (`GpuSht` 2.9e-15, blocks 1.5e-13,
   gradient 9.0e-14), device profile (`device_profile`, one T4: 0.092 /
   1.86 / 11.2 s), full evaluations at 128 x 10 (6 evaluations: 1 T4 6.04
-  -> 3.17 s, host user time 183 -> 39 s; 3 T4 3.10 -> 1.24 s), and the
-  unmeasured extrapolation to 2048 (section 9.4).
+  -> 3.17 s, host user time 183 -> 39 s; 3 T4 3.10 -> 1.24 s). The
+  former extrapolation to 2048 (section 9.4 there) is replaced in the
+  paper by `docs/harmonic_speed.md` on branch `claude/harmonic-speed`
+  (78b62ae, not merged on 31 Oct): section 1.1, profile of the A100
+  production run 2570602 at nside 1024 x 10 (67-68 s per evaluation:
+  SC of g and kappa 10.5 + 10.5 s, harmonic terms 14 s, 33 s host with
+  the device idle, 28 s on one thread: `Objective::to_layout` and the LUT
+  inverse); section 1.3, A100 1.4 s per member, 10.6 x a T4 for 39 x its
+  FP64 peak; section 4, options 0 (host passes, c45f92d), b (four
+  transforms instead of six, 7f1323c) and a (Legendre sums as cuBLAS
+  DGEMMs, bc4b351), exactness (transforms 3e-14, blocks 1.5e-13,
+  gradient 9e-14, losses of 4 evaluations equal to the A100 run's),
+  garoupe 2 T4 nside 1024 x 10 (rank 0: 174 / 152.0 / 142.9 / 134.7 s;
+  harmonic terms of 5 members 55.3 / 55.5 / 45.9 / 37.6 s; SC 114.3 /
+  95.2 / 95.9 / 95.6 s), per member on one T4 11.2 / 9.27 / 6.86 s,
+  memory at 2048 (batches of 4, about 24 GB). The projections (about
+  30 s at 1024 and 120-145 s at 2048 x 10 on one A100) are those relayed
+  by the session that did the work; section 3 of the doc, written before
+  the measurements, gives about 28 s and 115 s.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
