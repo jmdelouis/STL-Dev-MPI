@@ -254,7 +254,7 @@ until they are redrawn in the paper's style.
   `figures/cv10_n1024_datarmor.txt`, `figures/mf_levels_n1024_datarmor.txt`
   (Irene 300 it and Datarmor 600 it side by side; preliminary until the
   2048 analysis). Then the 2048 ensemble from these members, in steps
-  (intermediate in the paper): step 1, Datarmor job 7775549 (100
+  (preliminary in the paper; step 3 is the current end): step 1, Datarmor job 7775549 (100
   iterations, 114 evaluations at about 1065 s on the same 448 cores,
   33.5 h, loss 2.76e5 to 212), analysed against r000-r009:
   `figures/cv10_n2048_datarmor_7775549.txt`,
@@ -266,8 +266,15 @@ until they are redrawn in the paper's style.
   timers `host_lbfgs` 1630 s, `host_marginal` 56 s), analysed against
   r000-r009 after 200 iterations: `figures/cv10_n2048_a100step2.txt`,
   `figures/mf_levels_n2048_a100step2.txt` (step-1 columns included;
-  copies of `runs/` of the main checkout); step 3, A100 job 2535705 (+150
-  iterations, running; loss 8.6 after 73 evaluations). Datarmor job 7775550 runs the same
+  copies of `runs/` of the main checkout); step 3, A100 job 2535705 (150
+  more iterations, 350 in all at 2048; 165 evaluations at 72 s, about
+  3 h 20, loss 19.2 to 4.0; numbers relayed from the run, the `syn.json`
+  is not in git), analysed against r000-r009 after 350 iterations:
+  `figures/cv10_n2048_a100step3.txt`, `figures/mf_levels_n2048_a100step3.txt`
+  (step-2 columns included; copies of `runs/` of the main checkout); the
+  paragraph's comparison with the 1024 ensemble uses
+  `figures/cv10_n1024_datarmor.txt` and `figures/mf_levels_n1024_datarmor.txt`.
+  Datarmor job 7775550 runs the same
   step 2 at about 1070 s per evaluation (the "14 times"). The Irene jobs
   6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
   Datarmor chain).
