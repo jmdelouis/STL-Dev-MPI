@@ -205,23 +205,33 @@ until they are redrawn in the paper's style.
   setup 330 s. The "17 times" against Datarmor uses the approximate
   1070 s per evaluation of job 7775549 (Table `tab:runs`).
 - Objective with several reference maps (P. Campeti's five blocks;
-  paragraphs "Several reference maps" and "Harmonic terms on the device",
-  preliminary): `docs/campeti_merge.md` on branch `claude/ensemble-gpu-terms`
-  (cfccb47, not merged on 31 Oct; based on the merge PR head 5391d45 of
-  `claude/campeti-merge-19032c`). Section 2.3: the blocks. Section 8.3:
-  Rust against his Python (`tools/dump_ensemble_reference.py`,
+  paragraphs "Several reference maps", "Harmonic terms on the device" and
+  "The objective with several reference maps at nside 128", preliminary):
+  `stl-ensemble`, merged into main by PR #4 (merge commit ccfd8c9,
+  31 Oct), `docs/campeti_merge.md` on main. Section 2.3: the blocks.
+  Section 8.3: Rust against his Python (`tools/dump_ensemble_reference.py`,
   `fixtures/ensemble`, nside 16): SHT 7e-14, blocks 1.3e-13, gradient
   9e-14. Section 8.5: full run at nside 128 on garoupe
   (`/tmp/jmdeloui-campeti/runs/full128`, revision 5c925f4, 3 T4, 5 groups
-  of 2, harmonic terms on the host): 2 h 34 min, 2869 evaluations at
-  3.10 s, loss 61.81 -> 0.625; references r000-r009 block-averaged to 128
-  (`cal128.json`). Section 9: host profile (`host_profile`, 4 threads:
-  0.65 / 20.1 / 133 s at 128 / 512 / 1024, SHT 57 / 79 / 87 %), exactness
-  (`GpuSht` 2.9e-15, blocks 1.5e-13, gradient 9.0e-14), device profile
-  (`device_profile`, one T4: 0.092 / 1.86 / 11.2 s), full evaluations at
-  128 x 10 (6 evaluations: 1 T4 6.04 -> 3.17 s, host user time 183 ->
-  39 s; 3 T4 3.10 -> 1.24 s), and the unmeasured extrapolation to 2048
-  (section 9.4).
+  of 2, L = 4, harmonic terms on the host; references r000-r009
+  block-averaged to 128, `cal128.json`): 2 h 34 min (30 Oct 19:23 to
+  21:57), 2869 evaluations at 3.10 s, stopped on `--niter 2500` with the
+  loss still falling about 4e-4 per evaluation, loss 61.81 -> 0.625; per
+  evaluation on rank 0 (2 members): Minkowski 1.72 s (56 %), Gaussian SC
+  0.56 s, physical SC 0.42 s, C_l and PDF 0.34 s; final blocks (loss =
+  mean + variance term) Gaussian SC 2.611 = 2.221 + 0.389, physical SC
+  0.412 = 0.282 + 0.131, C_l 0.0080, PDF 0.0156, Minkowski 0.0801; final
+  physical maps against r000-r009 (training-set check): std z = 0.07,
+  quantiles 0.001-0.999 |z| <= 1.5, minimum z = -6.6, maximum z = +3.4,
+  skewness 12.9 +- 2.0 against 11.3 +- 1.1, excess kurtosis 452 +- 176
+  against 287 +- 75. Section 9 (harmonic terms on the device) is on branch
+  `claude/ensemble-gpu-terms` (cfccb47), not merged on 31 Oct: host
+  profile (`host_profile`, 4 threads: 0.65 / 20.1 / 133 s at 128 / 512 /
+  1024, SHT 57 / 79 / 87 %), exactness (`GpuSht` 2.9e-15, blocks 1.5e-13,
+  gradient 9.0e-14), device profile (`device_profile`, one T4: 0.092 /
+  1.86 / 11.2 s), full evaluations at 128 x 10 (6 evaluations: 1 T4 6.04
+  -> 3.17 s, host user time 183 -> 39 s; 3 T4 3.10 -> 1.24 s), and the
+  unmeasured extrapolation to 2048 (section 9.4).
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
