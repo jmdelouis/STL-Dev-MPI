@@ -163,3 +163,48 @@ With 0 + b + a, 2500 iterations (about 2875 evaluations) take about
 92 h on one A100, or about 50 h on two with `--groups 2`.  At nside 1024
 the same options give 68 s -> 41 s (0) -> 35 s (0 + b) -> about 28 s
 (0 + b + a).  The SC engine then dominates.
+
+## 4. Measured on garoupe (T4), branch `claude/harmonic-speed`
+
+Options 0, b and a are implemented.  None of them changes the loss, and
+the tests pass: device against host to 1.5e-13 on the blocks and 9e-14
+on the gradient, and the transforms to 3e-14.
+
+**Full evaluations.**  nside 1024, ten members on 2 T4 (`--groups 2`,
+five members per rank, `--gpu-fields recompute`, 4 threads per rank).
+These are 4 evaluations from the default Gaussian fields, and the losses
+of the 4 evaluations equal those of the A100 production run to the
+printed digits.  Times are seconds per evaluation, rank 0:
+
+| | before (223ace8) | 0 (c45f92d) | 0 + b (7f1323c) | 0 + b + a (bc4b351) |
+|---|---|---|---|---|
+| one evaluation | 174 | 152.0 | 142.9 | 134.7 |
+| SC of g + SC of kappa | 114.3 | 95.2 | 95.9 | 95.6 |
+| harmonic terms (5 members) | 55.3 | 55.5 | 45.9 | 37.6 |
+| host passes (physical map, chain) | 7.4 | 1.8 | 1.8 | 1.8 |
+| peak device memory | | 13.7 GB | 9.7 GB | 10.9 GB |
+
+**Harmonic terms per member and evaluation** (`device_profile`, one T4,
+nside 1024, the states kept):
+
+| | seconds | of which Legendre tables, GEMMs, ring FFTs |
+|---|---|---|
+| former kernels, six transforms | 11.2 | |
+| b, kernels (`STL_SHT=kernels`), batches of 5 | 9.27 | FFTs 0.59 |
+| b + a, GEMMs, batches of one | 7.53 | 2.00, 2.92, 0.58 |
+| b + a, GEMMs, batches of five | 6.86 | 1.02, 3.25, 0.58 |
+
+The T4 does little FP64 (0.25 TFLOPS).  Its DGEMMs run at about half that
+peak (3.9 x 10^11 operations per member at 1024 take 3.25 s), so sharing
+the tables only saves their construction.  On the A100 the DGEMMs use the
+FP64 tensor cores (19.5 TFLOPS), where the former kernels reached only a
+quarter of their T4 efficiency (section 1.3).  Its gain should therefore
+be larger than the T4's 26 %, but it is not measured.
+
+**Memory.**  `GpuTerms` sizes its batches from the free device memory
+(80 %, or `STL_SHT_GROUP_MB`), at about 14 maps per member, which is
+5.6 GB per member at 2048.  It keeps the Minkowski states only when a
+batch of one member still fits.  The Legendre tables of a block of m take
+at most `STL_SHT_TABLE_MB` (1 GiB).  With the 30 GB that the SC engine
+leaves at 2048, that gives batches of 4 members and about 24 GB for the
+harmonic terms.
