@@ -243,9 +243,19 @@ until they are redrawn in the paper's style.
   match`), judged against r000-r009 (files from `runs/` of the main checkout):
   `figures/cv10_n1024_datarmor.txt`, `figures/mf_levels_n1024_datarmor.txt`
   (Irene 300 it and Datarmor 600 it side by side; preliminary until the
-  2048 analysis). Then the 2048 ensemble from these members, jobs 7775549
-  (100 iterations, about 1070 s per evaluation on the same 448 cores,
-  started 29 Oct 17:50) and 7775550 (100 iterations). The Irene jobs
+  2048 analysis). Then the 2048 ensemble from these members, in steps
+  (intermediate in the paper): step 1, Datarmor job 7775549 (100
+  iterations, 114 evaluations at about 1065 s on the same 448 cores,
+  33.5 h, loss 2.76e5 to 212), analysed against r000-r009:
+  `figures/cv10_n2048_datarmor_7775549.txt`,
+  `figures/mf_levels_n2048_datarmor_7775549.txt` (copies of `runs/` of the
+  main checkout); step 2, hpc A100 job 2520589 (one A100-SXM4-80GB, binary
+  4d10f1f: DIA, fields recomputed, objective terms on the device, 6 host
+  threads; 100 iterations, 108 evaluations at 74.5 s, 2 h 24 with setup
+  and histogram matching, peak 67.8 GB, loss 212 to 19.2; `syn.json`
+  timers `host_lbfgs` 1630 s, `host_marginal` 56 s); step 3, A100 job
+  2535705 (+150 iterations, running). Datarmor job 7775550 runs the same
+  step 2 at about 1070 s per evaluation (the "14 times"). The Irene jobs
   6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
   Datarmor chain).
 - Overlap mode: `stl-synth --overlap N` (branch `m8-overlap`, commit f6bbf01, on main as a1ff836; CPU engine only).
