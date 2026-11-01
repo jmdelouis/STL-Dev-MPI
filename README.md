@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 25 pages, with Appendix B (the
+comes from TeX Live. The draft builds to 26 pages, with Appendix B (the
 learned prior for the finest levels), with no warning (abstract under the
 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
