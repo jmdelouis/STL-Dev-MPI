@@ -245,10 +245,21 @@ until they are redrawn in the paper's style.
   garoupe 2 T4 nside 1024 x 10 (rank 0: 174 / 152.0 / 142.9 / 134.7 s;
   harmonic terms of 5 members 55.3 / 55.5 / 45.9 / 37.6 s; SC 114.3 /
   95.2 / 95.9 / 95.6 s), per member on one T4 11.2 / 9.27 / 6.86 s,
-  memory at 2048 (batches of 4, about 24 GB). The projections (about
-  30 s at 1024 and 120-145 s at 2048 x 10 on one A100) are those relayed
-  by the session that did the work; section 3 of the doc, written before
-  the measurements, gives about 28 s and 115 s.
+  memory at 2048 (batches of 4, about 24 GB). Section 4 (commit
+  3df4781): A100 measurements, hpc job 2592869 on 1 Nov (bench
+  `tools/hpc/harmonic_bench_a100.slurm` at 00ea531): nside 1024 x 10,
+  evaluations 2-4 25.7 / 26.2 / 25.8 s against 65.2 / 65.4 / 65.7 s
+  (production 2570602, 223ace8), losses equal to the 11 printed digits,
+  steady state about 28 s against 68 s (x 2.4); SC 21.5 s, harmonic terms
+  3.8 s (14 s), host passes 1.0 s (28 s), peak 61.7 GB (57.9 GB); per
+  member 1.4 / 0.716 / 0.369 s (former, b with kernels, b + a), x 18 a
+  T4 (6.73 s); 2048: 2.60 s (batches of 10), 2.96 s (5), tables 0.76 s,
+  GEMMs 0.65 s; DGEMMs about 6 / 5 TFLOPS; one map alone 0.94 s (GEMMs)
+  against 0.67 s (kernels); transforms 1.46 / 2.47 GB; DUCC agreement
+  6e-14. Section 5: projection to 2048 x 10 (no complete evaluation, no
+  2048 calibration): about 135 s (SC 86, harmonic 26-30, host + L-BFGS
+  20) against 328 s; 2500 iterations about 108 h on one A100, 55 h on
+  two; at 1024 about 22 h instead of 54 h; SC engine 65 % / 75 %.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
