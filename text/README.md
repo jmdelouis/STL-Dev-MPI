@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 25 pages, with Appendix B (the
+comes from TeX Live. The draft builds to 26 pages, with Appendix B (the
 learned prior for the finest levels), with no warning (abstract under the
 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
@@ -205,23 +205,61 @@ until they are redrawn in the paper's style.
   setup 330 s. The "17 times" against Datarmor uses the approximate
   1070 s per evaluation of job 7775549 (Table `tab:runs`).
 - Objective with several reference maps (P. Campeti's five blocks;
-  paragraphs "Several reference maps" and "Harmonic terms on the device",
-  preliminary): `docs/campeti_merge.md` on branch `claude/ensemble-gpu-terms`
-  (cfccb47, not merged on 31 Oct; based on the merge PR head 5391d45 of
-  `claude/campeti-merge-19032c`). Section 2.3: the blocks. Section 8.3:
-  Rust against his Python (`tools/dump_ensemble_reference.py`,
+  paragraphs "Several reference maps", "Harmonic terms on the device" and
+  "The objective with several reference maps at nside 128", preliminary):
+  `stl-ensemble`, merged into main by PR #4 (merge commit ccfd8c9,
+  31 Oct), `docs/campeti_merge.md` on main. Section 2.3: the blocks.
+  Section 8.3: Rust against his Python (`tools/dump_ensemble_reference.py`,
   `fixtures/ensemble`, nside 16): SHT 7e-14, blocks 1.3e-13, gradient
   9e-14. Section 8.5: full run at nside 128 on garoupe
   (`/tmp/jmdeloui-campeti/runs/full128`, revision 5c925f4, 3 T4, 5 groups
-  of 2, harmonic terms on the host): 2 h 34 min, 2869 evaluations at
-  3.10 s, loss 61.81 -> 0.625; references r000-r009 block-averaged to 128
-  (`cal128.json`). Section 9: host profile (`host_profile`, 4 threads:
-  0.65 / 20.1 / 133 s at 128 / 512 / 1024, SHT 57 / 79 / 87 %), exactness
-  (`GpuSht` 2.9e-15, blocks 1.5e-13, gradient 9.0e-14), device profile
-  (`device_profile`, one T4: 0.092 / 1.86 / 11.2 s), full evaluations at
-  128 x 10 (6 evaluations: 1 T4 6.04 -> 3.17 s, host user time 183 ->
-  39 s; 3 T4 3.10 -> 1.24 s), and the unmeasured extrapolation to 2048
-  (section 9.4).
+  of 2, L = 4, harmonic terms on the host; references r000-r009
+  block-averaged to 128, `cal128.json`): 2 h 34 min (30 Oct 19:23 to
+  21:57), 2869 evaluations at 3.10 s, stopped on `--niter 2500` with the
+  loss still falling about 4e-4 per evaluation, loss 61.81 -> 0.625; per
+  evaluation on rank 0 (2 members): Minkowski 1.72 s (56 %), Gaussian SC
+  0.56 s, physical SC 0.42 s, C_l and PDF 0.34 s; final blocks (loss =
+  mean + variance term) Gaussian SC 2.611 = 2.221 + 0.389, physical SC
+  0.412 = 0.282 + 0.131, C_l 0.0080, PDF 0.0156, Minkowski 0.0801; final
+  physical maps against r000-r009 (training-set check): std z = 0.07,
+  quantiles 0.001-0.999 |z| <= 1.5, minimum z = -6.6, maximum z = +3.4,
+  skewness 12.9 +- 2.0 against 11.3 +- 1.1, excess kurtosis 452 +- 176
+  against 287 +- 75. Section 9 (harmonic terms on the device) is on branch
+  `claude/ensemble-gpu-terms` (cfccb47), not merged on 31 Oct: host
+  profile (`host_profile`, 4 threads: 0.65 / 20.1 / 133 s at 128 / 512 /
+  1024, SHT 57 / 79 / 87 %), exactness (`GpuSht` 2.9e-15, blocks 1.5e-13,
+  gradient 9.0e-14), device profile (`device_profile`, one T4: 0.092 /
+  1.86 / 11.2 s), full evaluations at 128 x 10 (6 evaluations: 1 T4 6.04
+  -> 3.17 s, host user time 183 -> 39 s; 3 T4 3.10 -> 1.24 s). The
+  former extrapolation to 2048 (section 9.4 there) is replaced in the
+  paper by `docs/harmonic_speed.md` on branch `claude/harmonic-speed`
+  (78b62ae, not merged on 31 Oct): section 1.1, profile of the A100
+  production run 2570602 at nside 1024 x 10 (67-68 s per evaluation:
+  SC of g and kappa 10.5 + 10.5 s, harmonic terms 14 s, 33 s host with
+  the device idle, 28 s on one thread: `Objective::to_layout` and the LUT
+  inverse); section 1.3, A100 1.4 s per member, 10.6 x a T4 for 39 x its
+  FP64 peak; section 4, options 0 (host passes, c45f92d), b (four
+  transforms instead of six, 7f1323c) and a (Legendre sums as cuBLAS
+  DGEMMs, bc4b351), exactness (transforms 3e-14, blocks 1.5e-13,
+  gradient 9e-14, losses of 4 evaluations equal to the A100 run's),
+  garoupe 2 T4 nside 1024 x 10 (rank 0: 174 / 152.0 / 142.9 / 134.7 s;
+  harmonic terms of 5 members 55.3 / 55.5 / 45.9 / 37.6 s; SC 114.3 /
+  95.2 / 95.9 / 95.6 s), per member on one T4 11.2 / 9.27 / 6.86 s,
+  memory at 2048 (batches of 4, about 24 GB). Section 4 (commit
+  3df4781): A100 measurements, hpc job 2592869 on 1 Nov (bench
+  `tools/hpc/harmonic_bench_a100.slurm` at 00ea531): nside 1024 x 10,
+  evaluations 2-4 25.7 / 26.2 / 25.8 s against 65.2 / 65.4 / 65.7 s
+  (production 2570602, 223ace8), losses equal to the 11 printed digits,
+  steady state about 28 s against 68 s (x 2.4); SC 21.5 s, harmonic terms
+  3.8 s (14 s), host passes 1.0 s (28 s), peak 61.7 GB (57.9 GB); per
+  member 1.4 / 0.716 / 0.369 s (former, b with kernels, b + a), x 18 a
+  T4 (6.73 s); 2048: 2.60 s (batches of 10), 2.96 s (5), tables 0.76 s,
+  GEMMs 0.65 s; DGEMMs about 6 / 5 TFLOPS; one map alone 0.94 s (GEMMs)
+  against 0.67 s (kernels); transforms 1.46 / 2.47 GB; DUCC agreement
+  6e-14. Section 5: projection to 2048 x 10 (no complete evaluation, no
+  2048 calibration): about 135 s (SC 86, harmonic 26-30, host + L-BFGS
+  20) against 328 s; 2500 iterations about 108 h on one A100, 55 h on
+  two; at 1024 about 22 h instead of 54 h; SC engine 65 % / 75 %.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
@@ -244,7 +282,7 @@ until they are redrawn in the paper's style.
   `figures/cv10_n1024_datarmor.txt`, `figures/mf_levels_n1024_datarmor.txt`
   (Irene 300 it and Datarmor 600 it side by side; preliminary until the
   2048 analysis). Then the 2048 ensemble from these members, in steps
-  (intermediate in the paper): step 1, Datarmor job 7775549 (100
+  (preliminary in the paper; step 3 is the current end): step 1, Datarmor job 7775549 (100
   iterations, 114 evaluations at about 1065 s on the same 448 cores,
   33.5 h, loss 2.76e5 to 212), analysed against r000-r009:
   `figures/cv10_n2048_datarmor_7775549.txt`,
@@ -253,8 +291,18 @@ until they are redrawn in the paper's style.
   4d10f1f: DIA, fields recomputed, objective terms on the device, 6 host
   threads; 100 iterations, 108 evaluations at 74.5 s, 2 h 24 with setup
   and histogram matching, peak 67.8 GB, loss 212 to 19.2; `syn.json`
-  timers `host_lbfgs` 1630 s, `host_marginal` 56 s); step 3, A100 job
-  2535705 (+150 iterations, running). Datarmor job 7775550 runs the same
+  timers `host_lbfgs` 1630 s, `host_marginal` 56 s), analysed against
+  r000-r009 after 200 iterations: `figures/cv10_n2048_a100step2.txt`,
+  `figures/mf_levels_n2048_a100step2.txt` (step-1 columns included;
+  copies of `runs/` of the main checkout); step 3, A100 job 2535705 (150
+  more iterations, 350 in all at 2048; 165 evaluations at 72 s, about
+  3 h 20, loss 19.2 to 4.0; numbers relayed from the run, the `syn.json`
+  is not in git), analysed against r000-r009 after 350 iterations:
+  `figures/cv10_n2048_a100step3.txt`, `figures/mf_levels_n2048_a100step3.txt`
+  (step-2 columns included; copies of `runs/` of the main checkout); the
+  paragraph's comparison with the 1024 ensemble uses
+  `figures/cv10_n1024_datarmor.txt` and `figures/mf_levels_n1024_datarmor.txt`.
+  Datarmor job 7775550 runs the same
   step 2 at about 1070 s per evaluation (the "14 times"). The Irene jobs
   6090002 and 6090003 were cancelled on 29 Oct (they duplicated the
   Datarmor chain).
