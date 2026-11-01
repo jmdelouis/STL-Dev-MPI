@@ -4,13 +4,17 @@
 //! halo / ghost exchanges of `stl_core::engine::Exchange` between ranks.
 //! See `docs/gpu.md`.
 
+pub mod cublas;
+pub mod cufft;
 pub mod device;
 pub mod dia;
 pub mod engine;
 pub mod geometry;
+pub mod harmonic;
 pub mod terms;
 pub mod topology;
 
 pub use cudarc::driver::{CudaSlice, PinnedHostSlice};
 pub use device::Gpu;
 pub use engine::{ConvForm, FieldStore, GeometryCache, GpuEngine, GpuEvaluator, GpuOptions, HostForwardState};
+pub use harmonic::GpuSht;

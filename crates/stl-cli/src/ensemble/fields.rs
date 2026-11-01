@@ -49,6 +49,30 @@ pub fn chunked<T: Send>(n: usize, chunk: usize, f: impl Fn(usize, usize) -> T + 
     out.into_iter().map(|(_, v)| v).collect()
 }
 
+/// `f(lo, part)` over contiguous parts of `out` (`part = out[lo..]`), one
+/// per host thread: for element-wise passes (no sums).
+pub fn par_chunks(out: &mut [f64], f: impl Fn(usize, &mut [f64]) + Sync) {
+    let per = out.len().div_ceil(host_threads().min(out.len().div_ceil(CHUNK)).max(1)).max(1);
+    std::thread::scope(|s| {
+        for (k, part) in out.chunks_mut(per).enumerate() {
+            let f = &f;
+            s.spawn(move || f(k * per, part));
+        }
+    });
+}
+
+/// [`par_chunks`] over the same parts of two slices of one length.
+pub fn par_zip(a: &mut [f64], b: &mut [f64], f: impl Fn(usize, &mut [f64], &mut [f64]) + Sync) {
+    assert_eq!(a.len(), b.len());
+    let per = a.len().div_ceil(host_threads().min(a.len().div_ceil(CHUNK)).max(1)).max(1);
+    std::thread::scope(|s| {
+        for (k, (pa, pb)) in a.chunks_mut(per).zip(b.chunks_mut(per)).enumerate() {
+            let f = &f;
+            s.spawn(move || f(k * per, pa, pb));
+        }
+    });
+}
+
 const CHUNK: usize = 1 << 14;
 
 /// The 16 unnormalised cosine-squared windows of the C_l bands and their
@@ -76,16 +100,25 @@ pub fn lp_windows(lmax: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
     (windows, logc.iter().map(|c| c.exp()).collect())
 }
 
+/// Band powers `W C_l` from the `C_l`.
+pub fn window_sums(windows: &[Vec<f64>], cl: &[f64]) -> Vec<f64> {
+    windows.iter().map(|w| w.iter().zip(cl).map(|(a, b)| a * b).sum()).collect()
+}
+
+/// Cotangent of the `C_l` (`l <= lmax`) from that of the band powers.
+pub fn window_cotangent(windows: &[Vec<f64>], cot: &[f64], lmax: usize) -> Vec<f64> {
+    (0..=lmax).map(|l| windows.iter().zip(cot).map(|(w, c)| w[l] * c).sum()).collect()
+}
+
 /// Band powers `W C_l` of a map, and the analysis kept for the cotangent.
 pub fn band_powers(sht: &Sht, windows: &[Vec<f64>], x: &[f64]) -> (Vec<f64>, Vec<Complex64>) {
     let alm = sht.analysis(x);
-    let cl = sht.power(&alm);
-    (windows.iter().map(|w| w.iter().zip(&cl).map(|(a, b)| a * b).sum()).collect(), alm)
+    (window_sums(windows, &sht.power(&alm)), alm)
 }
 
 /// Map cotangent of the band powers.
 pub fn band_powers_vjp(sht: &Sht, windows: &[Vec<f64>], alm: &[Complex64], cot: &[f64]) -> Vec<f64> {
-    let dcl: Vec<f64> = (0..=sht.lmax).map(|l| windows.iter().zip(cot).map(|(w, c)| w[l] * c).sum()).collect();
+    let dcl = window_cotangent(windows, cot, sht.lmax);
     sht.analysis_vjp(&sht.power_vjp(alm, &dcl))
 }
 
@@ -101,6 +134,11 @@ pub struct Cic {
 impl Cic {
     pub fn new(lo: f64, hi: f64, bins: usize) -> Self {
         Cic { lo, hi, bins, dx: (hi - lo) / (bins - 1) as f64 }
+    }
+
+    /// Spacing of the centres.
+    pub fn dx(&self) -> f64 {
+        self.dx
     }
 
     pub fn forward(&self, x: &[f64]) -> Vec<f64> {

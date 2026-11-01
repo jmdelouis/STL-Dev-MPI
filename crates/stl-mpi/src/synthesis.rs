@@ -143,14 +143,18 @@ impl<'a, C: Comm> Objective<'a, C> {
     }
 
     /// Owned slice -> layout of level 0 (halo zero, filled by the engine).
+    /// The owned ids are a contiguous range of the sorted layout: one copy
+    /// per row (a `pos` per pixel costs a binary search in a sparse layout).
     fn to_layout(&self, x: &[f64]) -> Vec<f64> {
         let layout = &self.part.layouts[0];
         let (s, e) = self.owned();
         let len = (e - s) as usize;
         let mut out = vec![0.0; self.batch * self.channels * layout.len()];
-        for r in 0..self.batch * self.channels {
-            for i in 0..len {
-                out[r * layout.len() + layout.pos(s + i as i64)] = x[r * len + i];
+        if len > 0 {
+            let p0 = layout.pos(s);
+            assert_eq!(layout.pos(e - 1), p0 + len - 1, "owned range not contiguous in the layout");
+            for (row, src) in out.chunks_mut(layout.len()).zip(x.chunks(len)) {
+                row[p0..p0 + len].copy_from_slice(src);
             }
         }
         out

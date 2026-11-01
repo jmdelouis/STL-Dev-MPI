@@ -402,13 +402,199 @@ SciPy L-BFGS-B up to 8000 iterations).
 
 ### 8.6 What remains
 
-- nside 2048: the host terms gather whole maps (every rank of a group holds
-  its members' maps) and the SHT is `O(lmax^3)`: about 15 transforms per
-  member and evaluation.  To measure on the GH200 or an A100; then move
-  the Minkowski thresholds (and possibly the SHT) to the device.
-- Several ranks per group compute the host terms redundantly (no gain for
-  them); with one rank per group (one GPU per group) nothing is redundant.
+- nside 2048: memory and time of a whole evaluation to measure on the
+  GH200 or an A100 (section 9 extrapolates the harmonic terms).
+- Several ranks per group compute the harmonic terms redundantly (no gain
+  for them); with one rank per group (one GPU per group) nothing is redundant.
 - The 2048 C_l variance cutoff (`--ps-variance-upper`) is still a choice
   to make (383 at 128 in his configuration).
 - TRAIN54 itself (Takahashi zs1, r000-r053) for a like-for-like comparison
   with his GH200 runs.
+
+## 9. Harmonic terms on the device (`--harmonic gpu`)
+
+Branch `claude/ensemble-gpu-terms` (from the merge PR's head 5391d45).
+Profile of the host terms first (`host_profile` in
+`crates/stl-cli/tests/ensemble.rs`, one member, one evaluation, 4 threads
+of garoupe; the Minkowski thresholds are the functionals minus their
+transforms):
+
+| nside | SHT (2 analyses, 2 syntheses, derivatives and their VJP) | Minkowski thresholds | CIC PDF | C_l products | total |
+|---|---|---|---|---|---|
+| 128 | 0.37 s (57 %) | 0.27 s | 0.006 s | 0.0003 s | 0.65 s |
+| 512 | 15.9 s (79 %) | 4.1 s | 0.06 s | 0.05 s | 20.1 s |
+| 1024 | 116 s (87 %) | 17.0 s | 0.26 s | 0.05 s | 133 s |
+
+The transforms grow as `nside^3` and dominate from nside 128 on.
+
+### 9.1 What runs where
+
+- `stl_gpu::harmonic::GpuSht` (`crates/stl-gpu/src/harmonic.{rs,cu}`): the
+  port of `stl_core::sht`, same conventions and packing, NESTED maps on
+  the device.  Forward Legendre sums one thread per (m, ring pair), the
+  recursion and the sums over l in the host's order; transposed sums one
+  block per (m, chunk of 1024 ring pairs): each thread adds its four rings
+  in order, the threads in a fixed tree (warp shuffles, then the warps in
+  order), the chunks in order.  Recursion coefficients in a device table
+  (IEEE division and square root: the host's values).  Ring FFTs by cuFFT,
+  one batched plan per ring length (the polar pairs, the equatorial
+  rings), loaded at run time (`crates/stl-gpu/src/cufft.rs`: cudarc only
+  binds cuFFT for CUDA 12; garoupe uses the CUDA 10 toolkit's
+  `libcufft.so.10` with its 11.4 driver, `LD_LIBRARY_PATH` or
+  `STL_CUFFT`).
+- `crates/stl-cli/src/ensemble/gpu_terms.rs`: per member, the map goes up
+  once, its analysis gives the C_l (the host's sum over m), the CIC
+  histogram (one thread per chunk of 2^14 pixels in pixel order: the
+  host's sums), the Minkowski functionals (pixel sums per chunk of 2^16
+  in a fixed tree, chunks added in order on the host; Gaussians of the
+  thresholds evaluated directly, where the host uses a recurrence); the
+  states (u and the five derivative maps) stay on the device between the
+  passes; the map cotangent comes down once.  The losses, the LUT and the
+  chain to the Gaussian maps stay on the host.
+- `--harmonic cpu|gpu` (default `gpu` with `--gpu`): the host path stays
+  for the tests and machines without cuFFT; the report says which ran.
+
+### 9.2 Exactness (garoupe, Tesla T4)
+
+| Check | Largest difference |
+|---|---|
+| `GpuSht` against `stl_core::sht`, nside 1 to 128, every transform and transpose (`crates/stl-gpu/tests/harmonic.rs`) | 2.9e-15 relative (C_l bitwise) |
+| The five blocks of the fixture objective, device against host terms (`device_terms_match_the_host`) | 1.5e-13 (Minkowski; C_l 1e-15, PDF and SC bitwise) |
+| Its gradient | 9.0e-14 |
+| Loss after 5 L-BFGS iterations at nside 128 (full runs below) | 1.5e-11 relative (rounding carried by the trajectory) |
+
+### 9.3 Gain
+
+Harmonic terms of one member and one evaluation (`device_profile`
+against `host_profile`, one T4 against 4 host threads):
+
+| nside | device | host (4 threads) | gain | device SHT share |
+|---|---|---|---|---|
+| 128 | 0.092 s | 0.65 s | 7.1 | 0.097 s of transforms in isolation |
+| 512 | 1.86 s | 20.1 s | 10.8 | 1.47 s |
+| 1024 | 11.2 s | 133 s | 11.9 | 9.5 s |
+
+Full evaluations of `stl-ensemble run` at nside 128, ten members, Takahashi
+targets (`cal128.json`), 5 L-BFGS iterations (6 evaluations), garoupe:
+
+| Layout | `--harmonic` | s / evaluation | host CPU (`time -v`) | mean GPU utilisation (whole run) |
+|---|---|---|---|---|
+| 1 T4, batch 10, 12 threads | cpu | 6.04 | 315 %, 183 s user | 20 % |
+| 1 T4, batch 10, 12 threads | gpu | 3.17 | 106 %, 39 s user | 43 % |
+| 3 T4, 5 groups of 2, 2 threads per rank | cpu | 3.10 | 663 %, 262 s user | 16 / 16 / 9 % |
+| 3 T4, 5 groups of 2, 2 threads per rank | gpu | 1.24 | 502 %, 134 s user | 30 / 30 / 14 % |
+
+On one T4 the evaluation is 1.9 x faster and uses 4.6 x less host CPU
+time; on 3 T4, 2.5 x faster.  With five ranks the remaining host CPU is
+mostly OpenMPI's busy polling in the collectives (`--mca
+mpi_yield_when_idle 1` would release it), not computation.  The rest of
+an evaluation is now the two SC objectives (1.27 + 1.20 s of 3.76 s per
+evaluation on one T4).
+
+### 9.4 Extrapolation to nside 2048 (preliminary)
+
+The transforms scale as `nside^3` (x 7.3 from 512 to 1024 on the host, x 6.5
+on the device): the harmonic terms of one member and evaluation would
+take about 90 s on a T4, against about 1070 s on 4 host threads (360 s on
+the 12 of garoupe).  The Legendre sums are bound by double-precision
+arithmetic (about 85 GFLOP/s on the T4, a third of its peak): an A100
+(9.7 TFLOP/s double precision, 2 TB/s) should bring them to 2-6 s per
+member and evaluation, i.e. 20-60 s for ten members, next to the SC
+objectives measured on one A100 at nside 2048 (one SC objective of ten
+members with its device terms: 62 s per evaluation,
+`benchmarks/terms/a100/n2048_B10_device.json`; the method has two, of g
+and kappa).  Device memory of the harmonic terms at nside 2048: about
+10 GB of transients for one member (five complex ring buffers, the
+Legendre sums, the partial a_lm) plus 2.4 GB of Minkowski state per kept
+member: it fits next to the engine on an 80 GB device, not on a T4.
+To be measured; no A100 run was made for this.
+
+## 10. nside 1024 (garoupe, 31 Oct 2026, preliminary)
+
+Request of J.-M. Delouis: a run of his method at nside 1024, judged with
+`cv10.py` and `mf_levels.py` against the ten realisations, as our recipe
+at 1024 (Datarmor, 600 iterations).  Code of this branch (harmonic terms on
+the device); build in the garoupe home, run directory
+`/export/home1/jmdeloui/stl-campeti/n1024` (garoupe's local data disk: the
+home has a 10 GB quota).
+
+### 10.1 Calibration
+
+`stl-ensemble calibrate --references r000 ... r009 --nside 1024 --gpu`
+on the ten Takahashi realisations at 1024 (zs1,
+`/tmp/jmdeloui-irene1024/real`, the maps the judgement tools read): 13 min
+on garoupe (SC statistics on one T4, harmonic terms on the 12 host
+threads), 8.8 GB of host memory, `cal1024.json` 3.7 MB.  The maps are
+already at 1024: `degrade` only rounds them to `f32`.
+
+### 10.2 C_l variance cutoff: 3071 (`--ps-variance-upper 3071`)
+
+The source keeps the variance term of the 16 log C_l bands whose centre
+lies in [20, 383] at nside 128, where 383 = `3 nside - 1`: every band
+from l = 20 to the native limit.  It leaves the 2048 value open.  At
+1024 the same rule gives 3071, and the realisations show why the high
+bands must stay: their band powers scatter by 8-15 % at every l, far
+above the Gaussian prediction, the non-Gaussian (halo, super-sample)
+covariance of lensing.  A cutoff at 383 would leave the six bands that
+the 1024 run adds without any variance constraint, and an ensemble of
+nearly Gaussian small scales would keep the Gaussian scatter there:
+
+| Band centre l | Relative scatter of r000-r009 | Gaussian prediction | Ratio |
+|---|---|---|---|
+| 23 | 0.144 | 0.056 | 2.6 |
+| 61 | 0.169 | 0.021 | 8.2 |
+| 163 | 0.142 | 0.0078 | 18 |
+| 434 | 0.123 | 0.0030 | 41 |
+| 1155 | 0.104 | 0.0012 | 90 |
+| 3071 | 0.084 | 0.0006 | 134 |
+
+(Band powers with the objective's windows, C_l by `healpy.anafast`;
+Gaussian prediction `sqrt(sum_l W_l^2 2 C_l^2 / (2 l + 1))` with the mean
+C_l of the ten.)
+
+### 10.3 Initial fields
+
+The suggested warm start from the nside-128 run (script `warm1024.py`,
+kept in the run directory) was tried.  Per member, the a_lm of
+its 128 Gaussian map were rescaled to the 1024 Gaussian C_l of the
+calibration, kept up to l = 128, and tapered (cos^2 in power) to l = 256
+into a Gaussian random field with those C_l.  The expected C_l is the 1024
+one at every l, and the degraded fields correlate at 0.80-0.83 with the
+128 members.  It starts higher than the default Gaussian random fields:
+
+| Initial fields | Loss | Gaussian SC | Physical SC | C_l | PDF | Minkowski |
+|---|---|---|---|---|---|---|
+| warm start from the 128 run | 1000.6 | 2144 | 2250 | 4.06 | 6.17 | 599 |
+| Gaussian random fields (default) | 831.9 | 2169 | 1498 | 4.84 | 2.45 | 485 |
+
+Gaussianisation does not commute with block averaging.  The large scales
+of a 128 Gaussian map (the Gaussianised 128 kappa) are therefore not the
+large scales of a 1024 Gaussian map, and kappa = f_1024(g) spoils the
+physical statistics.  The run starts from the method's own default.  At
+1024 the SC mean terms dominate the loss: their sigmas are the
+white-noise standard errors `sqrt(V / N)`, 8 times smaller than at 128
+for a coefficient of the finest level.  Losses at different nsides are
+therefore not comparable.
+
+### 10.4 Cost on garoupe and layout
+
+Ten members on two T4, two MPI groups of five (`--groups 2`, 4 host threads
+per rank, `--gpu-fields recompute`, `STL_GPU_CACHE_MB=1536`).  Two ranks
+do not fit on one T4 at 1024: 12.4-13.2 GB per rank, of which 3.0 GB of
+decimation rows, the SC fields, the harmonic transients and the Minkowski
+states of the five members.  The third T4 stays free.  One evaluation
+takes 177 s:
+
+| Term (5 members per GPU) | s / evaluation |
+|---|---|
+| SC of g | 60.7 |
+| SC of kappa | 53.5 |
+| Minkowski functionals (forward 21.6, reverse 23.6) | 45.1 |
+| C_l and PDF (forward 5.6, reverse 4.6) | 10.2 |
+| physical map and chain on the host | 7.4 |
+
+Setup 3.7 min, host memory 10.9 GB per rank.  The 2500 iterations of the
+source (about 2900 evaluations) would take about 6 days.  The first
+segment runs at most 400 iterations / 450 evaluations (about 22 h, from
+31 Oct 09:02).  A later segment restarts from its Gaussian maps
+(`--init`, the L-BFGS history is lost) or moves to an A100.
