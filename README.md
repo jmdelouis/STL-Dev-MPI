@@ -285,7 +285,7 @@ until they are redrawn in the paper's style.
   `campeti_mf_populations_n1024.pdf`, `campeti_sc_populations_n1024.pdf` and
   the residual table `campeti_populations_n1024.txt`, copies (renamed with
   the `campeti_` prefix) of `benchmarks/campeti_n1024_a100/plots/` on branch
-  `claude/campeti-1024-plots` (PR #7, head 065ad2b, not merged on 2 Nov),
+  `claude/campeti-1024-plots` (PR #7, head 065ad2b, merged into main on 2 Nov, 679952f),
   section 8.3 of `docs/campeti_production_1024.md` there. That branch also
   adds the `stl-stats` binary and the scripts `plots/scripts/` that the
   appendix cites. Populations: r000-r009 (target), the A100 run 2570602,
