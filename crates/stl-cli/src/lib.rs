@@ -1129,6 +1129,91 @@ pub fn exists(p: &Path) -> bool {
     p.exists()
 }
 
+pub const STATS_USAGE: &str = "\
+stl-stats --out STATS.json [--norm MAP] [engine options] -- MAP [MAP ...]
+
+  --out FILE     JSON: the plan (family, scales, orientations, native level) and, per map, its
+                 moments and statistics (re, im), with the engine of stl-synth
+  --norm MAP     standardise every map with the mean and std of MAP (e.g. the target), so that
+                 the statistics of all the maps are in the same units; default: its own moments
+  engine options of stl-synth: --J, --L, --kernel-size, --fewer, --block-pixels, --conv-chunk,
+                 --ranks, --gpu, --gpu-block-rows, --gpu-cache, --gpu-conv, --gpu-fields, --quiet
+";
+
+/// `stl-stats`: the ScatCov statistics of `maps` (NESTED, one nside) with
+/// the plan and the engine of `stl-synth` (`args`), every map standardised
+/// by the moments of `norm` or by its own.
+pub fn statistics_of_maps<C: Comm>(args: &Args, maps: &[PathBuf], norm: Option<&Path>, comm: &C) -> Result<serde_json::Value, String> {
+    let npix = map_len(&maps[0])?;
+    let nside = nside_of(npix)?;
+    let j = args.j.unwrap_or_else(|| (64 - (nside as u64).leading_zeros() as usize).saturating_sub(2).max(1));
+    let mut geo = LocalGeometry::new(nside, args.kernel_size, args.l, Gauge::Cosmo, args.block_pixels);
+    geo.conv_chunk = args.conv_chunk;
+    let cfg = EngineConfig::new(j, args.fewer);
+    let plan = build_plan(j, args.l, &cfg.j_to_dg, 1, None, &Family::ALL);
+    let started = Instant::now();
+    let dummy = vec![Complex64::new(0.0, 0.0); plan.len()];
+    #[allow(unused_mut)]
+    let mut probe = Objective::new(&geo, &cfg, &plan, &dummy, 1, 1, comm);
+    #[allow(unused_mut)]
+    let mut gpu_info = serde_json::Value::Null;
+    #[cfg(feature = "gpu")]
+    let _device = if args.gpu {
+        let (ev, info) = gpu::evaluator(args, &geo, &cfg, &plan, &probe.part, comm.rank(), 1)?;
+        probe.set_evaluator(Box::new(ev.share(&plan, 1)));
+        gpu_info = info;
+        Some(ev)
+    } else {
+        None
+    };
+    let setup_seconds = started.elapsed().as_secs_f64();
+    let (s, e) = probe.owned();
+    let (s, e) = (s as usize, e as usize);
+    // Owned slice of a map and its global mean and std.
+    let read = |path: &Path| -> Result<(Vec<f64>, f64, f64), String> {
+        if map_len(path)? != npix {
+            return Err(format!("{}: not the nside of {}", path.display(), maps[0].display()));
+        }
+        let raw = read_map_range(path, s, e)?;
+        let mean = global_sum(comm, raw.iter().sum()) / npix as f64;
+        let std = (global_sum(comm, raw.iter().map(|x| (x - mean) * (x - mean)).sum()) / npix as f64).sqrt();
+        Ok((raw, mean, std))
+    };
+    let fixed = norm.map(|p| read(p).map(|(_, m, s)| (m, s))).transpose()?;
+    let mut out = Vec::with_capacity(maps.len());
+    for path in maps {
+        let (raw, mean, std) = read(path)?;
+        let (m0, s0) = fixed.unwrap_or((mean, std));
+        let x: Vec<f64> = raw.iter().map(|v| (v - m0) / s0).collect();
+        let t = Instant::now();
+        let st = probe.statistics(&x);
+        let seconds = t.elapsed().as_secs_f64();
+        if comm.rank() == 0 && !args.quiet {
+            eprintln!("[stl-stats] {}: {seconds:.1} s", path.display());
+        }
+        out.push(serde_json::json!({
+            "file": path, "mean": mean, "std": std, "seconds": seconds,
+            "re": st.iter().map(|c| c.re).collect::<Vec<_>>(), "im": st.iter().map(|c| c.im).collect::<Vec<_>>(),
+        }));
+    }
+    let plan_json: Vec<serde_json::Value> = plan
+        .iter()
+        .map(|c| {
+            serde_json::json!({"family": c.family.name(), "native_dg": c.native_dg,
+                "j1": c.j1, "j2": c.j2, "j3": c.j3, "l1": c.l1, "l2": c.l2, "l3": c.l3})
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "nside": nside, "J": j, "L": args.l, "kernel_size": args.kernel_size, "fewer": args.fewer,
+        "normalisation": match (norm, fixed) {
+            (Some(p), Some((m, s))) => serde_json::json!({"file": p, "mean": m, "std": s}),
+            _ => serde_json::json!("own moments"),
+        },
+        "ranks": comm.size(), "gpu": gpu_info, "setup_seconds": setup_seconds,
+        "seconds": started.elapsed().as_secs_f64(), "plan": plan_json, "maps": out,
+    }))
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::Args;

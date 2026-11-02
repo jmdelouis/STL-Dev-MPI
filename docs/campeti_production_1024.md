@@ -351,3 +351,47 @@ Two features of the method explain this:
 
 A clip at the references' extremes, or a PDF in finer or logarithmic bins
 in the tails, would change P. Campeti's loss; that is his call.
+
+### 8.3 Figures: maps, Minkowski functionals, C_l, scattering coefficients
+
+`benchmarks/campeti_n1024_a100/plots/` holds four figures, each as a PNG
+and a vector PDF sized for A&A (one or two columns).  Each compares three
+populations: the target (r000-r009), this run, and the recipe's
+nside-1024 ensemble (Datarmor job 7775548, 600 iterations, trained on
+r000 alone).  Every figure is computed and drawn on garoupe by the scripts
+in `plots/scripts/`.
+
+| Figure | What it shows |
+|---|---|
+| `maps_mollweide_n1024`, `maps_gnomonic_n1024` | r000-r002 and members 0-2 of each ensemble, one logarithmic colour scale; zooms of 10 degrees on one patch |
+| `mf_populations_n1024` | V0, V1, V2 against the threshold at nside 64 to 1024 (4-children means), mean +- std of each population, and the residual (mean - mean of the target) / std of the target |
+| `cl_populations_n1024` | l(l+1) C_l / 2 pi in 40 logarithmic bands, and the same residuals |
+| `sc_populations_n1024` | S1(j), S2(j), and S3, S4 reduced (real part averaged over the orientations, divided by the S2 of the scales of the moduli); maps standardised by r000; the same residuals |
+
+r000 is drawn dashed in every panel, because it alone is the recipe's
+target.  `populations_n1024.txt` gives the rms and the maximum of the
+residuals per family and level.  Its main lines:
+- **Scattering coefficients of kappa:**
+  - this run matches S1 and S2 of the population to 0.03 sigma, and S3 and S4 to 1.6 and 0.4 sigma rms;
+  - the recipe follows r000 in S1 and S2;
+  - the recipe's S3 and S4 of kappa are off at the fine scales, by up to 38 and 20 sigma.  The recipe constrains the scattering coefficients of the gaussianised field, and only the mean, variance, S1 and S2 of kappa.
+- **C_l:** this run is high at l > 1500, by up to 4 sigma.  This is the excess power of level 1024 in section 8.2.
+- **Minkowski functionals:** both ensembles deviate by 1 to 3 sigma rms per level; r000 itself deviates by 0.7 to 1.8.
+  - This run is worse than the recipe in V0 and V2 at nside 512: 2.6 and 2.0, against 1.3 and 1.0.
+  - The recipe is worse in V1 at nside 128 and 1024: 2.2 and 2.8, against 1.1 and 1.8.
+
+Commands, on garoupe:
+
+    # statistics of the 30 maps on one T4 (2 min of setup, then 9 s per map)
+    stl-stats --out sc_n1024.json --norm $R/r000_nside1024_nested.npy --gpu -- \
+        $R/r00?_nside1024_nested.npy $A/synthesis_m00?_nested.npy $D/synthesis_m00?_nested.npy
+    # C_l and Minkowski functionals per level (47 min on 4 processes)
+    python measure_populations.py CACHE $R "Campeti A100=$A" "Recipe Datarmor=$D" --procs 4
+    python plot_maps.py OUT $R "Campeti A100=$A" "Recipe Datarmor=$D"
+    python plot_populations.py CACHE sc_n1024.json OUT $R "Campeti A100=$A" "Recipe Datarmor=$D"
+
+`R` holds the realisations, `A` the members of this run (linked as
+`synthesis_mMMM_nested.npy`), and `D` those of the recipe, copied from
+hpc `/scratch/jmdeloui/stl-mpi-ens/datarmor/ens_n1024_7775548`.  The
+statistics and caches are archived on hpc in
+`/scratch/jmdeloui/stl-campeti/plots1024/jmdeloui-plots1024-data.tgz`.
