@@ -1,0 +1,27 @@
+nside 1024: populations against the target population r000-r009 (mean and std over the 10 realizations, ddof 1)
+residual z = (mean of the population - mean of the target) / std of the target; columns: rms and max |z|
+r000 alone is the target of the recipe (Campeti's method targets the ten realizations)
+Minkowski functionals of kappa degraded to each level (4-children means, no smoothing), nu in units of the level's std
+  level 64 V0                  | r000:  0.97   1.64 | Campeti A100:  1.07   2.52 | Recipe Datarmor:  1.26   2.56
+  level 64 V1                  | r000:  0.96   2.11 | Campeti A100:  0.70   1.76 | Recipe Datarmor:  1.26   3.76
+  level 64 V2                  | r000:  0.96   2.09 | Campeti A100:  0.89   2.56 | Recipe Datarmor:  1.13   2.24
+  level 128 V0                 | r000:  1.42   1.74 | Campeti A100:  2.01   2.70 | Recipe Datarmor:  1.43   2.19
+  level 128 V1                 | r000:  1.03   1.98 | Campeti A100:  1.10   2.44 | Recipe Datarmor:  2.22   5.81
+  level 128 V2                 | r000:  0.94   1.91 | Campeti A100:  0.75   2.31 | Recipe Datarmor:  1.72   3.85
+  level 256 V0                 | r000:  1.61   2.07 | Campeti A100:  2.25   3.39 | Recipe Datarmor:  2.26   3.08
+  level 256 V1                 | r000:  1.09   1.89 | Campeti A100:  1.21   2.58 | Recipe Datarmor:  1.52   2.64
+  level 256 V2                 | r000:  1.01   1.94 | Campeti A100:  1.17   2.78 | Recipe Datarmor:  1.55   3.48
+  level 512 V0                 | r000:  1.76   1.97 | Campeti A100:  2.61   3.13 | Recipe Datarmor:  1.31   1.75
+  level 512 V1                 | r000:  1.02   1.49 | Campeti A100:  1.49   4.45 | Recipe Datarmor:  1.09   2.09
+  level 512 V2                 | r000:  0.85   1.84 | Campeti A100:  1.98   5.67 | Recipe Datarmor:  1.04   1.95
+  level 1024 V0                | r000:  1.69   1.94 | Campeti A100:  1.75   3.10 | Recipe Datarmor:  1.16   1.59
+  level 1024 V1                | r000:  0.89   1.54 | Campeti A100:  1.82   3.83 | Recipe Datarmor:  2.80   3.50
+  level 1024 V2                | r000:  0.71   1.74 | Campeti A100:  2.11   7.27 | Recipe Datarmor:  2.42   5.46
+C_l in 40 logarithmic bands, l = 2 ... 3 nside - 1
+  C_l bands                    | r000:  0.49   1.86 | Campeti A100:  0.97   4.12 | Recipe Datarmor:  0.64   1.58
+  C_l bands l >= 31            | r000:  0.20   0.62 | Campeti A100:  1.19   4.12 | Recipe Datarmor:  0.65   1.58
+reduced scattering coefficients (J = 9, L = 4, kernel 5), maps standardised by r000
+  S1                           | r000:  0.59   1.40 | Campeti A100:  0.02   0.05 | Recipe Datarmor:  0.58   1.40
+  S2                           | r000:  0.50   1.31 | Campeti A100:  0.03   0.04 | Recipe Datarmor:  0.50   1.31
+  S3                           | r000:  1.26   1.85 | Campeti A100:  1.62   5.77 | Recipe Datarmor:  8.52  37.93
+  S4                           | r000:  1.22   2.03 | Campeti A100:  0.42   1.57 | Recipe Datarmor:  4.79  19.89
