@@ -265,7 +265,7 @@ until they are redrawn in the paper's style.
   production run", and the paragraph "The objective with several reference
   maps at nside 1024" of section 6.3, preliminary):
   `docs/campeti_production_1024.md` on branch
-  `claude/campeti-production-1024` (495089d, not merged on 2 Nov), with the
+  `claude/campeti-production-1024` (495089d, merged into main on 2 Nov, ce258aa), with the
   judgement outputs in `benchmarks/campeti_n1024_a100/` (cv10, mf_levels,
   tails) and `tools/cv10.py`, `tools/tails.py` there. hpc job 2570602 (one
   A100, commit 223ace8, now in main through PR #5, 521fc8a): ten members,
