@@ -151,17 +151,47 @@ fn torch_linspace(start: f64, end: f64, steps: usize) -> Vec<f64> {
     (0..steps).map(|i| if i < half { start + step * i as f64 } else { end - step * (steps - i - 1) as f64 }).collect()
 }
 
+/// Ring weights below `exp(-CUT^2 / 2)` (about 5e-32 at 12 widths) are
+/// not computed: their contribution is far below the rounding of a bin.
+const CUT: f64 = 12.0;
+
+/// Pixels per chunk of the threaded passes (sums added in chunk order).
+const CHUNK: usize = 1 << 15;
+
+/// `f(lo, hi)` over the chunks of `0..n` on the available threads, results
+/// in chunk order.
+fn chunks<T: Send>(n: usize, f: impl Fn(usize, usize) -> T + Sync) -> Vec<T> {
+    let count = n.div_ceil(CHUNK).max(1);
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(count);
+    let per = count.div_ceil(threads);
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                let f = &f;
+                s.spawn(move || (t * per..((t + 1) * per).min(count)).map(|c| f(c * CHUNK, ((c + 1) * CHUNK).min(n))).collect::<Vec<T>>())
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
+}
+
 /// Cross spectra in Gaussian log rings of the radial frequency: bins
 /// log-spaced from `1 / 2^J` to `0.5 / 2^Jmin` cycles per pixel,
 /// `PS[c1, c2, j] = sum_k m_j(k) X_c1(k) conj X_c2(k) / sum_k m_j(k)` with
-/// the orthonormal transform `X`.
+/// the orthonormal transform `X` and
+/// `m_j(k) = exp(-(log f_k - log c_j)^2 / (2 w_j^2))` (zero at `f = 0`).
+/// STL-Dev stores the `n_bins x H x W` masks (4 GB at 2048^2); here the
+/// weights of a pixel are computed when needed, for the bins within
+/// `CUT` widths.
 pub struct GaussianRings {
     pub fft: Fft2,
     pub n_bins: usize,
     /// Bin centres (cycles per pixel).
     pub centers: Vec<f64>,
-    /// `[n_bins, H * W]`, unshifted frequency layout.
-    masks: Vec<Vec<f64>>,
+    lc: Vec<f64>,
+    ls: Vec<f64>,
+    /// `log f` per pixel (unshifted layout), NaN at `f = 0`.
+    lr: Vec<f64>,
     norm: Vec<f64>,
 }
 
@@ -176,24 +206,46 @@ impl GaussianRings {
         let lc: Vec<f64> = (0..n_bins).map(|i| 0.5 * (edges[i] + edges[i + 1])).collect();
         let ls: Vec<f64> = (0..n_bins).map(|i| (edges[i + 1] - edges[i]).abs()).map(|s| if s > 0.0 { s } else { 1.0 }).collect();
         let freq = |k: usize, n: usize| integer_frequency(k, n) as f32 * (1.0 / n as f32);
-        let mut masks = vec![vec![0.0; h * w]; n_bins];
+        let mut lr = Vec::with_capacity(h * w);
         for r in 0..h {
             let fy = freq(r, h);
             for c in 0..w {
                 let fx = freq(c, w);
                 let radial = (fx * fx + fy * fy).sqrt() as f64;
-                if radial == 0.0 {
-                    continue;
-                }
-                let lr = radial.ln();
-                for b in 0..n_bins {
-                    let d = lr - lc[b];
-                    masks[b][r * w + c] = ((-0.5 * (d * d)) / (ls[b] * ls[b])).exp();
-                }
+                lr.push(if radial == 0.0 { f64::NAN } else { radial.ln() });
             }
         }
-        let norm = masks.iter().map(|m| m.iter().sum()).collect();
-        GaussianRings { fft: Fft2::new(h, w), n_bins, centers: lc.iter().map(|c| c.exp()).collect(), masks, norm }
+        let mut g = GaussianRings { fft: Fft2::new(h, w), n_bins, centers: lc.iter().map(|c| c.exp()).collect(), lc, ls, lr, norm: Vec::new() };
+        let parts = chunks(h * w, |a, b| {
+            let mut s = vec![0.0; n_bins];
+            (a..b).for_each(|p| g.weights(p, |k, m| s[k] += m));
+            s
+        });
+        g.norm = vec![0.0; n_bins];
+        for s in parts {
+            g.norm.iter_mut().zip(s).for_each(|(a, b)| *a += b);
+        }
+        g
+    }
+
+    /// `f(bin, m_bin(p))` for the bins of pixel `p` within `CUT` widths.
+    #[inline]
+    fn weights(&self, p: usize, mut f: impl FnMut(usize, f64)) {
+        let lr = self.lr[p];
+        if lr.is_nan() {
+            return;
+        }
+        let wmax = self.ls.iter().fold(0f64, |m, &v| m.max(v));
+        let lo = self.lc.partition_point(|&c| c < lr - CUT * wmax);
+        for k in lo..self.n_bins {
+            let d = lr - self.lc[k];
+            if d < -CUT * wmax {
+                break;
+            }
+            if d.abs() <= CUT * self.ls[k] {
+                f(k, ((-0.5 * (d * d)) / (self.ls[k] * self.ls[k])).exp());
+            }
+        }
     }
 
     /// Number of values for `channels` channels: pairs `c1 <= c2`, bins.
@@ -210,10 +262,19 @@ impl GaussianRings {
         let mut out = Vec::with_capacity(self.count(channels));
         for c1 in 0..channels {
             for c2 in c1..channels {
-                for (m, nrm) in self.masks.iter().zip(&self.norm) {
-                    let s = m.iter().zip(xs[c1].iter().zip(&xs[c2])).fold(C64::default(), |s, (&w, (a, b))| s + w * a * b.conj());
-                    out.push(s / nrm);
+                let parts = chunks(n, |a, b| {
+                    let mut s = vec![C64::default(); self.n_bins];
+                    for p in a..b {
+                        let v = xs[c1][p] * xs[c2][p].conj();
+                        self.weights(p, |k, m| s[k] += m * v);
+                    }
+                    s
+                });
+                let mut s = vec![C64::default(); self.n_bins];
+                for part in parts {
+                    s.iter_mut().zip(part).for_each(|(a, b)| *a += b);
                 }
+                out.extend(s.iter().zip(&self.norm).map(|(v, nrm)| v / nrm));
             }
         }
         (out, xs)
@@ -227,16 +288,20 @@ impl GaussianRings {
         let mut k = 0;
         for c1 in 0..channels {
             for c2 in c1..channels {
-                let mut gk = vec![C64::default(); n];
-                for (b, (m, nrm)) in self.masks.iter().zip(&self.norm).enumerate() {
-                    let gb = g[k + b] / nrm;
-                    gk.iter_mut().zip(m).for_each(|(a, &w)| *a += gb * w);
-                }
+                let gb: Vec<C64> = (0..self.n_bins).map(|b| g[k + b] / self.norm[b]).collect();
                 k += self.n_bins;
-                for p in 0..n {
-                    let (a, b) = (xs[c1][p], xs[c2][p]);
-                    gx[c1][p] += gk[p] * b;
-                    gx[c2][p] += gk[p].conj() * a;
+                let parts = chunks(n, |a, b| {
+                    let mut out = Vec::with_capacity(2 * (b - a));
+                    for p in a..b {
+                        let mut gk = C64::default();
+                        self.weights(p, |j, m| gk += gb[j] * m);
+                        out.push((gk * xs[c2][p], gk.conj() * xs[c1][p]));
+                    }
+                    out
+                });
+                for (p, (u, v)) in parts.into_iter().flatten().enumerate() {
+                    gx[c1][p] += u;
+                    gx[c2][p] += v;
                 }
             }
         }

@@ -253,19 +253,25 @@ impl PlanarEngine {
         for n in 0..levels {
             let tiles = self.tiles(n);
             let range = self.ranges[n].clone();
-            let outs = self.run(&tiles, |f| {
-                let t = self.tile_fields(n, f, &maps[n], &m);
-                let sums = range.clone().map(|i| t.partial(self, &self.plan[i])).collect();
-                ForwardOut { sums, pieces: self.push(&t) }
-            });
-            for out in outs {
-                for (k, v) in range.clone().zip(out.sums) {
-                    stats[k] += v;
-                }
-                for (np, win, piece) in out.pieces {
-                    grid::accumulate(&mut m[n][np - n - 1], &win, &piece, c * ll);
-                }
-            }
+            // Tiles read m[d][n] (d < n), the sink adds into m[n][*].
+            let (finer, rest) = m.split_at_mut(n);
+            let own = &mut rest[0];
+            self.run(
+                &tiles,
+                |f| {
+                    let t = self.tile_fields(n, f, &maps[n], finer);
+                    let sums = range.clone().map(|i| t.partial(self, &self.plan[i])).collect();
+                    ForwardOut { sums, pieces: self.push(&t) }
+                },
+                |out: ForwardOut| {
+                    for (k, v) in range.clone().zip(out.sums) {
+                        stats[k] += v;
+                    }
+                    for (np, win, piece) in out.pieces {
+                        grid::accumulate(&mut own[np - n - 1], &win, &piece, c * ll);
+                    }
+                },
+            );
         }
         (stats, Pyramid { maps, m })
     }
@@ -279,21 +285,28 @@ impl PlanarEngine {
         let mut gmaps: Vec<Vec<f64>> = (0..levels).map(|n| vec![0.0; c * self.pixels(n)]).collect();
         for n in (0..levels).rev() {
             let tiles = self.tiles(n);
-            let outs = self.run(&tiles, |f| {
-                let t = self.tile_fields(n, f, &pyr.maps[n], &pyr.m);
-                let mut g = t.grads(c, n);
-                for i in self.ranges[n].clone() {
-                    t.cotangent(self, &self.plan[i], cot[i], &mut g);
-                }
-                self.finish_reverse(&t, g, &gm)
-            });
-            for out in outs {
-                for (d, win, v) in out.gm {
-                    grid::accumulate(&mut gm[d][n - d - 1], &win, &v, c * ll);
-                }
-                grid::accumulate(&mut gmaps[n], &out.dom.0, &out.dom.1, c);
-                grid::accumulate(&mut gmaps[n], &out.own.0, &out.own.1, c);
-            }
+            // Tiles read gm[n][*] (complete), the sink adds into gm[d][n] (d < n).
+            let (finer, rest) = gm.split_at_mut(n);
+            let coarse = &rest[0];
+            let gmap = &mut gmaps[n];
+            self.run(
+                &tiles,
+                |f| {
+                    let t = self.tile_fields(n, f, &pyr.maps[n], &pyr.m);
+                    let mut g = t.grads(c, n);
+                    for i in self.ranges[n].clone() {
+                        t.cotangent(self, &self.plan[i], cot[i], &mut g);
+                    }
+                    self.finish_reverse(&t, g, coarse)
+                },
+                |out: ReverseOut| {
+                    for (d, win, v) in out.gm {
+                        grid::accumulate(&mut finer[d][n - d - 1], &win, &v, c * ll);
+                    }
+                    grid::accumulate(gmap, &out.dom.0, &out.dom.1, c);
+                    grid::accumulate(gmap, &out.own.0, &out.own.1, c);
+                },
+            );
         }
         let mut g = gmaps.pop().unwrap();
         for n in (0..levels - 1).rev() {
@@ -305,21 +318,22 @@ impl PlanarEngine {
         g
     }
 
-    /// `f` over the tiles, by groups of `threads`, results in tile order.
-    fn run<T: Send>(&self, tiles: &[Window], f: impl Fn(&Window) -> T + Sync) -> Vec<T> {
-        if self.threads == 1 || tiles.len() == 1 {
-            return tiles.iter().map(&f).collect();
-        }
-        let mut out = Vec::with_capacity(tiles.len());
+    /// `f` over the tiles by groups of `threads`, each group's results
+    /// handed to `sink` in tile order before the next group starts (the
+    /// transients stay bounded by one group of tiles).
+    fn run<T: Send>(&self, tiles: &[Window], f: impl Fn(&Window) -> T + Sync, mut sink: impl FnMut(T)) {
         for group in tiles.chunks(self.threads) {
+            if group.len() == 1 {
+                sink(f(&group[0]));
+                continue;
+            }
             let f = &f;
             let part: Vec<T> = std::thread::scope(|s| {
                 let hs: Vec<_> = group.iter().map(|t| s.spawn(move || f(t))).collect();
                 hs.into_iter().map(|h| h.join().unwrap()).collect()
             });
-            out.extend(part);
+            part.into_iter().for_each(&mut sink);
         }
-        out
     }
 
     fn tile_fields(&self, n: usize, f: &Window, map: &[f64], m: &[Vec<Vec<f64>>]) -> Tile {
@@ -380,8 +394,9 @@ impl PlanarEngine {
     }
 
     /// Cotangent on `F` of `|z_n|` from the stored cotangents `gm[n][n']`
-    /// of the coarser levels (complete): the transposed pieces, Horner-wise.
-    fn pull(&self, t: &Tile, gm: &[Vec<Vec<f64>>]) -> Option<Vec<f64>> {
+    /// of the coarser levels (complete; `gm` is `gm[n]`): the transposed
+    /// pieces, Horner-wise.
+    fn pull(&self, t: &Tile, gm: &[Vec<f64>]) -> Option<Vec<f64>> {
         let n = t.n;
         let top = self.levels() - 1;
         if n == top {
@@ -393,11 +408,11 @@ impl PlanarEngine {
             let next = wins.last().unwrap().coarse();
             wins.push(next);
         }
-        let mut g = grid::read(&gm[n][top - n - 1], &wins[top - n], planes);
+        let mut g = grid::read(&gm[top - n - 1], &wins[top - n], planes);
         for k in (n..top).rev() {
             let back = decimate_adjoint(&g, &wins[k - n], planes);
             g = if k > n {
-                let mut own = grid::read(&gm[n][k - n - 1], &wins[k - n], planes);
+                let mut own = grid::read(&gm[k - n - 1], &wins[k - n], planes);
                 own.iter_mut().zip(back).for_each(|(a, b)| *a += b);
                 own
             } else {
@@ -407,7 +422,8 @@ impl PlanarEngine {
         Some(g)
     }
 
-    fn finish_reverse(&self, t: &Tile, g: Grads, gm: &[Vec<Vec<f64>>]) -> ReverseOut {
+    /// `gm`: the stored cotangents `gm[n][n']` of the tile's level.
+    fn finish_reverse(&self, t: &Tile, g: Grads, gm: &[Vec<f64>]) -> ReverseOut {
         let (c, ll, n) = (self.channels, L, t.n);
         let (fh, fw) = (t.f.rows.len, t.f.cols.len);
         let mut gz = g.z;
