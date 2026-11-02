@@ -24,8 +24,17 @@ pub fn nside_of(npix: usize) -> Result<i64> {
 
 /// A `.npy` array as f64 (any float or integer dtype), flattened.
 pub fn read_npy(path: &Path) -> Result<Vec<f64>> {
+    read_npy_shape(path).map(|(_, v)| v)
+}
+
+/// A `.npy` array as f64 with its shape (C order).
+pub fn read_npy_shape(path: &Path) -> Result<(Vec<usize>, Vec<f64>)> {
     let bytes = std::fs::read(path).map_err(err(path))?;
     let npy = npyz::NpyFile::new(&bytes[..]).map_err(err(path))?;
+    if npy.order() != npyz::Order::C {
+        return Err(format!("{}: Fortran-ordered arrays are not supported", path.display()));
+    }
+    let shape: Vec<usize> = npy.shape().iter().map(|&s| s as usize).collect();
     let dtype = npy.dtype();
     let npyz::DType::Plain(ts) = dtype else { return Err(format!("{}: structured arrays are not maps", path.display())) };
     let out: Vec<f64> = match (ts.type_char(), ts.size_field()) {
@@ -35,12 +44,19 @@ pub fn read_npy(path: &Path) -> Result<Vec<f64>> {
         (npyz::TypeChar::Int, 4) => npy.into_vec::<i32>().map_err(err(path))?.into_iter().map(f64::from).collect(),
         other => return Err(format!("{}: unsupported dtype {other:?}", path.display())),
     };
-    Ok(out)
+    Ok((shape, out))
 }
 
 /// Write a flat little-endian float64 `.npy` (format 1.0).
 pub fn write_npy(path: &Path, values: &[f64]) -> Result<()> {
-    let mut header = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({},), }}", values.len());
+    write_npy_shape(path, values, &[values.len()])
+}
+
+/// Write a little-endian float64 `.npy` of the given shape (C order).
+pub fn write_npy_shape(path: &Path, values: &[f64], shape: &[usize]) -> Result<()> {
+    assert_eq!(shape.iter().product::<usize>(), values.len(), "npy shape");
+    let dims: String = shape.iter().map(|s| format!("{s},")).collect::<Vec<_>>().join(" ");
+    let mut header = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({dims}), }}");
     // Magic (6) + version (2) + length (2) + header + '\n', aligned on 64 bytes.
     while (10 + header.len() + 1) % 64 != 0 {
         header.push(' ');

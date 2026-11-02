@@ -1,0 +1,13 @@
+{
+ "kind": "stats",
+ "name": "stats_32x32_J3_C2_fewer",
+ "H": 32,
+ "W": 32,
+ "J": 3,
+ "L": 4,
+ "C": 2,
+ "B": 1,
+ "fewer": true,
+ "n_bins": 2,
+ "n": 3020
+}

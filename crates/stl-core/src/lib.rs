@@ -15,6 +15,7 @@ pub mod lbfgs;
 pub mod local;
 pub mod neighbours;
 pub mod plan;
+pub mod planar;
 pub mod sht;
 pub mod stencil;
 pub mod wavelet;

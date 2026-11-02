@@ -24,6 +24,7 @@ mod level_power;
 mod marginal;
 pub mod minkowski;
 pub mod ensemble;
+pub mod planar;
 use kappa::Transform;
 use kurtosis::Kurtosis;
 use level_power::LevelPower;
