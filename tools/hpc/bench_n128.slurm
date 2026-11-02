@@ -48,10 +48,11 @@ run() {
     echo "=== $name $(date +%T): $*"
     nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,noheader,nounits -lms 200 > "gpu_$name.csv" 2>&1 &
     local mon=$!
-    /usr/bin/time -v "$@" > "$name.log" 2> "$name.err"
-    echo "exit $?"
+    # No GNU time on the GPU nodes: both codes report their own peak RSS.
+    local t0=$SECONDS
+    "$@" > "$name.log" 2> "$name.err"
+    echo "exit $?, $((SECONDS - t0)) s wall"
     kill $mon 2>/dev/null; wait $mon 2>/dev/null
-    grep -E "Maximum resident|Elapsed \(wall" "$name.err"
     tail -2 "$name.log"
 }
 
@@ -59,7 +60,7 @@ for r in $RUNS; do
     case $r in
     rust_time) run rust_time mpirun -np 1 --bind-to none "$BIN" $COMMON --gpu --gpu-fields keep --gpu-terms device --gpu-cache full --out rust_time ;;
     rust_mem) run rust_mem mpirun -np 1 --bind-to none "$BIN" $COMMON --gpu --gpu-fields recompute --gpu-cache none --gpu-block-rows 1024 --block-pixels 1024 --out rust_mem ;;
-    rust_cpu) run rust_cpu mpirun -np "$T" --bind-to core "$BIN" $COMMON --block-pixels 1024 --out rust_cpu ;;
+    rust_cpu) run rust_cpu mpirun -np "$T" --oversubscribe --bind-to core "$BIN" $COMMON --block-pixels 1024 --out rust_cpu ;;
     legacy_batch) run legacy_batch "$PY" "$G/src/tools/bench_n128/legacy_synth.py" --stl-dev "$STLDEV" --target "$TARGET" --init 'init_m{m}.npy' --ensemble "$B" --L 4 --niter "$NITER" --mode batch --device cuda --threads "$T" --out legacy_batch.json ;;
     legacy_sequential) run legacy_sequential "$PY" "$G/src/tools/bench_n128/legacy_synth.py" --stl-dev "$STLDEV" --target "$TARGET" --init 'init_m{m}.npy' --ensemble "$B" --L 4 --niter "$NITER" --mode sequential --device cuda --threads "$T" --out legacy_sequential.json ;;
     esac

@@ -1,0 +1,11 @@
+all: loss 4.500650385330315e-02, autograd -2.195140094114183e-04, finite differences -2.195140088362336e-04, rel 2.6e-09
+mean: loss 1.601674827608102e-06, autograd -2.854214330960921e-06, finite differences -2.854214331015536e-06, rel 1.9e-11
+var: loss 4.925548740513482e-06, autograd -9.999407113196342e-06, finite differences -9.999407113547850e-06, rel 3.5e-11
+S1: loss 4.184992419059315e-02, autograd -2.305411274155919e-04, finite differences -2.305411271563560e-04, rel 1.1e-09
+S2: loss 1.076642015221072e-03, autograd -1.206091692182575e-05, finite differences -1.206091692182837e-05, rel 2.2e-13
+S3: loss 1.747332849838074e-03, autograd -5.206797307478407e-06, finite differences -5.206797307113142e-06, rel 7.0e-11
+S4: loss 3.260775740827328e-04, autograd -6.637308368683843e-07, finite differences -6.637308385077946e-07, rel 2.5e-09
+Rust vs legacy gradient: |d| / |g| 2.73e-13, max |d| / max |g| 1.25e-12, cos 0.9999999999999997
+nside 128 J 6 L 4 B 4: 3970 coefficients, loss 4.500650385330335e-2
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:17.06
+	Maximum resident set size (kbytes): 269644
