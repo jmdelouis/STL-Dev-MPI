@@ -24,7 +24,7 @@ torch_run() {  # name device target ntarget nbatch
     if [ "$2" = cpu ]; then
         (ulimit -v $((56 * 1024 * 1024)); CUDA_VISIBLE_DEVICES="" timeout 3600 $TORCH --target "$3" --ntarget "$4" --nbatch "$5" --evals 3 --threads 12 --out "$out" > "$out.log" 2>&1)
     else
-        CUDA_VISIBLE_DEVICES=0 timeout 3600 $TORCH --target "$3" --ntarget "$4" --nbatch "$5" --evals 3 --out "$out" > "$out.log" 2>&1
+        CUDA_VISIBLE_DEVICES=${GPU:-0} timeout 3600 $TORCH --target "$3" --ntarget "$4" --nbatch "$5" --evals 3 --out "$out" > "$out.log" 2>&1
     fi
     [ -f "$out" ] || echo "{\"failed\": \"$(tail -1 "$out.log" | tr -d '"\' | cut -c1-200)\"}" > "$out"
 }
