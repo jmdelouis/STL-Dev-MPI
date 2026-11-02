@@ -8,19 +8,23 @@ Short answer: **yes, mostly through Rust at 256^2, and through the pyramid
 beyond.**  For the example itself (10 x 256^2), the Rust engine evaluates
 STL-Dev's loss and gradient in 0.46 s on 12 CPU cores with 0.3 GB, against
 5.0 s and 4.5 GB for STL-Dev on the same cores (11x faster, 15x less
-memory) and 0.64 s / 2.8 GB on a T4.  Memory is not the issue at that
-size; it becomes the issue quickly: STL-Dev's autograd keeps about 7-9
-KB per pixel (CPU) and does not fit a 15 GB T4 at one 2048^2 image,
-while the block-wise engine stays near 0.2-0.4 KB per pixel and runs a
-4096^2 image in 29 s with 2.9 GB.  The Rust results match STL-Dev to
-1e-10, and a full 100-iteration synthesis reproduces STL-Dev's loss
-history to 3e-8.
+memory).  On a T4 the Rust engine takes 0.18 s, against 0.64 s for
+STL-Dev on the same T4 (3.5x).  Memory is not the issue at that size; it
+becomes the issue quickly: STL-Dev's autograd keeps about 7-9 KB per
+pixel (CPU) and does not fit a 15 GB T4 at one 2048^2 image, while the
+block-wise engine stays near 0.2-0.4 KB per pixel: one 4096^2 image in
+29 s with 2.9 GB on the CPU, in 4.9 s with 1.9 GB on a T4.  The Rust
+results match STL-Dev to 1e-10, the device ones the CPU ones to 1e-12,
+and a full 100-iteration synthesis reproduces STL-Dev's loss history to
+3e-8.
 
 Code: `stl_core::planar` (`kernels`, `grid`, `engine`, `spectrum`),
+`stl_gpu::planar` and `planar.cu` (the device engine, section 5b),
 `stl_cli::planar` and the binary `stl-synth2d`; fixtures
 `fixtures/planar` from `tools/dump_planar_reference.py`; tests
-`crates/stl-core/tests/planar.rs`, `crates/stl-cli/tests/planar.rs`;
-benchmark `tools/garoupe/bench_planar.sh`, `tools/bench_planar_torch.py`;
+`crates/stl-core/tests/planar.rs`, `crates/stl-cli/tests/planar.rs`,
+`crates/stl-gpu/tests/planar.rs`; benchmarks `tools/garoupe/bench_planar.sh`,
+`bench_planar_sc.sh`, `bench_planar_gpu.sh`, `tools/bench_planar_torch.py`;
 syntheses `tools/garoupe/synth_planar.sh`,
 `tools/run_planar_torch_synthesis.py`; figures `tools/plot_planar.py`.
 
@@ -193,19 +197,21 @@ the last two of three evaluations.  torch 2.7.1, float64, 12 threads on
 the CPU; STL-Dev on one T4 (FP64 is 1/32 of FP32 there).  Rust 12 threads,
 tiles of 64 unless stated.
 
-STL-Dev's complete loss (ScatCov and power spectrum):
+STL-Dev's complete loss (ScatCov and power spectrum).  CPU columns: peak
+resident memory; T4 columns: peak device memory (for Rust, everything in
+use on the device, CUDA context included):
 
-| images | STL-Dev CPU (12 threads) | STL-Dev T4 | Rust CPU (12 threads, tiles 64) |
-|---|---|---|---|
-| 10 x 256^2 (the example) | 5.0 s, 4.5 GB | 0.64 s, 2.8 GB device | **0.46 s, 0.30 GB** |
-| 10 x 512^2 | 31 s, 14.3 GB | 2.2 s, 11.9 GB device | **1.9 s, 0.82 GB** |
-| 1 x 1024^2 | 34 s, 9.2 GB | 1.1 s, 7.2 GB device | **1.3 s, 0.43 GB** |
-| 1 x 2048^2 | 79-294 s, 41.9 GB | out of memory (15 GB) | **5.2 s, 0.82 GB** |
-| 1 x 4096^2 | (would need ~150 GB) | - | **29 s, 2.9 GB** |
+| images | STL-Dev CPU (12 threads) | Rust CPU (12 threads, tiles 64) | STL-Dev T4 | Rust T4, fastest | Rust T4, smallest |
+|---|---|---|---|---|---|
+| 10 x 256^2 (the example) | 5.0 s, 4.5 GB | **0.46 s, 0.30 GB** | 0.64 s, 2.8 GB | **0.18 s, 0.31 GB** (tiles 64) | same |
+| 10 x 512^2 | 31 s, 14.3 GB | **1.9 s, 0.82 GB** | 2.2 s, 11.9 GB | **0.69 s, 1.39 GB** (tiles 256) | 0.70 s, 0.48 GB (tiles 64) |
+| 1 x 1024^2 | 34 s, 9.2 GB | **1.3 s, 0.43 GB** | 1.1 s, 7.2 GB | **0.29 s, 0.38 GB** (tiles 256) | 0.45 s, 0.28 GB (tiles 64) |
+| 1 x 2048^2 | 79-294 s, 41.9 GB | **5.2 s, 0.82 GB** | out of memory (15 GB) | **1.18 s, 0.72 GB** (tiles 256) | 1.92 s, 0.55 GB (tiles 64) |
+| 1 x 4096^2 | (would need ~150 GB) | **29 s, 2.9 GB** | - | **4.9 s, 1.9 GB** (tiles 256) | 8.2 s, 1.7 GB (tiles 64) |
 
 (The ensemble objective of section 4 adds the Minkowski functionals and
-the spectra of every image: 0.83 s / 0.46 GB at 10 x 256^2, 3.5 s / 1.5 GB
-at 10 x 512^2.)
+the spectra of every image: 0.83 s / 0.46 GB at 10 x 256^2 and 3.5 s / 1.5 GB
+at 10 x 512^2 on the CPU; 0.30 s and 1.14 s on a T4, everything resident.)
 
 Effect of the tile size in Rust (STL-Dev loss):
 
@@ -229,20 +235,55 @@ weights of a pixel when needed, for the bins within 12 widths (weights
 dropped below 5e-32).
 
 ScatCov-only loss (`compute_PS=False` / `--bins 0`,
-`tools/garoupe/bench_planar_sc.sh`): first measurement taken while another
-job loaded garoupe (load 10-16, GPU 0 shared), so upper bounds, the torch
-CPU ones strongly so; a clean rerun is queued:
+`tools/garoupe/bench_planar_sc.sh`, `bench_planar_gpu.sh`).  The 256^2 CPU
+row was measured on an idle machine; the other CPU rows while another job
+loaded garoupe's cores (load 6-16), so the torch CPU times there (98 s at
+10 x 512^2, 54 s at 1 x 1024^2, slower than with the spectrum on the idle
+machine) are upper bounds.  The T4 runs are on otherwise idle devices:
 
-| images | STL-Dev CPU | STL-Dev T4 | Rust CPU |
-|---|---|---|---|
-| 10 x 256^2 | 10.9 s, 4.1 GB | 0.52 s, 2.6 GB device | 0.45 s, 0.16 GB |
-| 10 x 512^2 | 63 s, 12.7 GB | out of memory (GPU shared) | 2.1 s, 0.36 GB |
-| 1 x 1024^2 | 11.1 s, 6.8 GB | 0.96 s, 4.1 GB device | 1.16 s, 0.31 GB |
-| 1 x 2048^2 | | | 4.0 s, 0.67 GB |
-| 1 x 4096^2 | | | 23 s, 2.2 GB |
+| images | STL-Dev CPU | Rust CPU | STL-Dev T4 | Rust T4, fastest | Rust T4, smallest |
+|---|---|---|---|---|---|
+| 10 x 256^2 | 5.4 s, 4.3 GB | **0.43 s, 0.17 GB** | 0.53 s, 2.8 GB | **0.17 s, 0.25 GB** (tiles 64) | same |
+| 10 x 512^2 | (loaded) | 1.8 s, 0.38 GB | 1.75 s, 11.1 GB | **0.65 s, 1.25 GB** (tiles 256) | 0.66 s, 0.38 GB (tiles 64) |
+| 1 x 1024^2 | (loaded) | 1.39 s, 0.34 GB | 0.90 s, 4.4 GB | **0.26 s, 0.32 GB** (tiles 256) | 0.43 s, 0.18 GB (tiles 64) |
+| 1 x 2048^2 | - | 5.1 s, 0.72 GB | - | **1.03 s, 0.52 GB** (tiles 256) | 1.79 s, 0.35 GB (tiles 64) |
+| 1 x 4096^2 | - | 21-25 s, 2.4 GB | - | **4.2 s, 1.2 GB** (tiles 256) | 7.4 s, 0.99 GB (tiles 64) |
 
-The runs from 17:30 on were disturbed by another job on garoupe (7 Python
-processes on GPU 0 and the cores); the table above was measured before.
+The ScatCov is most of the cost: the spectrum adds 5-16 %.
+
+## 5b. The engine on a GPU
+
+`stl_gpu::planar::GpuPlanar` runs the same sweeps on one CUDA device for
+the whole batch at once (images, channels and orientations are planes of
+every kernel).  New kernels (`planar.cu`) are all gathers, so the results
+do not depend on the launch: the periodic convolution and its adjoint, the
+read of a window and its deterministic accumulation (a window longer than
+the level adds its repeated pixels in order), the decimation pieces and
+their adjoint.  The coefficient sums and their cotangents reuse the
+kernels of the HEALPix engine (`coef_partial`, `coef_reverse`).
+`GpuPlanarTerms` computes the spectra and the Minkowski functionals on the
+device too: a 2D FFT from batched 1D cuFFT transforms and transpositions,
+the ring sums and their VJP (`pl_rings`, `pl_rings_vjp`), the spectral
+derivatives (`pl_spec_mult`), and the Minkowski kernels of the HEALPix
+terms (`mk_*`).  `stl-synth2d --gpu` (feature `gpu`) evaluates the running
+batch there; only the losses stay on the host.
+
+Two settings of the same code: one tile per level (`--tile` larger than
+the image) keeps whole-level fields resident; small tiles bound the device
+memory by the maps, the stored moduli and one tile's fields.  On the T4,
+tiles of 256 are as fast as whole levels (or faster, from 512^2 on) at a
+fraction of the memory; whole levels run out of the T4's 15 GB at 4096^2.
+Tiles of 64 save more memory (from 11 % at 4096^2 to 65 % at 10 x 512^2)
+for up to 1.7x the time.
+
+Exactness: `stl-gpu/tests/planar.rs` (statistics and gradients against the
+CPU engine to 1e-12: 16^2 to 64^2, J = 2-4, 1-2 channels, both S3/S4
+definitions, batches of 1-3, whole-level tiles and tiles of 8) and
+`stl-cli/tests/planar.rs` `device_objective_matches_host` (the loss and
+gradient of both objectives, spectra and Minkowski functionals included,
+to 1e-12).  Both fail rather than skip without a device (`STL_GPU_SKIP=1`
+skips them).  The T4 losses of the benchmark equal the CPU ones to 13-15
+digits.
 
 ## 6. Synthesis of the example
 
@@ -286,9 +327,11 @@ targets'.
 ## 7. Answer
 
 - **Rust, at the example's size: about 10x on the same CPU cores**, and as
-  fast as STL-Dev on a T4 without a GPU (0.46 s vs 0.64 s).  The gain is
-  explicit gradients (no autograd graph, no stored intermediates), fused
-  loops and no Python overhead; the operators are the same to 1e-10.
+  fast as STL-Dev on a T4 without a GPU (0.46 s vs 0.64 s); on the same T4,
+  3.5x faster than STL-Dev (0.18 s vs 0.64 s) with 9x less device memory.
+  The gain is explicit gradients (no autograd graph, no stored
+  intermediates), fused loops and no Python overhead; the operators are the
+  same to 1e-10.
 - **The pyramid, as images grow.**  STL-Dev's memory grows as 7-9 KB per
   pixel on the CPU and 4-7 KB on the GPU (autograd keeps every wavelet
   field, `L^2` second wavelets per finer level, of the whole image): one
@@ -296,8 +339,9 @@ targets'.
   image (~150 GB) fits nowhere.  The block-wise engine keeps only the
   maps, the stored moduli and their cotangents for the whole image (about
   50 bytes per pixel) plus a few tiles: 4096^2 in 2.9 GB and 29 s per
-  evaluation, i.e. a 500-iteration synthesis in about 4-5 hours on one
-  12-core node.  The time is linear in the number of pixels (0.46 s per
+  evaluation on 12 cores, 1.9 GB and 4.9 s on a T4, i.e. a 500-iteration
+  synthesis in about 45 minutes on one T4 (an FP64-weak device: an A100
+  should be several times faster).  The time is linear in the number of pixels (0.46 s per
   0.65 Mpix, 29 s per 16.8 Mpix), which STL-Dev's CPU path is not
   (paging from 2048^2).
 - **Why it is simpler than on the sphere:** the planar operators need no
@@ -314,9 +358,8 @@ targets'.
 - `pbc=False` (replicate padding and the cropped means of
   `_get_crop_border_size_fully_flexible`): only periodic images are ported;
 - masks / NaN-aware decimation, the Morlet wavelet, the legacy spectrum;
-- a GPU planar engine: the CUDA kernels of `stl-gpu` are written for
-  HEALPix stencils; on the T4 (FP64 1/32) the CPU engine is already level
-  with STL-Dev on the GPU at 256^2;
+- the GPU engine on several devices or ranks (one device per process for
+  now);
 - MPI: the tiles of a level are independent, so the HEALPix
   decomposition (owned tile ranges, ghost accumulation of the pieces)
   carries over directly if images beyond one node's memory are needed.
