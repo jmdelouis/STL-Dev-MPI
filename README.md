@@ -24,8 +24,9 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 26 pages, with Appendix B (the
-learned prior for the finest levels), with no warning (abstract under the
+comes from TeX Live. The draft builds to 29 pages, with Appendix B (the
+learned prior for the finest levels) and Appendix C (the step-by-step
+production run, one column), with no warning (abstract under the
 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
 for the corresponding author, `\email{...}` after each co-author (read by the
 editorial system, not printed), no ORCID, `[longauth]` only for long author
@@ -260,6 +261,24 @@ until they are redrawn in the paper's style.
   2048 calibration): about 135 s (SC 86, harmonic 26-30, host + L-BFGS
   20) against 328 s; 2500 iterations about 108 h on one A100, 55 h on
   two; at 1024 about 22 h instead of 54 h; SC engine 65 % / 75 %.
+- Production of P. Campeti's objective at nside 1024 (Appendix C "Step-by-step
+  production run", and the paragraph "The objective with several reference
+  maps at nside 1024" of section 6.3, preliminary):
+  `docs/campeti_production_1024.md` on branch
+  `claude/campeti-production-1024` (495089d, not merged on 2 Nov), with the
+  judgement outputs in `benchmarks/campeti_n1024_a100/` (cv10, mf_levels,
+  tails) and `tools/cv10.py`, `tools/tails.py` there. hpc job 2570602 (one
+  A100, commit 223ace8, now in main through PR #5, 521fc8a): ten members,
+  references r000-r009 (zs1) at 1024, `--ps-variance-upper 3071`, 2500
+  iterations, 2547 evaluations, 49.0 h, 69.2 s per evaluation (objective
+  65.5 s, L-BFGS 3.7 s), setup 90 s, loss 831.9 -> 2.548 (-4 % over the
+  last 47 evaluations), final blocks 11.29 / 1.082 / 0.0696 / 0.0728 /
+  0.228, peak 62.3 GB device, 46.6 GB host; calibration 13 min on garoupe
+  (md5 60a91029b58c222f7309ad42db8a1fe8). The Slurm listing of the appendix
+  is `tools/hpc/ensemble_a100.slurm` of main without its header comment.
+  The comparison columns of section 6.3 are `figures/cv10_n1024_datarmor.txt`
+  and `figures/mf_levels_n1024_datarmor.txt`. The appendix replaces
+  host names and user paths by `cluster`, `$G`, `$R`, `$J`, `REAL`.
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,

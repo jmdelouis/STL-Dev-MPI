@@ -14,6 +14,10 @@
 \usepackage{txfonts}
 \usepackage{placeins}
 \usepackage{tikz}
+\usepackage{listings}
+% Command listings of Appendix C.
+\lstset{basicstyle=\scriptsize\ttfamily,columns=fullflexible,keepspaces=true,upquote=true,
+  breaklines=true,postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},frame=lines,aboveskip=0.6em,belowskip=0.6em}
 % Let the many full-width floats of Sect. 6 share pages (draft layout).
 \renewcommand{\topfraction}{0.9}
 \renewcommand{\dbltopfraction}{0.9}
@@ -253,7 +257,7 @@ With $w_D=1$ the members end at about $1\sigma$ from the target, with a scatter 
 
 The ranks are split into $G$ groups of consecutive ranks (\texttt{MPI\_Comm\_split}); a group shares the sky of $B/G$ members, which its engine evaluates as a batch, and the groups exchange one vector of $N_c$ complex partial sums (and one of $N_c$ reals for Eq.~\ref{eq:scatter}) per evaluation. $G=1$ costs no extra communication and suits small maps; $G=B$ gives each member the memory and time of a single synthesis on $P/B$ ranks or devices. Any $G$ gives the same synthesis up to the order of the sums ($10^{-12}$ relative after 30 iterations at $\nside=64$).
 
-\emph{Several reference maps} (preliminary). When several realisations of the field are available, the members can be held to their population instead of to the ergodic scatter of one map. The ensemble objective of P.~Campeti \todo{reference or description of this objective} is the mean of five blocks: the scattering covariances of the gaussianised map $g$ and of $\kappa=f(g)$ (Sect.~\ref{sec:kappa}; here $f$ is a look-up table linear in Gaussian coordinates), the angular power spectrum of $\kappa$ in 16 logarithmic bands, its cloud-in-cell PDF in 100 bins, and its Minkowski functionals at the finest level for 65 thresholds, with the derivatives computed in harmonic space as in Appendix~\ref{app:minkowski} (unlike the stencil term of Sect.~\ref{sec:mink_term}). Each block compares the mean of its features over the $B$ members with the mean over $B$ reference maps, and their variance between the members with their variance over all the references, through the squared logarithm of the ratio. Its Rust implementation (\texttt{stl-ensemble}) evaluates the two scattering blocks on the shared engine, the members forming one batch per group, and has its own HEALPix spherical harmonic transform; against the original Python code, on $\nside=16$ fixtures, the transforms agree to $7\times10^{-14}$, the five blocks to $1.3\times10^{-13}$ and the gradient to $9\times10^{-14}$ (relative). The members are minimised jointly by the L-BFGS of the other syntheses. Its timings are in Sect.~\ref{sec:gpu}, a first run at $\nside=128$ at the end of Sect.~\ref{sec:results}.
+\emph{Several reference maps} (preliminary). When several realisations of the field are available, the members can be held to their population instead of to the ergodic scatter of one map. The ensemble objective of P.~Campeti \todo{reference or description of this objective} is the mean of five blocks: the scattering covariances of the gaussianised map $g$ and of $\kappa=f(g)$ (Sect.~\ref{sec:kappa}; here $f$ is a look-up table linear in Gaussian coordinates), the angular power spectrum of $\kappa$ in 16 logarithmic bands, its cloud-in-cell PDF in 100 bins, and its Minkowski functionals at the finest level for 65 thresholds, with the derivatives computed in harmonic space as in Appendix~\ref{app:minkowski} (unlike the stencil term of Sect.~\ref{sec:mink_term}). Each block compares the mean of its features over the $B$ members with the mean over $B$ reference maps, and their variance between the members with their variance over all the references, through the squared logarithm of the ratio. Its Rust implementation (\texttt{stl-ensemble}) evaluates the two scattering blocks on the shared engine, the members forming one batch per group, and has its own HEALPix spherical harmonic transform; against the original Python code, on $\nside=16$ fixtures, the transforms agree to $7\times10^{-14}$, the five blocks to $1.3\times10^{-13}$ and the gradient to $9\times10^{-14}$ (relative). The members are minimised jointly by the L-BFGS of the other syntheses. Its timings are in Sect.~\ref{sec:gpu}, runs at $\nside=128$ and 1024 at the end of Sect.~\ref{sec:results}, and the $\nside=1024$ production step by step in Appendix~\ref{app:production}.
 
 \subsection{Overlap mode}
 
@@ -314,7 +318,7 @@ The GPU engine runs the same sweeps on one CUDA device per MPI rank, with the CP
 
 \emph{The objective on the device} (preliminary). The whole objective can be evaluated on the device, not only the sweeps of the statistics: the level power and the kurtosis per level build the pyramid of four children there, the pixel marginal sorts each member with a stable radix sort that reproduces the host's order by value then pixel, and the transform $\kappa=f(g)$ (the monotone cubic interpolation of Sect.~\ref{sec:kappa}) and its derivative are computed there. The element-wise expressions are those of the host, in its order, so these terms and their gradients are identical to the bit; the sums over pixels go by chunks of 65\,536 cells added in a fixed tree. With several ranks per group, every rank works on its owned slice, the moments of the pyramid are summed over the ranks, and the marginal sorts each member's slice on the device and merges the ranks' orders on the host. On one and three ranks the loss is that of the host path and the gradient agrees with it within $1.2\times10^{-16}$ of its maximum. L-BFGS stays on the host, since its history (2 $\times$ 10 $\times$ 4\,GB for ten maps at $\nside=2048$) does not fit next to the fields, with its vector operations threaded by chunks summed in a fixed order. During a sweep nothing but the engine's fields is on the device, so the geometry cache keeps its budget. On one T4, ten members at $\nside=1024$ with the terms of the production ensembles (the kurtosis row of Table~\ref{tab:runs}) and recomputed fields take 107.5\,s per evaluation instead of 205.1\,s with the terms on the host (1.9 times faster), with a 13.6\,GB peak (fields 7.5\,GB, decimation rows 3.0\,GB, cache 2.2\,GB) and losses equal to $10^{-15}$ (4 evaluations, 12 host threads). The marginal goes from 35.1 to 1.2\,s per evaluation, the kurtosis, $\kappa$ transform and level power together from 24.5 to 0.3\,s, the copies and transfers from 19.0 to 1.7\,s, and L-BFGS from 4.8 to 1.2\,s; the device is busy 65\% of the run (setup included) instead of 42\%, and 95\% of the evaluations alone (sampled every 2\,s): the sweeps take 100 of the 107\,s and saturate the T4. This one 16\,GB device is then about as fast as the 640 Ir\`ene cores of the same ensemble (128.4\,s per evaluation, Sect.~\ref{sec:performance}). On one A100, ten members at $\nside=2048$ with the terms of the production ensembles take 61.7\,s per evaluation instead of 333.7\,s with the terms on the host (5.4 times faster; 3 evaluations, losses equal to $10^{-15}$), with the same peak (67.9 against 67.5\,GB) and the same 22.3\,GB of geometry cache. The host work of an evaluation, about 270\,s (copies to the engine's layout 84\,s, marginal 62\,s, $\kappa$ transform 23\,s, kurtosis 11\,s, level power 9\,s), becomes 3\,s; the device is busy 91\% of the evaluations instead of 16\% (sampled every 2\,s), and the synthesis and $\kappa$ sweeps take the rest of the 62\,s. That is about 17 times less than on the 448 Datarmor cores of the production ensemble at the same resolution (about 1070\,s per evaluation, Table~\ref{tab:runs}). In production, the second step of that ensemble (100 iterations from the members of the first, Datarmor step, Table~\ref{tab:runs}) ran on one A100 in this configuration at 74.5\,s per evaluation (108 evaluations, 2\,h\,24\,min with the setup and the histogram matching, peak 67.8\,GB), about 14 times faster than the same step on the Datarmor cores, and the third (150 more iterations) at 72\,s per evaluation (165 evaluations, about 3\,h\,20\,min); L-BFGS, on the host, then takes about 15\,s of each evaluation (1630\,s over the run, against 56\,s for the marginal) and is the largest host cost left. On three T4s, one rank each, five members at $\nside=2048$ with the same terms take 134.6\,s per evaluation instead of 184.7\,s with the terms on the host (peak 13.5\,GB per device, identical losses), and the devices are busy 69\% of the evaluations instead of 50\%: with several ranks, the merge of the ranks' orders in the marginal (17\,s per evaluation) and the halo exchanges, which copy whole level fields through the host (24\,s), still cross the host. A single-rank run has neither.
 
-\emph{Harmonic terms on the device} (preliminary). In the objective with several reference maps (Sect.~\ref{sec:ensembles}), the spherical harmonic transforms dominate the host's work: for one member and one evaluation on 4 threads, the power spectrum, PDF and Minkowski blocks take 0.65, 20.1 and 133\,s at $\nside=128$, 512 and 1024, of which the transforms (two analyses, two syntheses, the derivative maps of the Minkowski functionals and their adjoints) are 57, 79 and 87\%, growing as $\nside^3$. On the device, the Legendre sums run one thread per azimuthal order and pair of rings, with the host's recursion and order, the transposed sums by chunks of 1024 ring pairs added in a fixed tree, and the ring Fourier transforms through cuFFT; the histograms and the sums of the functionals go by chunks in a fixed order, and the derivative maps stay on the device between the passes. The transforms agree with the host's to $2.9\times10^{-15}$ (relative; the $C_\ell$ to the bit), the five blocks to $1.5\times10^{-13}$ and the gradient to $9\times10^{-14}$. One T4 computes these blocks for one member in 0.092, 1.86 and 11.2\,s at $\nside=128$, 512 and 1024, 7 to 12 times faster than the 4 host threads. With the ten \citet{takahashi2017} realisations as references, ten members at $\nside=128$ then take 3.17\,s per evaluation instead of 6.04\,s on one T4, with 4.6 times less host CPU time, and 1.24\,s instead of 3.10\,s on three T4s (five groups of two members); the two scattering blocks are now most of an evaluation. In the complete run at $\nside=128$ of Sect.~\ref{sec:results}, with these blocks on the host (three T4s, five groups of two members), an evaluation took 3.10\,s, of which, on the first rank, the Minkowski functionals 1.72\,s (56\%), the scattering blocks of $g$ and $\kappa$ 0.56 and 0.42\,s, and the power spectrum and PDF 0.34\,s. In the production run of this objective at $\nside=1024$ (ten members in one batch on one A100, recomputed fields), sampled every 100\,ms without stopping it, an evaluation takes 68\,s: 21\,s for the two scattering blocks and 14\,s for the harmonic terms, both on the device at 96--99\% utilisation, and 33\,s of host work with the device idle, 28\,s of it on a single thread (the placement of each map into the engine's level-0 layout, one binary search per pixel, and the inverse of the look-up table). The A100 computes the harmonic terms 10.6 times faster than a T4 for 39 times its double-precision peak: the Legendre kernels do not reach its throughput. Three exact changes address these costs (preliminary, not merged): the host passes copy row by row and run on all threads, with the same bits; each member needs four transforms per evaluation instead of six, $a(u)$ following from $a(\kappa)$ by linearity and the two syntheses of the reverse pass becoming one, corrected by two scalar products in coefficient space; and the Legendre sums become double-precision matrix products (cuBLAS), the table of each block of azimuthal orders being shared by a batch of members and by the three sums of the Minkowski derivatives. The device transforms then agree with an independent library (DUCC) to $6\times10^{-14}$, the blocks with the host's to $1.5\times10^{-13}$ and the gradient to $9\times10^{-14}$. On the same A100, the ten members take 25.7 to 26.2\,s per evaluation instead of 65.2 to 65.7\,s (evaluations 2 to 4, with at most three L-BFGS pairs; about 28 against 68\,s with the full history, 2.4 times faster), with the losses of the production run to the 11 printed digits: the scattering blocks take 21.5\,s, the harmonic terms 3.8 instead of 14\,s and the host passes 1.0 instead of 28\,s, with a peak of 61.7\,GB (57.9\,GB before; 40\,GB of geometry cache included). Per member, the harmonic terms take 0.369\,s instead of 1.4\,s (0.716\,s with four transforms and the former kernels). The matrix products run at about 6\,TFLOPS, a quarter of the double-precision tensor-core peak: with at most 80 columns sharing a table, the reads of the tables bound them, and one map alone, with no batch to share them, is slower with them than with the kernels (0.94 against 0.67\,s). The A100 is then 18 times faster per member than a T4 (6.73\,s), whose little double-precision arithmetic limits the gain of the three changes to 174 against 135\,s per evaluation on two T4s. At $\nside=2048$ the harmonic terms take 2.60\,s per member in batches of ten (2.96\,s in batches of five), the construction of the tables (0.76\,s) costing more than the products (0.65\,s), and the transforms 2.47\,GB of device memory. With the scattering blocks and the host passes scaled as the pixels, and no complete evaluation at $\nside=2048$ yet, ten members would take about 135\,s per evaluation (scattering blocks 86\,s, harmonic terms 26 to 30\,s, host and L-BFGS 20\,s) instead of about 330\,s with the former code: 2500 iterations in about 108\,h on one A100, or 55\,h on two; at $\nside=1024$ the same run takes about 22\,h instead of 54\,h. The scattering engine is then three quarters of an evaluation at $\nside=1024$ and about 65\% at 2048.
+\emph{Harmonic terms on the device} (preliminary). In the objective with several reference maps (Sect.~\ref{sec:ensembles}), the spherical harmonic transforms dominate the host's work: for one member and one evaluation on 4 threads, the power spectrum, PDF and Minkowski blocks take 0.65, 20.1 and 133\,s at $\nside=128$, 512 and 1024, of which the transforms (two analyses, two syntheses, the derivative maps of the Minkowski functionals and their adjoints) are 57, 79 and 87\%, growing as $\nside^3$. On the device, the Legendre sums run one thread per azimuthal order and pair of rings, with the host's recursion and order, the transposed sums by chunks of 1024 ring pairs added in a fixed tree, and the ring Fourier transforms through cuFFT; the histograms and the sums of the functionals go by chunks in a fixed order, and the derivative maps stay on the device between the passes. The transforms agree with the host's to $2.9\times10^{-15}$ (relative; the $C_\ell$ to the bit), the five blocks to $1.5\times10^{-13}$ and the gradient to $9\times10^{-14}$. One T4 computes these blocks for one member in 0.092, 1.86 and 11.2\,s at $\nside=128$, 512 and 1024, 7 to 12 times faster than the 4 host threads. With the ten \citet{takahashi2017} realisations as references, ten members at $\nside=128$ then take 3.17\,s per evaluation instead of 6.04\,s on one T4, with 4.6 times less host CPU time, and 1.24\,s instead of 3.10\,s on three T4s (five groups of two members); the two scattering blocks are now most of an evaluation. In the complete run at $\nside=128$ of Sect.~\ref{sec:results}, with these blocks on the host (three T4s, five groups of two members), an evaluation took 3.10\,s, of which, on the first rank, the Minkowski functionals 1.72\,s (56\%), the scattering blocks of $g$ and $\kappa$ 0.56 and 0.42\,s, and the power spectrum and PDF 0.34\,s. In the production run of this objective at $\nside=1024$ (ten members in one batch on one A100, recomputed fields), sampled every 100\,ms without stopping it, an evaluation takes 68\,s: 21\,s for the two scattering blocks and 14\,s for the harmonic terms, both on the device at 96--99\% utilisation, and 33\,s of host work with the device idle, 28\,s of it on a single thread (the placement of each map into the engine's level-0 layout, one binary search per pixel, and the inverse of the look-up table). The A100 computes the harmonic terms 10.6 times faster than a T4 for 39 times its double-precision peak: the Legendre kernels do not reach its throughput. Three exact changes, merged after that run, address these costs (preliminary): the host passes copy row by row and run on all threads, with the same bits; each member needs four transforms per evaluation instead of six, $a(u)$ following from $a(\kappa)$ by linearity and the two syntheses of the reverse pass becoming one, corrected by two scalar products in coefficient space; and the Legendre sums become double-precision matrix products (cuBLAS), the table of each block of azimuthal orders being shared by a batch of members and by the three sums of the Minkowski derivatives. The device transforms then agree with an independent library (DUCC) to $6\times10^{-14}$, the blocks with the host's to $1.5\times10^{-13}$ and the gradient to $9\times10^{-14}$. On the same A100, the ten members take 25.7 to 26.2\,s per evaluation instead of 65.2 to 65.7\,s (evaluations 2 to 4, with at most three L-BFGS pairs; about 28 against 68\,s with the full history, 2.4 times faster), with the losses of the production run to the 11 printed digits: the scattering blocks take 21.5\,s, the harmonic terms 3.8 instead of 14\,s and the host passes 1.0 instead of 28\,s, with a peak of 61.7\,GB (57.9\,GB before; 40\,GB of geometry cache included). Per member, the harmonic terms take 0.369\,s instead of 1.4\,s (0.716\,s with four transforms and the former kernels). The matrix products run at about 6\,TFLOPS, a quarter of the double-precision tensor-core peak: with at most 80 columns sharing a table, the reads of the tables bound them, and one map alone, with no batch to share them, is slower with them than with the kernels (0.94 against 0.67\,s). The A100 is then 18 times faster per member than a T4 (6.73\,s), whose little double-precision arithmetic limits the gain of the three changes to 174 against 135\,s per evaluation on two T4s. At $\nside=2048$ the harmonic terms take 2.60\,s per member in batches of ten (2.96\,s in batches of five), the construction of the tables (0.76\,s) costing more than the products (0.65\,s), and the transforms 2.47\,GB of device memory. With the scattering blocks and the host passes scaled as the pixels, and no complete evaluation at $\nside=2048$ yet, ten members would take about 135\,s per evaluation (scattering blocks 86\,s, harmonic terms 26 to 30\,s, host and L-BFGS 20\,s) instead of about 330\,s with the former code: 2500 iterations in about 108\,h on one A100, or 55\,h on two; at $\nside=1024$ the same run takes about 22\,h instead of 54\,h. The scattering engine is then three quarters of an evaluation at $\nside=1024$ and about 65\% at 2048.
 
 \begin{table}
 \caption{Seconds per evaluation and device memory peak (GB per GPU, cache included) on GPUs ($L=4$, kernel 5, double precision), with the bound stencils and with the diagonal (DIA) form of the convolution, now the engine's default (Sect.~\ref{sec:gpu}); --: not measured. $B$: maps synthesised together.}
@@ -530,6 +534,8 @@ A loss term on these functionals (Sect.~\ref{sec:mink_term}), used from the $\ns
 
 \emph{The objective with several reference maps at $\nside=128$} (preliminary; Sect.~\ref{sec:ensembles}). Ten members were synthesised with the ten realisations r000--r009 (block-averaged from $\nside=2048$) as references, $L=4$, starting from Gaussian random fields with the mean power spectrum of the gaussianised references. The run stopped on its limit of 2500 L-BFGS iterations (2869 evaluations, 2\,h\,34\,min on three T4s) with the loss, the mean of the five blocks, going from 61.8 to 0.625 and still falling by about $4\times10^{-4}$ per evaluation. Of the final blocks, the scattering covariance of $g$ is the largest (2.61: mean term 2.22, variance term 0.39), then that of $\kappa$ (0.41: 0.28 and 0.13), the Minkowski functionals (0.080), the PDF (0.016) and the power spectrum (0.008). Since the targets come from the same ten maps, comparing the members with them checks the fit to the training set and does not validate the ensemble. With $z$ the difference of the two means over its standard error, the standard deviation of the members' $\kappa$ maps ($z=0.07$) and their quantiles from 0.001 to 0.999 ($|z|\leq1.5$) are within the scatter of the references. The extremes are wider, the minimum at $z=-6.6$ and the maximum at $+3.4$: beyond its extreme knots the look-up table extrapolates linearly, and the method does not clip. The few brightest pixels raise the skewness of the maps to $12.9\pm2.0$ (references $11.3\pm1.1$) and their excess kurtosis to $452\pm176$ (references $287\pm75$).
 
+\emph{The objective with several reference maps at $\nside=1024$} (preliminary; Appendix~\ref{app:production}). Ten members with the ten realisations r000--r009 at $\nside=1024$ as references, started from Gaussian random fields, ran 2500 L-BFGS iterations (2547 evaluations, 49\,h on one A100) with the loss going from 831.9 to 2.548, still falling by 4\% over the last 47 evaluations; the final blocks are 11.29 for the scattering covariance of $g$, 1.082 for that of $\kappa$, 0.0696 for the power spectrum, 0.0728 for the PDF and 0.228 for the Minkowski functionals. The members were judged with the scripts of the other ensembles against r000 (medians over the members, in units of the scatter of the realisations) and are compared below with the ensemble with the kurtosis term at $\nside=1024$ after 600 iterations (in parentheses). The power spectrum, the PDF and the Minkowski functionals of the full-resolution map are terms of this objective; the statistics per level, the peaks and the functionals of the degraded maps are not. The variance of the $\kappa$ details scatters around r000 as the realisations do, from $-1.8$ to $+1.8\sigma$ over the members at the levels 8 to 512, with medians within $0.6\sigma$, closer than the other ensemble at 256 and 512 ($-0.4$ and $-0.3\sigma$; $-1.8$ and $-0.9$), and at $+2.6\sigma$ at 1024 ($+2.9$). The gaussianised variances are closer to the realisations at the levels 128 and 512 ($+1.6$ and $+0.1\sigma$; $+3.9$ and $-2.1$), similar at 256 ($+1.1$; $-1.2$), and further from 16 to 64 ($+1.8$ to $+3.9\sigma$; $+1.1$ to $+3.3$) and at 1024 ($-4.9$; $-2.5$). The peak counts above 3, 5 and $10\sigma$ are at $+1.2$, $+0.1$ and $+0.3\sigma$ ($+1.2$, $+0.6$, $-0.7$), and the power spectrum has a median $|z|$ of 0.4 over the bands $\ell\geq31$ and a maximum of 3.7 (0.3 and 1.3). The Minkowski functionals of the degraded maps are comparable: $V_1$ and $V_2$ are closer to the realisations at level 128 (median $|z|$ 1.42 and 1.27; 1.78 and 1.67; realisations r001--r009 1.14 and 0.94) and $V_0$ further at 128 and 512 (3.12 and 4.19; 2.10 and 3.07; realisations 1.49 and 2.07). The clear defect is the excess kurtosis of the $\kappa$ details: its medians are $+4.7$ to $+12.7\sigma$ from level 64 up, one member reaching $+243\sigma$, where the other ensemble stays within $0.3\sigma$. It comes from a few pixels. With their mean removed, the realisations stay within $[-0.0003, 0.148]$; seven members have 1 to 7 pixels above 0.148, up to 0.45, and an excess kurtosis of 2250 to 46\,150 against 1065 to 1773 for the realisations, and all ten have 430 to 1210 pixels below the realisations' minimum, the empty-beam floor of $\kappa$, down to $-0.0014$. Two features of the objective allow this: the look-up table extrapolates linearly beyond its knots with no clipping (as at $\nside=128$), and the PDF block bins $\kappa$ in 100 linear bins over the references' range, each $1.6\times10^{-3}$ wide against a standard deviation of $5.6\times10^{-4}$, so that the bulk and the floor fall into three or four bins and pixels above the references' maximum fall outside the bins and out of the loss. A clip at the references' extremes, or finer or logarithmic bins in the tails, would change the objective \todo{P.~Campeti's decision}.
+
 \begin{figure*}
 \centering
 \figfile{figures/maps_mollweide_n\nsidefig.png}{0.9\textwidth}
@@ -719,5 +725,207 @@ Hybrid & 1.08, 1.13, 1.18, 0.98 & 0.80, 0.38, 0.46, 0.31 & \\
 \subsection{Outlook}
 
 The learned prior sets what the statistics leave free, and the statistics correct what a model trained on one sky gets wrong: a few percent at every level, which the full-sky ergodic $\sigma_i$ turn into tens of $\sigma$. Independent realisations (the \citet{takahashi2017} suite has 108) would let the coarse levels be learned too and the scatter of the ensembles be validated. A variant of the denoiser that knows nothing of the faces, with the stencils of the engine (Sect.~\ref{sec:stats}; here $3\times3$, one gauge) on regions made of a NESTED cell and two rings of its HEALPix neighbours, replaces the face-image model of level 256 with the same ensemble statistics and slightly smaller seams along the equatorial edges, at five times the sampling cost. Its regions are the blocks and halos of Sect.~\ref{sec:blocks}, so a distributed sampler could share the decomposition of the minimisation.
+
+%======================================================================
+\onecolumn
+\section{Step-by-step production run}
+\label{app:production}
+
+This appendix records how the ensemble of the objective with several reference maps at $\nside=1024$ (Sect.~\ref{sec:ensembles}; results, preliminary, at the end of Sect.~\ref{sec:results}) was produced on one A100 GPU of a Slurm cluster, and how it was judged, with every command, its options and the durations measured, so that it can be repeated on another A100 cluster. The run has ten members, the ten \citet{takahashi2017} realisations r000--r009 (source redshift zs1) as references, 2500 L-BFGS iterations, the harmonic terms on the device (Sect.~\ref{sec:gpu}) and one MPI rank on one A100 with 80\,GB. It used commit 223ace8 of the repository. The same code, with the exact changes of the paragraph ``Harmonic terms on the device'' (Sect.~\ref{sec:gpu}), is in the main branch (merge commit 521fc8a): it gives the same losses in about 28\,s per evaluation instead of 69\,s, hence about 22\,h instead of 49\,h for the same run. The commands below apply to either.
+
+\subsection{Environment}
+
+The cluster runs RHEL\,9 and Slurm; its partition \texttt{gpu} has nodes of eight A100 80\,GB. The toolchain is installed by the user, not by modules: Rust (\texttt{rustup}, stable channel) and, at build time only, \texttt{libclang} for the MPI bindings (here the PyPI wheel \texttt{libclang}). OpenMPI (5.0.11) and CUDA (13.0.0) come from modules. The CUDA kernels are compiled at run time by NVRTC, and cuFFT, used by the harmonic terms, is loaded at run time from the \texttt{LD\_LIBRARY\_PATH} that the CUDA module sets (\texttt{STL\_CUFFT=/path/libcufft.so.N} overrides it). Two scripts of the repository set everything; on another cluster, only the module names in them change:
+\begin{lstlisting}
+export G=/scratch/$USER/stl-campeti   # sources in $G/src, build in $G/target, runs in $G/runs
+export W=$HOME/stl-mpi                # rustup, cargo and libclang
+source $G/src/tools/hpc/env_gpu.sh    # sources tools/hpc/env.sh
+# sets RUSTUP_HOME and CARGO_HOME under $W, CARGO_TARGET_DIR=$G/target and LIBCLANG_PATH;
+# loads openmpi/5.0.11 and cuda/13.0.0; CUDARC_CUDA_VERSION=13000 (driver API of cudarc)
+\end{lstlisting}
+
+\subsection{Build}
+
+The compute nodes have no network: the crates are fetched on the login node, and the build runs on 16 cores of the CPU partition (18\,s, job 2570447). The binary is \texttt{\$G/target/release/stl-ensemble}.
+\begin{lstlisting}
+# on a machine with a clone of the repository (223ace8 for the production; main is faster):
+git archive --format=tar main | ssh cluster 'mkdir -p /scratch/$USER/stl-campeti/src && tar xf - -C /scratch/$USER/stl-campeti/src'
+# on the login node of the cluster, with G and W as above:
+cd $G/src && cargo fetch
+sbatch --export=ALL,G=$G,W=$W $G/src/tools/hpc/build_gpu.slurm
+# = cargo build --release --offline -j 16 -p stl-cli --features mpi,gpu
+\end{lstlisting}
+
+\subsection{References and calibration}
+
+The references are the ten realisations r000--r009 at $\nside=1024$, NESTED, in double precision (\texttt{.npy}); each is the mean of the four children of the $\nside=2048$ map (checked: largest difference 0). The calibration builds the look-up table of $\kappa=f(g)$ pooled over the ten maps, the targets of the five blocks, and the power spectrum of the initial Gaussian fields:
+\begin{lstlisting}
+stl-ensemble calibrate --references r000_nside1024_nested.npy ... r009_nside1024_nested.npy \
+    --nside 1024 --gpu --out cal1024.json
+\end{lstlisting}
+On a workstation with one T4 for the scattering statistics and 12 threads for the transforms, it took 13\,min and 8.8\,GB of host memory, and wrote a JSON file of 3.7\,MB; the production read it as \texttt{\$G/cal1024.json} (MD5 \texttt{60a91029b58c222f7309ad42db8a1fe8}). The Slurm script below computes it when the file is missing.
+
+Two choices complete the setting. The variance term of the power-spectrum block keeps the bands whose centre lies between $\ell=20$ and $3\nside-1$ (\texttt{-{}-ps-variance-upper 3071}), the rule of the original code at $\nside=128$: the band powers of the realisations scatter by 8--15\% at every $\ell$, far above the Gaussian prediction (134 times at $\ell\simeq3071$), so that a cutoff at $\ell=383$ would leave the highest bands without a variance constraint. The initial fields are the default Gaussian random fields with the mean power spectrum of the gaussianised references (seed $61022026+m$ for member $m$); a warm start from the $\nside=128$ ensemble started at a higher loss (1000.6 against 831.9).
+
+\subsection{The Slurm job}
+
+The script \texttt{tools/hpc/ensemble\_a100.slurm} runs one MPI rank on one A100, with the ten members in one batch:
+\begin{lstlisting}
+sbatch --export=ALL,G=$G,W=$W $G/src/tools/hpc/ensemble_a100.slurm
+\end{lstlisting}
+(the production also had \texttt{-{}-dependency=afterany:2535705,afterok:2570447}, to wait for the job then on the GPU and for the build). Its options, with the values used:
+
+\begin{center}\small
+\begin{tabular}{@{}llp{8cm}@{}}
+\hline\hline
+Option & Value & Role \\
+\hline
+\texttt{-{}-partition gpu -{}-gres gpu:a100:1} & & one A100 80\,GB \\
+\texttt{-{}-cpus-per-task}, \texttt{STL\_THREADS}, \texttt{STL\_GPU\_THREADS} & 16 & host threads (look-up table, chain rule, geometry) \\
+\texttt{-{}-mem} & 128G & host memory (L-BFGS history: $2\times10$ vectors of $10\times12.6\times10^6$ values) \\
+\texttt{-{}-time} & 4 days & \\
+\texttt{STL\_GPU\_CACHE\_MB} & 40960 & geometry cache of the scattering engine; the rest of the device for the harmonic terms \\
+\texttt{-{}-niter}, \texttt{-{}-max-eval} & 2500, 50000 & as in the original runs \\
+\texttt{-{}-ps-variance-upper} & 3071 & bands of the variance term of the power spectrum \\
+\texttt{-{}-gpu -{}-gpu-fields recompute} & & scattering engine on the device, level fields recomputed in the reverse sweep \\
+\texttt{-{}-harmonic} & \texttt{gpu} & power spectrum, PDF and Minkowski blocks on the device (default with \texttt{-{}-gpu}) \\
+\texttt{-{}-checkpoint} & 100 & maps of the lowest loss so far, every 100 evaluations \\
+\texttt{-{}-groups} & 1 & the ten members on the one device \\
+\hline
+\end{tabular}
+\end{center}
+
+The script, without its header comment:
+\begin{lstlisting}
+#!/bin/bash
+#SBATCH --job-name=stl-ens1024
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=4-00:00:00
+#SBATCH --output=%x_%j.out
+
+set -eu
+G=${G:-/scratch/jmdeloui/stl-campeti}
+W=${W:-$HOME/stl-mpi}
+source "$G/src/tools/hpc/env_gpu.sh"
+NSIDE=${NSIDE:-1024}
+NITER=${NITER:-2500}
+CUTOFF=${CUTOFF:-3071}
+CKPT=${CKPT:-100}
+REF=${REF:-/scratch/jmdeloui/takahashi}
+CAL=${CAL:-$G/cal${NSIDE}.json}
+OUT=$G/runs/${RUN:-$SLURM_JOB_ID}
+B=$CARGO_TARGET_DIR/release/stl-ensemble
+mkdir -p "$OUT"
+cd "$OUT"
+echo "job $SLURM_JOB_ID: $SLURM_JOB_NODELIST, GPU ${CUDA_VISIBLE_DEVICES:-?}, nside $NSIDE, niter $NITER, cutoff $CUTOFF, init ${INIT:-random fields}"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+export STL_THREADS=$SLURM_CPUS_PER_TASK STL_GPU_THREADS=$SLURM_CPUS_PER_TASK
+# Geometry cache of the SC engine: 40 GB, the rest of the 80 GB for the
+# harmonic terms (transforms and Minkowski states) next to the engine.
+export STL_GPU_CACHE_MB=${STL_GPU_CACHE_MB:-40960}
+if [ ! -f "$CAL" ]; then
+    time mpirun -np 1 --bind-to none "$B" calibrate --references $(ls "$REF"/r00?_nside${NSIDE}_nested.npy) \
+        --nside "$NSIDE" --gpu --out "$CAL" 2>&1 | grep -v Authorization
+fi
+INIT_OPT=""
+[ -n "${INIT:-}" ] && INIT_OPT="--init $INIT"
+(while sleep 600; do date +%T; nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader; done) > gpu_usage.log 2>&1 &
+MON=$!
+time mpirun -np 1 --bind-to none "$B" run --calibration "$CAL" --ps-variance-upper "$CUTOFF" \
+    --niter "$NITER" --max-eval 50000 --gpu --gpu-fields recompute --checkpoint "$CKPT" $INIT_OPT ${EXTRA:-} \
+    --out ens 2> ens.err | tee ens.log
+kill $MON 2>/dev/null || true
+tail -3 ens.err
+md5sum ens_m0*_nested.npy > md5.txt
+touch READY
+echo "done $(date)"
+\end{lstlisting}
+\texttt{REF} is the directory of the references and \texttt{RUN} the name of the run directory under \texttt{\$G/runs} (by default the job number). The production was job 2570602; it ran from 31 October 2026 at 09:50 to 2 November at 10:50 and ended normally.
+
+\subsection{Monitoring and restart}
+
+With \texttt{JOB} the job number:
+\begin{lstlisting}
+squeue -u $USER                       # the job
+tail -f $G/runs/JOB/ens.log           # one line per evaluation: loss, five blocks, time
+cat $G/runs/JOB/gpu_usage.log         # device memory and utilisation every 10 min
+cat $G/runs/JOB/ens_checkpoint.json   # evaluation and loss of the last checkpoint
+\end{lstlisting}
+A line of \texttt{ens.log} reads \texttt{evaluation N loss = L blocks = [GSC, PSC, C\_l, PDF, MF] t = T s}: the loss is the mean of the five blocks (the scattering covariances of $g$ and of $\kappa$, the power spectrum, the PDF and the Minkowski functionals), each a mean term plus a variance term. Every 100 evaluations the run writes the Gaussian and physical maps of the lowest loss reached so far (\texttt{ens\_checkpoint\_mMMM\_*}, through a temporary name, so that an interrupted write leaves the previous checkpoint whole) and \texttt{ens\_checkpoint.json}. A job stopped early (time limit, node failure) restarts from them, \texttt{\{m\}} standing for the member number:
+\begin{lstlisting}
+sbatch --export=ALL,G=$G,W=$W,RUN=JOB_restart,NITER=REMAINING,INIT=$G/runs/JOB/ens_checkpoint_m{m}_gaussian_nested.npy \
+    $G/src/tools/hpc/ensemble_a100.slurm
+\end{lstlisting}
+The first evaluation of the restart gives the loss of the checkpoint to the bit (tested on the workstation); the L-BFGS history starts again empty.
+
+\subsection{Outputs and judgement}
+
+At the end, \texttt{\$G/runs/JOB} holds the ten members (\texttt{ens\_mMMM\_gaussian\_nested.npy} and \texttt{ens\_mMMM\_physical\_nested.npy}, NESTED, double precision, $\kappa$ with its mean removed), the report \texttt{ens.json} (\texttt{loss\_history}, \texttt{blocks\_history}, \texttt{blocks\_final}, timers, memory), \texttt{md5.txt} and \texttt{READY}. The judgement ran on the workstation, not on the cluster: the ten physical maps (1\,GB) were copied there directly from the cluster, checked and linked under the names the tools read:
+\begin{lstlisting}
+# on the analysis machine: J the judgement directory, R the run directory on the cluster
+mkdir -p $J/a100 && cd $J/a100
+scp "cluster:$R/ens_m00?_physical_nested.npy" "cluster:$R/md5.txt" .
+grep physical md5.txt | md5sum -c -
+for m in 0 1 2 3 4 5 6 7 8 9; do ln -s ens_m00${m}_physical_nested.npy synthesis_m00${m}_nested.npy; done
+\end{lstlisting}
+The tools are \texttt{tools/cv10.py}, \texttt{tools/tails.py} and \texttt{text/scripts/mf\_levels.py} (with \texttt{text/scripts/common.py} and \texttt{tools/minkowski.py}), copied into one directory and run with healpy 1.20 and NumPy 2.2; \texttt{REAL} holds r000--r009 at $\nside=1024$ and \texttt{CACHE} the functionals of the realisations once computed:
+\begin{lstlisting}
+export OMP_NUM_THREADS=4
+python cv10.py 1024 $J/cv10_n1024_campeti_a100 $(ls $REAL/r00?_nside1024_nested.npy) -- "Campeti A100, 2500 it=$J/a100"
+python mf_levels.py $CACHE 1024 $J/mfl_a100 $REAL "campeti_a100_2500it=$J/a100" --levels 64,128,256,512 --procs 4 --threads 1
+python tails.py $REAL $J/a100
+\end{lstlisting}
+\texttt{cv10.py} measures, at every level of the pyramid of four children, the variance and the excess kurtosis of the details of $\kappa$ and the variance of the details of the gaussianised map; it also counts the peaks above 3, 5 and $10\sigma$ and computes the power spectrum in logarithmic bands. \texttt{mf\_levels.py} computes $V_0$, $V_1$ and $V_2$ of $\kappa$ degraded to $\nside=64$ to 512, at thresholds $\nu$ from $-2$ to 5. Both express the deviation of each member from r000 in units of the scatter of the ten realisations, as for the other ensembles of Sect.~\ref{sec:experiment}. \texttt{tails.py} gives the extremes, moments and counts of pixels beyond the realisations' range. The outputs of this run are in \texttt{benchmarks/campeti\_n1024\_a100/} of the repository.
+
+\subsection{Durations}
+
+\begin{center}\small
+\begin{tabular}{lll}
+\hline\hline
+Step & Where & Duration \\
+\hline
+build & cluster, 16 CPU cores & 18\,s \\
+calibration & workstation, one T4 and 12 threads & 13\,min \\
+setup of the run (geometry, transforms) & one A100 & 90\,s \\
+one evaluation, ten members (wall time) & one A100 & 69.2\,s: objective 65.5\,s, L-BFGS step 3.7\,s \\
+2500 iterations (2547 evaluations) & one A100 & 49.0\,h \\
+copy of the ten physical maps (1\,GB) & cluster to workstation & 3\,min \\
+judgement (\texttt{cv10.py}, \texttt{mf\_levels.py}) & workstation, 4 processes & 12.4\,min \\
+\hline
+\end{tabular}
+\end{center}
+
+Peak memory was 62.3\,GB on the device (the 40\,GB geometry cache included) and 46.6\,GB on the host. By the objective's timers, the 65.5\,s of an evaluation split into 45\,s for the two scattering blocks, 22\,s of which are the single-threaded placement of the maps into the engine's layout, 14\,s for the harmonic terms and 6\,s for the host passes; the code of the main branch removes most of the layout, harmonic and host time (about 28\,s per evaluation, Sect.~\ref{sec:gpu}).
+
+\subsection{Optimisation}
+
+The run stopped on its iteration limit with the loss still falling, by 4\% over the last 47 evaluations:
+
+\begin{center}\small
+\begin{tabular}{lrrrrrrrr}
+\hline\hline
+Evaluation & 1 & 100 & 500 & 1000 & 1500 & 2000 & 2500 & 2547 \\
+\hline
+Loss & 831.9 & 225.7 & 31.43 & 11.90 & 6.352 & 3.987 & 2.656 & 2.548 \\
+\hline
+\end{tabular}
+
+\medskip
+\begin{tabular}{lrrrrr}
+\hline\hline
+Block & SC of $g$ & SC of $\kappa$ & $C_\ell$ & PDF & Minkowski \\
+\hline
+first evaluation & 2169 & 1498 & 4.839 & 2.448 & 485.0 \\
+last evaluation & 11.29 & 1.082 & 0.0696 & 0.0728 & 0.228 \\
+of which the mean term & 10.38 & 0.934 & 0.0670 & 0.0488 & 0.201 \\
+\hline
+\end{tabular}
+\end{center}
+
+The judgement of the members against the realisations is in Sect.~\ref{sec:results}.
 
 \end{document}
