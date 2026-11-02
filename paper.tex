@@ -926,6 +926,56 @@ of which the mean term & 10.38 & 0.934 & 0.0670 & 0.0488 & 0.201 \\
 \end{tabular}
 \end{center}
 
-The judgement of the members against the realisations is in Sect.~\ref{sec:results}.
+The judgement of the members against the realisations is in Sect.~\ref{sec:results}; the figures below compare them with the realisations and with the other ensemble.
+
+\subsection{Figures: the run against the target population}
+
+Figures~\ref{fig:campeti_cl} to \ref{fig:campeti_sc} compare three populations: the ten realisations r000--r009, the target of this objective (grey band, mean $\pm\,\sigma$); the ten members of this run (blue, ``Campeti A100''); and the ten members of the ensemble with the kurtosis term at $\nside=1024$ after 600 iterations (orange, ``Recipe Datarmor''; Table~\ref{tab:runs}), whose only target is r000 (dashed). The residual panels give (mean of the population $-$ mean of the realisations)$/\sigma$ of the realisations, with the grey band at $\pm1$; \texttt{figures/campeti\_populations\_n1024.txt} gives their rms and maximum per family and level. The scattering coefficients of $\kappa$ are those of the engine itself ($J=9$, $L=4$, $5\times5$ stencils), computed by the new binary \texttt{stl-stats} on every map standardised by the moments of r000. On the workstation, with $D$ the members of the other ensemble and the scripts of \texttt{benchmarks/campeti\_n1024\_a100/plots/scripts/}:
+\begin{lstlisting}
+# scattering coefficients of the 30 maps on one T4 (2 min of setup, then 9 s per map)
+stl-stats --out sc_n1024.json --norm $REAL/r000_nside1024_nested.npy --gpu -- \
+    $REAL/r00?_nside1024_nested.npy $J/a100/synthesis_m00?_nested.npy $D/synthesis_m00?_nested.npy
+# power spectra and Minkowski functionals per level (47 min on 4 processes), then the figures
+python measure_populations.py $CACHE $REAL "Campeti A100=$J/a100" "Recipe Datarmor=$D" --procs 4
+python plot_maps.py $OUT $REAL "Campeti A100=$J/a100" "Recipe Datarmor=$D"
+python plot_populations.py $CACHE sc_n1024.json $OUT $REAL "Campeti A100=$J/a100" "Recipe Datarmor=$D"
+\end{lstlisting}
+
+The power spectrum of this run (Fig.~\ref{fig:campeti_cl}) follows the realisations up to $\ell\simeq1500$ and is high above, by up to $4\sigma$ (rms 1.2 over $\ell\geq31$, against 0.65 for the other ensemble and 0.2 for r000 itself): the excess variance of level 1024. The maps (Figs.~\ref{fig:campeti_mollweide} and \ref{fig:campeti_gnomonic}) are hard to tell apart on the full sky. In the zooms, some peaks of the members of this run hold pixels at the darkest colour, at or below the minimum of r000: the negative tail of Sect.~\ref{sec:results}, which the look-up table allows; a small patch of the same kind also appears next to a filament in a member of the other ensemble. In the Minkowski functionals (Fig.~\ref{fig:campeti_mf}) both ensembles deviate by 0.7 to $2.8\sigma$ rms per level and functional, r000 itself by 0.7 to 1.8: this run is further from the realisations in $V_0$ and $V_2$ at $\nside=512$ (2.6 and $2.0\sigma$, against 1.3 and 1.0), the other ensemble in $V_1$ at 128 and 1024 (2.2 and 2.8, against 1.1 and 1.8). The scattering coefficients of $\kappa$ (Fig.~\ref{fig:campeti_sc}) show the difference between the two objectives most clearly. This run matches $S_1$ and $S_2$ of the realisations to 0.02 and $0.03\sigma$ rms and the reduced $S_3$ and $S_4$ to 1.6 and $0.4\sigma$ (maxima 5.8 and 1.6), since its loss holds the scattering covariance of $\kappa$ to the mean over the ten references. The other ensemble follows r000 in $S_1$ and $S_2$ (0.58 and $0.50\sigma$, as r000 itself) and is off in $S_3$ and $S_4$ at the fine scales, by up to 38 and $20\sigma$ (rms 8.5 and 4.8): its loss holds the scattering covariance of the gaussianised map, and of $\kappa$ only the mean, variance, $S_1$ and $S_2$.
+
+\begin{figure}[!htbp]
+\sidecaption
+\figfile{figures/campeti_cl_populations_n1024.pdf}{0.5\textwidth}
+\caption{Power spectrum $\ell(\ell+1)C_\ell/2\pi$ of $\kappa$ in 40 logarithmic bands: the realisations r000--r009 (grey, mean $\pm\,\sigma$), r000 (dashed), the members of this run (blue, ``Campeti A100'') and those of the ensemble with the kurtosis term at $\nside=1024$ after 600 iterations (orange, ``Recipe Datarmor''), means $\pm\,\sigma$ over the members. Bottom: (mean of each population $-$ mean of the realisations)$/\sigma$ of the realisations, the grey band at $\pm1$.}
+\label{fig:campeti_cl}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\figfile{figures/campeti_maps_mollweide_n1024.pdf}{\textwidth}
+\caption{Convergence maps at $\nside=1024$: realisations r000--r002 (top), members 0--2 of this run (middle) and members 0--2 of the ensemble with the kurtosis term after 600 iterations (bottom). One logarithmic colour scale for all, $\log_{10}(u-\min u_{\rm r000}+0.1)$ with $u=\kappa/\sigma_{\rm r000}$.}
+\label{fig:campeti_mollweide}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\figfile{figures/campeti_maps_gnomonic_n1024.pdf}{0.8\textwidth}
+\caption{The nine maps of Fig.~\ref{fig:campeti_mollweide} in gnomonic zooms of $10^\circ$ around $({\rm lon},{\rm lat})=(20^\circ,-27.5^\circ)$, same colour scale. The darkest pixels inside some peaks of members 1 and 2 of this run are the negative tail of the look-up table.}
+\label{fig:campeti_gnomonic}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\figfile{figures/campeti_mf_populations_n1024.pdf}{0.78\textwidth}
+\caption{Minkowski functionals $V_0$, $V_1$, $V_2$ of $\kappa$ degraded to $\nside=64$ to 1024 (means of four children, no smoothing) against the threshold $\nu$ in units of the standard deviation of each level, for the populations of Fig.~\ref{fig:campeti_cl}, each with its residual panel.}
+\label{fig:campeti_mf}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\figfile{figures/campeti_sc_populations_n1024.pdf}{0.85\textwidth}
+\caption{Scattering coefficients of $\kappa$ ($J=9$, $L=4$; maps standardised by the moments of r000) for the populations of Fig.~\ref{fig:campeti_cl}: $S_1(j)$ and $S_2(j)$ averaged over the orientations ($j=0$ the finest scale, level $1024/2^j$); the real part of $S_3(j_1,j_3)$ averaged over the orientations and divided by $\sqrt{S_2(j_1)S_2(j_3)}$; that of $S_4(j_1,j_2,j_3)$ divided by $\sqrt{S_2(j_1)S_2(j_2)}$; each with its residual panel.}
+\label{fig:campeti_sc}
+\end{figure}
 
 \end{document}

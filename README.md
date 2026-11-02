@@ -24,7 +24,7 @@ latexmk -pdf paper.tex
 The A&A class is not on CTAN: `aa.cls`, `aa.bst` and `linenoaa.sty` come
 from the A&A LaTeX macro package 9.4 (EDP Sciences, March 2026, from
 aanda.org, author instructions) and are kept in this directory; `lineno`
-comes from TeX Live. The draft builds to 29 pages, with Appendix B (the
+comes from TeX Live. The draft builds to 34 pages, with Appendix B (the
 learned prior for the finest levels) and Appendix C (the step-by-step
 production run, one column), with no warning (abstract under the
 300-word limit the class checks). A&A 9.4 conventions: `\corrauth`
@@ -279,6 +279,17 @@ until they are redrawn in the paper's style.
   The comparison columns of section 6.3 are `figures/cv10_n1024_datarmor.txt`
   and `figures/mf_levels_n1024_datarmor.txt`. The appendix replaces
   host names and user paths by `cluster`, `$G`, `$R`, `$J`, `REAL`.
+- Figures of Appendix C (section "Figures: the run against the target
+  population", Figs. C.1 to C.5): `figures/campeti_cl_populations_n1024.pdf`,
+  `campeti_maps_mollweide_n1024.pdf`, `campeti_maps_gnomonic_n1024.pdf`,
+  `campeti_mf_populations_n1024.pdf`, `campeti_sc_populations_n1024.pdf` and
+  the residual table `campeti_populations_n1024.txt`, copies (renamed with
+  the `campeti_` prefix) of `benchmarks/campeti_n1024_a100/plots/` on branch
+  `claude/campeti-1024-plots` (PR #7, head 065ad2b, not merged on 2 Nov),
+  section 8.3 of `docs/campeti_production_1024.md` there. That branch also
+  adds the `stl-stats` binary and the scripts `plots/scripts/` that the
+  appendix cites. Populations: r000-r009 (target), the A100 run 2570602,
+  the recipe's 1024 ensemble (Datarmor job 7775548, 600 iterations).
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
