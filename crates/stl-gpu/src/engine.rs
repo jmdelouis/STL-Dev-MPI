@@ -54,7 +54,7 @@ use stl_core::local::LocalGeometry;
 use stl_core::plan::{Coefficient, Family};
 
 /// Pixels per partial sum of a coefficient (then summed in chunk order).
-const CHUNK: usize = 1 << 16;
+pub(crate) const CHUNK: usize = 1 << 16;
 
 /// What is kept of the convolution geometry of the blocks between sweeps
 /// (it depends on the decomposition only).
@@ -281,12 +281,12 @@ impl DevCsr {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct Operand {
-    ptr: u64,
-    im_off: i64,
+pub(crate) struct Operand {
+    pub(crate) ptr: u64,
+    pub(crate) im_off: i64,
 }
 
-const NONE: Operand = Operand { ptr: 0, im_off: -1 };
+pub(crate) const NONE: Operand = Operand { ptr: 0, im_off: -1 };
 
 /// Where a block reads a field of its level: base address, row stride and
 /// position of the block's first owned cell (a level field: held cells and
@@ -300,52 +300,52 @@ struct Field {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct ForwardItem {
-    kind: i32,
-    pad: i32,
-    a: Operand,
-    b: Operand,
+pub(crate) struct ForwardItem {
+    pub(crate) kind: i32,
+    pub(crate) pad: i32,
+    pub(crate) a: Operand,
+    pub(crate) b: Operand,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct Contrib {
-    kind: i32,
-    pad: i32,
-    a: Operand,
-    b: Operand,
-    g_re: f64,
-    g_im: f64,
-    n_total: f64,
+pub(crate) struct Contrib {
+    pub(crate) kind: i32,
+    pub(crate) pad: i32,
+    pub(crate) a: Operand,
+    pub(crate) b: Operand,
+    pub(crate) g_re: f64,
+    pub(crate) g_im: f64,
+    pub(crate) n_total: f64,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct Target {
-    ptr: u64,
-    im_off: i64,
-    start: u32,
-    end: u32,
+pub(crate) struct Target {
+    pub(crate) ptr: u64,
+    pub(crate) im_off: i64,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
 }
 
 unsafe impl DeviceRepr for ForwardItem {}
 unsafe impl DeviceRepr for Contrib {}
 unsafe impl DeviceRepr for Target {}
 
-const F_MEAN: i32 = 0;
-const F_SQ: i32 = 1;
-const F_ABS: i32 = 2;
-const F_S1X: i32 = 3;
-const F_PROD: i32 = 4;
+pub(crate) const F_MEAN: i32 = 0;
+pub(crate) const F_SQ: i32 = 1;
+pub(crate) const F_ABS: i32 = 2;
+pub(crate) const F_S1X: i32 = 3;
+pub(crate) const F_PROD: i32 = 4;
 
-const R_MEAN: i32 = 0;
-const R_VAR: i32 = 1;
-const R_S1SAME: i32 = 2;
-const R_S2SAME: i32 = 3;
-const R_S1X_A: i32 = 4;
-const R_S1X_B: i32 = 5;
-const R_GA: i32 = 6;
-const R_GB: i32 = 7;
+pub(crate) const R_MEAN: i32 = 0;
+pub(crate) const R_VAR: i32 = 1;
+pub(crate) const R_S1SAME: i32 = 2;
+pub(crate) const R_S2SAME: i32 = 3;
+pub(crate) const R_S1X_A: i32 = 4;
+pub(crate) const R_S1X_B: i32 = 5;
+pub(crate) const R_GA: i32 = 6;
+pub(crate) const R_GB: i32 = 7;
 
 /// Host copy of the fields of a forward sweep that the reverse sweep reads
 /// ([`GpuEngine::checkpoint_forward`]): maps run through one engine one after

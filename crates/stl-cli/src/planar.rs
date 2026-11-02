@@ -34,6 +34,11 @@ use stl_core::planar::{PlanarEngine, Pyramid};
 
 type C64 = Complex64;
 
+#[cfg(feature = "gpu")]
+type DevicePyramid = stl_gpu::planar::GpuPyramid;
+#[cfg(not(feature = "gpu"))]
+type DevicePyramid = ();
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     StlDev,
@@ -120,6 +125,10 @@ pub struct PlanarObjective {
     pub target_count: usize,
     /// Per-block values and timers of the last evaluation.
     pub last: Mutex<Vec<(&'static str, f64)>>,
+    /// ScatCov of the running batch on a CUDA device ([`PlanarObjective::use_gpu`]);
+    /// the spectra and Minkowski functionals stay on the host threads.
+    #[cfg(feature = "gpu")]
+    pub device: Option<Mutex<stl_gpu::planar::GpuPlanar>>,
 }
 
 impl PlanarObjective {
@@ -145,6 +154,8 @@ impl PlanarObjective {
             target_mf: Vec::new(),
             target_count: bt,
             last: Mutex::new(Vec::new()),
+            #[cfg(feature = "gpu")]
+            device: None,
             cfg,
             engine,
             rings,
@@ -181,19 +192,70 @@ impl PlanarObjective {
         (host_threads() / images.max(1)).max(1)
     }
 
+    /// ScatCov of a batch of `b` images on the device, if one is attached
+    /// for that batch size: `[b, len(plan)]` and the device pyramid.
+    #[cfg(feature = "gpu")]
+    fn device_forward(&self, x: &[f64], b: usize) -> Option<(Vec<C64>, DevicePyramid)> {
+        let dev = self.device.as_ref()?.lock().unwrap();
+        (dev.batch == b).then(|| dev.forward(&dev.gpu.upload(x)))
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn device_forward(&self, _x: &[f64], _b: usize) -> Option<(Vec<C64>, DevicePyramid)> {
+        None
+    }
+
+    /// Map cotangents `[B, C, H, W]` of the ScatCov on the device.
+    #[cfg(feature = "gpu")]
+    fn device_reverse(&self, pyr: &DevicePyramid, cot: &[C64]) -> Vec<f64> {
+        let dev = self.device.as_ref().unwrap().lock().unwrap();
+        let g = dev.reverse(pyr, cot);
+        dev.gpu.download(&g)
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn device_reverse(&self, _pyr: &DevicePyramid, _cot: &[C64]) -> Vec<f64> {
+        unreachable!("no device without the gpu feature")
+    }
+
+    /// Runs the ScatCov of the running batches of `batch` images on `gpu`.
+    #[cfg(feature = "gpu")]
+    pub fn use_gpu(&mut self, gpu: std::sync::Arc<stl_gpu::Gpu>, batch: usize) {
+        self.device = Some(Mutex::new(stl_gpu::planar::GpuPlanar::new(gpu, self.engine.clone(), batch)));
+    }
+
+    /// Largest device memory in use seen so far (0 without a device).
+    pub fn device_peak_bytes(&self) -> usize {
+        #[cfg(feature = "gpu")]
+        if let Some(d) = &self.device {
+            return d.lock().unwrap().peak_used.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        0
+    }
+
     fn evaluate(&self, x: &[f64], keep: bool) -> Vec<Eval> {
+        self.evaluate_with(x, keep).0
+    }
+
+    fn evaluate_with(&self, x: &[f64], keep: bool) -> (Vec<Eval>, Option<DevicePyramid>) {
         let (c, npix) = (self.cfg.channels, self.cfg.h * self.cfg.w);
         let b = x.len() / (c * npix);
+        let device = if keep { self.device_forward(x, b) } else { None };
         let engine = self.engine.clone().with_threads(self.tile_threads(b));
         let mf = self.cfg.mode == Mode::Ensemble;
-        chunked(b, 1, |i, _| {
+        let np = self.plan().len();
+        let evals = chunked(b, 1, |i, _| {
             let img = &x[i * c * npix..][..c * npix];
-            let (sc, pyr) = engine.forward(img);
+            let (sc, pyr) = match &device {
+                Some((s, _)) => (s[i * np..][..np].to_vec(), Pyramid { maps: Vec::new(), m: Vec::new() }),
+                None => engine.forward(img),
+            };
             let (ps, xs) = self.rings.as_ref().map_or((Vec::new(), Vec::new()), |r| r.forward(img, c));
             let mf = if mf { (0..c).map(|ch| self.mk.forward(&self.fft, &img[ch * npix..][..npix])).collect() } else { Vec::new() };
             let pyr = if keep { pyr } else { Pyramid { maps: Vec::new(), m: Vec::new() } };
             Eval { sc, pyr, ps, xs: if keep { xs } else { Vec::new() }, mf }
-        })
+        });
+        (evals, device.map(|(_, p)| p))
     }
 
     /// References of the target batch: `var_ref`, `sqrt(mean_b S2)` of
@@ -255,7 +317,7 @@ impl PlanarObjective {
     /// Loss and gradient for the batch `x` `[B, C, H, W]`.
     pub fn loss_and_grad(&self, x: &[f64]) -> (f64, Vec<f64>) {
         let t0 = Instant::now();
-        let evals = self.evaluate(x, true);
+        let (evals, device) = self.evaluate_with(x, true);
         let t1 = Instant::now();
         let b = evals.len();
         let n = self.feature_count();
@@ -284,11 +346,15 @@ impl PlanarObjective {
         let ns = self.plan().len();
         let engine = self.engine.clone().with_threads(self.tile_threads(b));
         let nm = self.mk.count();
+        let csc_all: Vec<C64> = (0..b).flat_map(|k| cot_f[k * n..][..ns].iter().zip(&self.div).zip(&self.weight).map(|((g, d), w)| g * w / d)).collect();
+        let dev_grad = device.as_ref().map(|p| self.device_reverse(p, &csc_all));
         let grads = chunked(b, 1, |k, _| {
             let e = &evals[k];
             let cf = &cot_f[k * n..][..n];
-            let csc: Vec<C64> = cf[..ns].iter().zip(&self.div).zip(&self.weight).map(|((g, d), w)| g * w / d).collect();
-            let mut g = engine.reverse(&e.pyr, &csc);
+            let mut g = match &dev_grad {
+                Some(dg) => dg[k * c * npix..][..c * npix].to_vec(),
+                None => engine.reverse(&e.pyr, &csc_all[k * ns..][..ns]),
+            };
             if let Some(rings) = &self.rings {
                 let cps: Vec<C64> = cf[ns..].iter().zip(&self.ps_div).map(|(g, d)| g / d).collect();
                 g.iter_mut().zip(rings.vjp(&e.xs, &cps)).for_each(|(a, v)| *a += v);

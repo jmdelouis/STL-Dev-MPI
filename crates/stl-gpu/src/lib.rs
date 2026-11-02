@@ -11,6 +11,7 @@ pub mod dia;
 pub mod engine;
 pub mod geometry;
 pub mod harmonic;
+pub mod planar;
 pub mod terms;
 pub mod topology;
 

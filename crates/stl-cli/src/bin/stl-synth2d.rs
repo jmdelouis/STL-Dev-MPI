@@ -31,6 +31,9 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --init PATH         initial images (standardised units), .npy [B, (C,) H, W]
   --seed N            seed of the initial white noise (default 26)
   --bench K           only time K evaluations of the loss and gradient
+  --gpu               ScatCov of the batch on a CUDA device (feature gpu;
+                      STL_GPU_DEVICE, default 0); --tile as on the CPU (a tile
+                      larger than the image: whole levels resident)
   --out PREFIX        outputs: PREFIX_maps.npy [B, C, H, W] (target units),
                       PREFIX_features_{target,init,final}.npy [*, n, 2],
                       PREFIX_mf_{target,init,final}.npy, PREFIX.json
@@ -54,6 +57,7 @@ struct Args {
     init: Option<PathBuf>,
     seed: u64,
     bench: usize,
+    gpu: bool,
     out: Option<String>,
 }
 
@@ -75,6 +79,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         init: None,
         seed: 26,
         bench: 0,
+        gpu: false,
         out: None,
     };
     let mut it = argv.iter();
@@ -107,6 +112,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--init" => a.init = Some(PathBuf::from(it.next().ok_or("--init needs a path")?)),
             "--seed" => a.seed = num(it.next(), k)?,
             "--bench" => a.bench = num(it.next(), k)?,
+            "--gpu" => a.gpu = true,
             "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -166,7 +172,11 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         cfg.n_bins = n;
     }
     let t0 = Instant::now();
-    let obj = PlanarObjective::new(cfg.clone(), &t)?;
+    #[allow(unused_mut)]
+    let mut obj = PlanarObjective::new(cfg.clone(), &t)?;
+    if a.gpu {
+        attach_gpu(&mut obj, a.nbatch)?;
+    }
     let setup = t0.elapsed().as_secs_f64();
     let n = c * h * w;
     let mut u = match &a.init {
@@ -198,6 +208,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         report["loss"] = serde_json::json!(loss);
         report["blocks"] = blocks(&obj);
         report["peak_rss_bytes"] = serde_json::json!(proc_memory("VmHWM:"));
+        report["peak_device_bytes"] = serde_json::json!(obj.device_peak_bytes());
         return Ok(report);
     }
     let (f_init, m_init) = obj.batch_features(&u);
@@ -239,6 +250,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     report["timers_seconds"] = serde_json::json!(times);
     report["blocks"] = blocks(&obj);
     report["peak_rss_bytes"] = serde_json::json!(proc_memory("VmHWM:"));
+    report["peak_device_bytes"] = serde_json::json!(obj.device_peak_bytes());
     report["families"] = serde_json::json!(obj.plan().iter().map(|q| q.family.name()).chain((obj.plan().len()..obj.feature_count()).map(|_| "PS")).collect::<Vec<_>>());
     if let Some(p) = &a.out {
         let nf = obj.feature_count();
@@ -260,6 +272,18 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     Ok(report)
 }
 
+#[cfg(feature = "gpu")]
+fn attach_gpu(obj: &mut PlanarObjective, batch: usize) -> Result<(), String> {
+    let dev = std::env::var("STL_GPU_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    obj.use_gpu(std::sync::Arc::new(stl_gpu::Gpu::new(dev)?), batch);
+    Ok(())
+}
+
+#[cfg(not(feature = "gpu"))]
+fn attach_gpu(_obj: &mut PlanarObjective, _batch: usize) -> Result<(), String> {
+    Err("--gpu needs the gpu feature (cargo build --features gpu)".into())
+}
+
 fn blocks(obj: &PlanarObjective) -> serde_json::Value {
     serde_json::Value::Object(obj.last.lock().unwrap().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect())
 }
@@ -275,7 +299,7 @@ fn main() {
     };
     match run(&args) {
         Ok(r) => {
-            let keys = ["evaluations", "seconds_per_evaluation", "loss_first", "loss_last", "bench_seconds", "loss", "peak_rss_bytes"];
+            let keys = ["evaluations", "seconds_per_evaluation", "loss_first", "loss_last", "bench_seconds", "loss", "peak_rss_bytes", "peak_device_bytes"];
             let short: serde_json::Map<String, serde_json::Value> = keys.iter().filter(|k| !r[**k].is_null()).map(|k| (k.to_string(), r[*k].clone())).collect();
             println!("{}", serde_json::Value::Object(short));
         }

@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 
-const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"));
+const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"));
 
-const KERNELS: [&str; 69] = [
+const KERNELS: [&str; 81] = [
     "ring_thetas",
     "geom_build",
     "geom_pack",
@@ -83,6 +83,18 @@ const KERNELS: [&str; 69] = [
     "mk_final",
     "cic_partial",
     "cic_vjp",
+    "pl_conv",
+    "pl_conv_adj",
+    "pl_read",
+    "pl_accum",
+    "pl_crop",
+    "pl_embed_add",
+    "pl_abs",
+    "pl_modvjp",
+    "pl_add",
+    "pl_dec",
+    "pl_dec_adj",
+    "pl_scale",
 ];
 
 /// Compiles the kernels to a native binary for the device (`sm_XY`): a
