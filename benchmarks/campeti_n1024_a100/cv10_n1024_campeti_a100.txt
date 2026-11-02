@@ -1,0 +1,60 @@
+10 realizations at nside 1024: mean, relative std over the realizations, r000 deviation from the mean in sigma
+variance kappa:
+      8: mean 4.757e-09  rel std  13.4%  r000  +0.1
+     16: mean 8.238e-09  rel std  18.0%  r000  -0.2
+     32: mean 1.56e-08  rel std  15.0%  r000  -0.1
+     64: mean 2.904e-08  rel std  14.7%  r000  -0.1
+    128: mean 4.77e-08  rel std  13.0%  r000  +0.2
+    256: mean 6.263e-08  rel std  11.7%  r000  +0.1
+    512: mean 6.998e-08  rel std  10.9%  r000  -0.1
+   1024: mean 6.751e-08  rel std   9.3%  r000  -0.0
+kurtosis kappa:
+      8: mean 3.236  rel std  31.4%  r000  +0.7
+     16: mean 9.991  rel std  35.2%  r000  +1.4
+     32: mean 35.65  rel std  35.3%  r000  +1.1
+     64: mean 83.18  rel std  27.9%  r000  +0.7
+    128: mean 216.1  rel std  29.8%  r000  +1.9
+    256: mean 381  rel std  21.3%  r000  +1.6
+    512: mean 696  rel std  16.3%  r000  +1.4
+   1024: mean 1123  rel std  17.3%  r000  +1.1
+variance gauss:
+      8: mean 0.0665  rel std   5.6%  r000  +0.6
+     16: mean 0.08514  rel std   3.7%  r000  -0.7
+     32: mean 0.1005  rel std   2.2%  r000  -1.1
+     64: mean 0.1157  rel std   2.0%  r000  -1.3
+    128: mean 0.123  rel std   1.3%  r000  +0.2
+    256: mean 0.1231  rel std   1.6%  r000  +1.1
+    512: mean 0.1297  rel std   2.4%  r000  +1.3
+   1024: mean 0.1708  rel std   3.6%  r000  +1.1
+peaks above 3/5/10 sigma(r000): mean 36351 rel std 5.8% r000 -0.4 | mean 18640 rel std 6.6% r000 -0.3 | mean 6523 rel std 8.1% r000 -0.2
+C_l bands: l, rel std over realizations, r000 deviation in sigma
+  2-2:  52.9%   -0.9
+  3-3:  73.3%   -1.1
+  4-5:  16.0%   -0.6
+  6-8:  19.9%   -1.0
+  9-13:  21.7%   -0.1
+  14-19:  14.4%   -0.2
+  20-29:  14.8%   -0.3
+  30-43:  14.5%   +0.4
+  44-64:  16.7%   -0.3
+  65-94:  17.3%   -0.2
+  95-139:  15.4%   -0.2
+  140-205:  13.9%   +0.1
+  206-302:  13.3%   +0.2
+  303-445:  12.5%   +0.1
+  446-655:  11.8%   +0.1
+  656-964:  11.2%   +0.1
+  965-1418:  10.3%   -0.0
+  1419-2087:   9.2%   -0.1
+  2088-3071:   8.5%   -0.1
+== Campeti A100, 2500 it: deviation of the members from r000 in cosmic sigma of the realizations, median [min, max]
+      8 | variance kappa  -0.6 [ -1.6, +0.8] | kurtosis kappa  -1.3 [ -2.7, -0.5] | variance gauss  -1.0 [ -2.4, +0.3]
+     16 | variance kappa  +0.1 [ -1.4, +1.5] | kurtosis kappa  -1.3 [ -2.9, +2.2] | variance gauss  +1.8 [ -0.8, +3.9]
+     32 | variance kappa  +0.1 [ -1.7, +1.3] | kurtosis kappa  -0.6 [ -1.6,+11.2] | variance gauss  +3.9 [ +0.6, +5.2]
+     64 | variance kappa  +0.6 [ -1.4, +1.4] | kurtosis kappa  +5.7 [ -1.5,+51.5] | variance gauss  +3.9 [ +1.5, +5.6]
+    128 | variance kappa  -0.5 [ -1.8, +1.2] | kurtosis kappa  +4.7 [ -2.9,+109.9] | variance gauss  +1.6 [ -2.5, +5.7]
+    256 | variance kappa  -0.4 [ -1.8, +1.8] | kurtosis kappa +12.7 [ -3.2,+242.8] | variance gauss  +1.1 [ -3.0, +2.7]
+    512 | variance kappa  -0.3 [ -1.5, +1.3] | kurtosis kappa +10.7 [ -3.7,+231.7] | variance gauss  +0.1 [ -1.4, +1.1]
+   1024 | variance kappa  +2.6 [ +1.0, +4.1] | kurtosis kappa +10.7 [ -3.5,+112.4] | variance gauss  -4.9 [ -5.6, -4.3]
+  peaks 3/5/10:  +1.2 [ -1.3, +3.2] |  +0.1 [ -2.3, +2.2] |  +0.3 [ -1.2, +1.4]
+  C_l bands l >= 31: median |z| 0.4, max |z| 3.7
