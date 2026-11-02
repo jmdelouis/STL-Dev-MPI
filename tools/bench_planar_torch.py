@@ -31,6 +31,7 @@ def main():
     p.add_argument("--nbatch", type=int, default=10)
     p.add_argument("--threads", type=int, default=0)
     p.add_argument("--evals", type=int, default=5)
+    p.add_argument("--no-ps", action="store_true", help="ScatCov only (compute_PS=False)")
     p.add_argument("--out")
     a = p.parse_args()
     if a.threads:
@@ -61,13 +62,14 @@ def main():
 
     Synthesis.optimize_lbfgs = timed
     t0 = time.perf_counter()
-    Synthesis.synthesize_from_maps(data, nbatch=a.nbatch, pbc_running=True, max_iter=1, verbose=False)
+    Synthesis.synthesize_from_maps(data, nbatch=a.nbatch, pbc_running=True, max_iter=1, verbose=False, compute_PS=not a.no_ps)
     total = time.perf_counter() - t0
     report = dict(
         target=a.target,
         shape=list(target.shape[1:]),
         ntarget=a.ntarget,
         nbatch=a.nbatch,
+        power_spectrum=not a.no_ps,
         device=device,
         threads=torch.get_num_threads(),
         torch=torch.__version__,

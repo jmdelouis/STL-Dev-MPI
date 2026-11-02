@@ -26,6 +26,8 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --bins N            power-spectrum bins (default 2^(log2(min) - 4); 0: none)
   --w-sc X --w-ps X --w-mf X   ensemble block weights (default 1)
   --niter N           L-BFGS iterations (default 100), --history N (default 50)
+  --warm N            first N iterations on the stldev loss (ensemble mode:
+                      a well-conditioned start), then --niter on the ensemble
   --init PATH         initial images (standardised units), .npy [B, (C,) H, W]
   --seed N            seed of the initial white noise (default 26)
   --bench K           only time K evaluations of the loss and gradient
@@ -47,6 +49,7 @@ struct Args {
     bins: Option<usize>,
     weights: [f64; 3],
     niter: usize,
+    warm: usize,
     history: usize,
     init: Option<PathBuf>,
     seed: u64,
@@ -67,6 +70,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         bins: None,
         weights: [1.0; 3],
         niter: 100,
+        warm: 0,
         history: 50,
         init: None,
         seed: 26,
@@ -99,6 +103,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--w-mf" => a.weights[2] = num(it.next(), k)?,
             "--niter" => a.niter = num(it.next(), k)?,
             "--history" => a.history = num(it.next(), k)?,
+            "--warm" => a.warm = num(it.next(), k)?,
             "--init" => a.init = Some(PathBuf::from(it.next().ok_or("--init needs a path")?)),
             "--seed" => a.seed = num(it.next(), k)?,
             "--bench" => a.bench = num(it.next(), k)?,
@@ -196,11 +201,11 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         return Ok(report);
     }
     let (f_init, m_init) = obj.batch_features(&u);
-    let opts = LbfgsOptions { lr: 1.0, max_iter: a.niter, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
     let mut history = Vec::new();
     let mut times = Vec::new();
     let t1 = Instant::now();
-    let evals = {
+    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>| {
+        let opts = LbfgsOptions { lr: 1.0, max_iter: niter, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
         let mut f = |x: &[f64]| {
             let t = Instant::now();
             let r = obj.loss_and_grad(x);
@@ -211,8 +216,18 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
             }
             r
         };
-        minimize(&mut u, &opts, &Local, &mut f)
+        minimize(u, &opts, &Local, &mut f)
     };
+    let mut warm_history = Vec::new();
+    let mut evals = 0;
+    if a.warm > 0 && cfg.mode != Mode::StlDev {
+        let mut wc = cfg.clone();
+        wc.mode = Mode::StlDev;
+        let warm = PlanarObjective::new(wc, &t)?;
+        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history);
+        report["warm_loss_history"] = serde_json::json!(warm_history);
+    }
+    evals += lbfgs(&obj, a.niter, &mut u, &mut history);
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
     report["evaluations"] = serde_json::json!(evals);
