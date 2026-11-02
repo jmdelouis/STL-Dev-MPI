@@ -517,3 +517,252 @@ impl GpuPlanar {
         (s, self.gpu.download(&g))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fourier terms on the device: spectrum in Gaussian rings and Minkowski
+// functionals (stl_core::planar::spectrum and the Minkowski block of stl-cli).
+// ---------------------------------------------------------------------------
+
+use crate::cufft::{cufft, CuFft, Handle, FORWARD, INVERSE};
+use crate::harmonic::pixel_sum;
+use std::sync::Mutex;
+use stl_core::planar::spectrum::{GaussianRings, CUT};
+
+/// Unnormalised complex 2D FFT of `P` interleaved planes `H x W`: rows,
+/// transposition, columns, transposition (cuFFT plans per plane count).
+pub struct GpuFft2 {
+    gpu: Arc<Gpu>,
+    pub h: usize,
+    pub w: usize,
+    fft: &'static CuFft,
+    plans: Mutex<HashMap<usize, (Handle, Handle, CudaSlice<u8>)>>,
+}
+
+impl GpuFft2 {
+    pub fn new(gpu: Arc<Gpu>, h: usize, w: usize) -> Result<Self, String> {
+        Ok(GpuFft2 { gpu, h, w, fft: cufft()?, plans: Mutex::new(HashMap::new()) })
+    }
+
+    fn plans(&self, planes: usize) -> (Handle, Handle) {
+        let mut map = self.plans.lock().unwrap();
+        let e = map.entry(planes).or_insert_with(|| {
+            let stream = self.gpu.stream.cu_stream() as *mut std::ffi::c_void;
+            let (rows, br) = self.fft.plan_z2z(self.w, planes * self.h, self.w, stream).unwrap_or_else(|e| panic!("{e}"));
+            let (cols, bc) = self.fft.plan_z2z(self.h, planes * self.w, self.h, stream).unwrap_or_else(|e| panic!("{e}"));
+            let work = self.gpu.zeros::<u8>(br.max(bc).max(16));
+            let wp = self.gpu.ptr(&work);
+            unsafe {
+                self.fft.set_work_area(rows, wp).unwrap_or_else(|e| panic!("{e}"));
+                self.fft.set_work_area(cols, wp).unwrap_or_else(|e| panic!("{e}"));
+            }
+            (rows, cols, work)
+        });
+        (e.0, e.1)
+    }
+
+    /// In place, `x` interleaved `[planes, H, W]`.
+    pub fn run(&self, x: &CudaSlice<f64>, planes: usize, inverse: bool) {
+        let (rows, cols) = self.plans(planes);
+        let dir = if inverse { INVERSE } else { FORWARD };
+        let (h, w) = (self.h, self.w);
+        let g = &self.gpu;
+        let t = g.zeros::<f64>(x.len());
+        unsafe { self.fft.exec_z2z(rows, g.ptr(x), dir) }.unwrap_or_else(|e| panic!("{e}"));
+        g.launch1("pl_transpose", planes * h * w, &[g.a(x), h.into(), w.into(), planes.into(), g.a(&t)]);
+        unsafe { self.fft.exec_z2z(cols, g.ptr(&t), dir) }.unwrap_or_else(|e| panic!("{e}"));
+        g.launch1("pl_transpose", planes * h * w, &[g.a(&t), w.into(), h.into(), planes.into(), g.a(x)]);
+    }
+
+    /// `(x, 0)` interleaved for `n` real values at `x`.
+    fn complex(&self, x: Arg, n: usize) -> CudaSlice<f64> {
+        let out = self.gpu.zeros::<f64>(2 * n);
+        self.gpu.launch1("pl_to_complex", n, &[x, n.into(), self.gpu.a(&out)]);
+        out
+    }
+}
+
+impl Drop for GpuFft2 {
+    fn drop(&mut self) {
+        for (_, (r, c, _)) in self.plans.lock().unwrap().drain() {
+            self.fft.destroy(r);
+            self.fft.destroy(c);
+        }
+    }
+}
+
+/// What the cotangent of the terms needs (device buffers).
+pub struct TermsState {
+    /// Orthonormal transforms of the planes, interleaved `[P, H, W]`.
+    xs: Option<CudaSlice<f64>>,
+    /// Standardised planes `[P, N]` and derivative maps `[P, 5, N]`.
+    u: Option<CudaSlice<f64>>,
+    d: Option<CudaSlice<f64>>,
+    floor: Vec<f64>,
+    sigma: Vec<f64>,
+}
+
+/// Spectrum and Minkowski functionals of a batch of `batch` images of
+/// `channels` channels on the device.
+pub struct GpuPlanarTerms {
+    gpu: Arc<Gpu>,
+    pub batch: usize,
+    pub channels: usize,
+    fft: GpuFft2,
+    /// Ring tables: log centres, log widths, log f per pixel; bin norms on the host.
+    rings: Option<(CudaSlice<f64>, CudaSlice<f64>, CudaSlice<f64>, Vec<f64>)>,
+    /// Minkowski thresholds, their count and smoothing (`None`: no functionals).
+    mk: Option<(CudaSlice<f64>, usize, f64)>,
+}
+
+impl GpuPlanarTerms {
+    pub fn new(gpu: Arc<Gpu>, h: usize, w: usize, channels: usize, batch: usize, rings: Option<&GaussianRings>, minkowski: Option<(&[f64], f64)>) -> Result<Self, String> {
+        let rings = rings.map(|r| {
+            let (lc, ls, lr, norm) = r.tables();
+            (gpu.upload(lc), gpu.upload(ls), gpu.upload(lr), norm.to_vec())
+        });
+        let mk = minkowski.map(|(nu, eps)| (gpu.upload(nu), nu.len(), eps));
+        Ok(GpuPlanarTerms { fft: GpuFft2::new(gpu.clone(), h, w)?, gpu, batch, channels, rings, mk })
+    }
+
+    fn npix(&self) -> usize {
+        self.fft.h * self.fft.w
+    }
+
+    /// Plane indices `(a, b)` of every image and channel pair `c1 <= c2`.
+    fn pair_planes(&self) -> Vec<i32> {
+        let c = self.channels;
+        let pairs: Vec<(usize, usize)> = (0..c).flat_map(|a| (a..c).map(move |b| (a, b))).collect();
+        (0..self.batch).flat_map(|b| pairs.iter().flat_map(move |&(p, q)| [(b * c + p) as i32, (b * c + q) as i32])).collect()
+    }
+
+    /// Spectra `[B, pairs x bins]`, Minkowski values `[B, C x 3K]` of the
+    /// batch `x` `[B, C, H, W]` and the state of the cotangent.
+    pub fn forward(&self, x: &CudaSlice<f64>) -> (Vec<C64>, Vec<f64>, TermsState) {
+        let g = &self.gpu;
+        let n = self.npix();
+        let planes = self.batch * self.channels;
+        let mut st = TermsState { xs: None, u: None, d: None, floor: Vec::new(), sigma: Vec::new() };
+        let mut ps = Vec::new();
+        if let Some((lc, ls, lr, norm)) = &self.rings {
+            let xs = self.fft.complex(g.a(x), planes * n);
+            self.fft.run(&xs, planes, false);
+            g.launch1("pl_cscale", planes * n, &[g.a(&xs), (1.0 / (n as f64).sqrt()).into(), (planes * n).into()]);
+            let idx = self.pair_planes();
+            let q = idx.len() / 2;
+            let nb = norm.len();
+            let didx = g.upload(&idx);
+            let chunks = n.div_ceil(CHUNK);
+            let out = g.zeros::<f64>(q * nb * chunks * 2);
+            g.launch3("pl_rings", (chunks as u32, nb as u32, q as u32), 256, &[g.a(&xs), g.a(&didx), g.a(lr), g.a(lc), g.a(ls), CUT.into(), n.into(), CHUNK.into(), g.a(&out)]);
+            let h = g.download(&out);
+            for qq in 0..q {
+                for k in 0..nb {
+                    let (mut re, mut im) = (0.0, 0.0);
+                    for c in 0..chunks {
+                        re += h[((qq * nb + k) * chunks + c) * 2];
+                        im += h[((qq * nb + k) * chunks + c) * 2 + 1];
+                    }
+                    ps.push(C64::new(re, im) / norm[k]);
+                }
+            }
+            st.xs = Some(xs);
+        }
+        let mut mf = Vec::new();
+        if let Some((nu, k, eps)) = &self.mk {
+            let k = *k;
+            let u = g.zeros::<f64>(planes * n);
+            for p in 0..planes {
+                let at = g.at(x, p * n);
+                let mean = pixel_sum(g, at, at, n, 0.0, 0) / n as f64;
+                let sigma = (pixel_sum(g, at, at, n, mean, 1) / n as f64 + 1e-12).sqrt();
+                g.launch1("mk_standard", n, &[at, n.into(), mean.into(), sigma.into(), g.at(&u, p * n)]);
+                st.sigma.push(sigma);
+            }
+            let uc = self.fft.complex(g.a(&u), planes * n);
+            self.fft.run(&uc, planes, false);
+            let dc = g.zeros::<f64>(2 * 5 * planes * n);
+            g.launch1("pl_spec_mult", planes * n, &[g.a(&uc), self.fft.h.into(), self.fft.w.into(), planes.into(), 0i32.into(), 5i32.into(), 0i32.into(), g.a(&dc)]);
+            self.fft.run(&dc, 5 * planes, true);
+            let d = g.zeros::<f64>(5 * planes * n);
+            g.launch1("pl_real_part", 5 * planes * n, &[g.a(&dc), (1.0 / n as f64).into(), (5 * planes * n).into(), g.a(&d), 0i32.into()]);
+            let tau = 2.0 * std::f64::consts::PI;
+            let cn = 1.0 / ((2.0 * std::f64::consts::PI).sqrt() * eps);
+            let (mag, curv) = (g.zeros::<f64>(n), g.zeros::<f64>(n));
+            let chunks = n.div_ceil(CHUNK);
+            for p in 0..planes {
+                let dp = p * 5 * n;
+                let floor = 1e-4 * pixel_sum(g, g.at(&d, dp), g.at(&d, dp + n), n, 0.0, 2) / n as f64 + 1e-12;
+                g.launch1("mk_geom", n, &[g.at(&d, dp), n.into(), floor.into(), g.a(&mag), g.a(&curv)]);
+                let out = g.zeros::<f64>(chunks * k * 3);
+                g.launch("mk_forward", (chunks as u32, k as u32), 256, &[g.at(&u, p * n), g.a(&mag), g.a(&curv), n.into(), CHUNK.into(), g.a(nu), (*eps).into(), cn.into(), tau.into(), g.a(&out)]);
+                let h = g.download(&out);
+                let mut v = vec![0.0; 3 * k];
+                for c in 0..chunks {
+                    for t in 0..k {
+                        for f in 0..3 {
+                            v[f * k + t] += h[(c * k + t) * 3 + f];
+                        }
+                    }
+                }
+                mf.extend(v.iter().map(|a| a / n as f64));
+                st.floor.push(floor);
+            }
+            st.u = Some(u);
+            st.d = Some(d);
+        }
+        (ps, mf, st)
+    }
+
+    /// Adds into `out` `[B, C, H, W]` the map cotangent of the spectra
+    /// (`gps`) and the Minkowski values (`gmf`).
+    pub fn vjp(&self, st: &TermsState, gps: &[C64], gmf: &[f64], out: &CudaSlice<f64>) {
+        let g = &self.gpu;
+        let n = self.npix();
+        let planes = self.batch * self.channels;
+        if let (Some((lc, ls, lr, norm)), Some(xs)) = (&self.rings, &st.xs) {
+            let nb = norm.len();
+            let idx = self.pair_planes();
+            let q = idx.len() / 2;
+            let gs: Vec<f64> = gps.chunks(nb).flat_map(|c| c.iter().zip(norm).flat_map(|(v, m)| [v.re / m, v.im / m])).collect();
+            assert_eq!(gs.len(), 2 * q * nb);
+            let (didx, dg) = (g.upload(&idx), g.upload(&gs));
+            let gx = g.zeros::<f64>(2 * planes * n);
+            g.launch1(
+                "pl_rings_vjp",
+                planes * n,
+                &[g.a(xs), g.a(&didx), (q as i32).into(), g.a(&dg), (nb as i32).into(), g.a(lr), g.a(lc), g.a(ls), CUT.into(), n.into(), planes.into(), g.a(&gx)],
+            );
+            self.fft.run(&gx, planes, true);
+            g.launch1("pl_real_part", planes * n, &[g.a(&gx), (1.0 / (n as f64).sqrt()).into(), (planes * n).into(), g.a(out), 1i32.into()]);
+        }
+        if let (Some((nu, k, eps)), Some(u), Some(d)) = (&self.mk, &st.u, &st.d) {
+            let k = *k;
+            let tau = 2.0 * std::f64::consts::PI;
+            let cn = 1.0 / ((2.0 * std::f64::consts::PI).sqrt() * eps);
+            let gu = g.zeros::<f64>(planes * n);
+            let gd = g.zeros::<f64>(5 * planes * n);
+            for p in 0..planes {
+                let c = g.upload(&gmf[p * 3 * k..][..3 * k]);
+                g.launch1(
+                    "mk_vjp",
+                    n,
+                    &[g.at(u, p * n), g.at(d, p * 5 * n), n.into(), st.floor[p].into(), g.a(nu), (k as i32).into(), (*eps).into(), cn.into(), tau.into(), g.a(&c), g.at(&gu, p * n), g.at(&gd, p * 5 * n)],
+                );
+            }
+            let gdc = self.fft.complex(g.a(&gd), 5 * planes * n);
+            self.fft.run(&gdc, 5 * planes, false);
+            let back = g.zeros::<f64>(2 * planes * n);
+            g.launch1("pl_spec_mult_sum", planes * n, &[g.a(&gdc), self.fft.h.into(), self.fft.w.into(), planes.into(), g.a(&back)]);
+            self.fft.run(&back, planes, true);
+            g.launch1("pl_real_part", planes * n, &[g.a(&back), (1.0 / n as f64).into(), (planes * n).into(), g.a(&gu), 1i32.into()]);
+            let fin = g.zeros::<f64>(n);
+            for p in 0..planes {
+                let (gp, up) = (g.at(&gu, p * n), g.at(u, p * n));
+                let mg = pixel_sum(g, gp, gp, n, 0.0, 0) / n as f64;
+                let mu = pixel_sum(g, gp, up, n, 0.0, 3) / n as f64;
+                g.launch1("mk_final", n, &[gp, up, n.into(), mg.into(), mu.into(), st.sigma[p].into(), g.a(&fin)]);
+                g.launch1("pl_add", n, &[g.at(out, p * n), g.a(&fin), n.into()]);
+            }
+        }
+    }
+}

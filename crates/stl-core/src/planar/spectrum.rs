@@ -153,7 +153,7 @@ fn torch_linspace(start: f64, end: f64, steps: usize) -> Vec<f64> {
 
 /// Ring weights below `exp(-CUT^2 / 2)` (about 5e-32 at 12 widths) are
 /// not computed: their contribution is far below the rounding of a bin.
-const CUT: f64 = 12.0;
+pub const CUT: f64 = 12.0;
 
 /// Pixels per chunk of the threaded passes (sums added in chunk order).
 const CHUNK: usize = 1 << 15;
@@ -246,6 +246,12 @@ impl GaussianRings {
                 f(k, ((-0.5 * (d * d)) / (self.ls[k] * self.ls[k])).exp());
             }
         }
+    }
+
+    /// `(log centres, log widths, log f per pixel, bin norms)`, for a device
+    /// implementation of the same rings.
+    pub fn tables(&self) -> (&[f64], &[f64], &[f64], &[f64]) {
+        (&self.lc, &self.ls, &self.lr, &self.norm)
     }
 
     /// Number of values for `channels` channels: pairs `c1 <= c2`, bins.

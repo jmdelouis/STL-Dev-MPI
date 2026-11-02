@@ -31,9 +31,10 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --init PATH         initial images (standardised units), .npy [B, (C,) H, W]
   --seed N            seed of the initial white noise (default 26)
   --bench K           only time K evaluations of the loss and gradient
-  --gpu               ScatCov of the batch on a CUDA device (feature gpu;
-                      STL_GPU_DEVICE, default 0); --tile as on the CPU (a tile
-                      larger than the image: whole levels resident)
+  --gpu               the running batch on a CUDA device (feature gpu;
+                      STL_GPU_DEVICE, default 0): ScatCov, spectra, Minkowski;
+                      --tile as on the CPU (a tile larger than the image:
+                      whole levels resident)
   --out PREFIX        outputs: PREFIX_maps.npy [B, C, H, W] (target units),
                       PREFIX_features_{target,init,final}.npy [*, n, 2],
                       PREFIX_mf_{target,init,final}.npy, PREFIX.json
@@ -275,8 +276,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
 #[cfg(feature = "gpu")]
 fn attach_gpu(obj: &mut PlanarObjective, batch: usize) -> Result<(), String> {
     let dev = std::env::var("STL_GPU_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    obj.use_gpu(std::sync::Arc::new(stl_gpu::Gpu::new(dev)?), batch);
-    Ok(())
+    obj.use_gpu(std::sync::Arc::new(stl_gpu::Gpu::new(dev)?), batch)
 }
 
 #[cfg(not(feature = "gpu"))]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"));
 
-const KERNELS: [&str; 81] = [
+const KERNELS: [&str; 89] = [
     "ring_thetas",
     "geom_build",
     "geom_pack",
@@ -95,6 +95,14 @@ const KERNELS: [&str; 81] = [
     "pl_dec",
     "pl_dec_adj",
     "pl_scale",
+    "pl_to_complex",
+    "pl_transpose",
+    "pl_cscale",
+    "pl_real_part",
+    "pl_spec_mult",
+    "pl_spec_mult_sum",
+    "pl_rings",
+    "pl_rings_vjp",
 ];
 
 /// Compiles the kernels to a native binary for the device (`sm_XY`): a
@@ -333,7 +341,12 @@ impl Gpu {
 
     /// Launches `name` on a `(grid.0, grid.1)` grid of `block` threads.
     pub fn launch(&self, name: &str, grid: (u32, u32), block: u32, args: &[Arg]) {
-        if grid.0 == 0 || grid.1 == 0 {
+        self.launch3(name, (grid.0, grid.1, 1), block, args)
+    }
+
+    /// Launches `name` on a three-dimensional grid of `block` threads.
+    pub fn launch3(&self, name: &str, grid: (u32, u32, u32), block: u32, args: &[Arg]) {
+        if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
             return;
         }
         let f = &self.funcs[name];
@@ -351,7 +364,7 @@ impl Gpu {
         unsafe {
             result::launch_kernel(
                 f.cu_function(),
-                (grid.0, grid.1, 1),
+                grid,
                 (block, 1, 1),
                 0,
                 self.stream.cu_stream() as sys::CUstream,

@@ -72,3 +72,34 @@ fn ensemble_gradient() {
     let fd = (at(h) - at(-h)) / (2.0 * h);
     assert!((fd - slope).abs() <= 1e-5 * slope.abs().max(1e-3), "slope {slope} vs finite differences {fd}");
 }
+
+/// The objective with the running batch on a device (ScatCov, spectra and
+/// Minkowski functionals there) equals the host objective to 1e-12.
+#[cfg(feature = "gpu")]
+#[test]
+fn device_objective_matches_host() {
+    let gpu = match stl_gpu::Gpu::new(0) {
+        Ok(g) => std::sync::Arc::new(g),
+        Err(e) if std::env::var_os("STL_GPU_SKIP").is_some() => return eprintln!("no device, skipped: {e}"),
+        Err(e) => panic!("no CUDA device ({e}); set STL_GPU_SKIP=1 to skip"),
+    };
+    let (size, bt, b) = (32, 4, 3);
+    let target: Vec<f64> = white_noise(bt * size * size, 7).iter().map(|v| (0.5 * v).exp()).collect();
+    let (t, _, _) = standardize(&nyquist_filter(&target, size, size), 1, size * size);
+    let u = nyquist_filter(&white_noise(b * size * size, 3), size, size);
+    for mode in [Mode::StlDev, Mode::Ensemble] {
+        for tile in [size, 8] {
+            let mut cfg = Config::new(size, size, 1, mode);
+            cfg.tile = tile;
+            let host = PlanarObjective::new(cfg.clone(), &t).unwrap();
+            let mut dev = PlanarObjective::new(cfg, &t).unwrap();
+            dev.use_gpu(gpu.clone(), b).unwrap();
+            let (lh, gh) = host.loss_and_grad(&u);
+            let (ld, gd) = dev.loss_and_grad(&u);
+            assert!((lh - ld).abs() <= 1e-12 * lh.abs(), "{mode:?} tile {tile}: loss {lh} vs {ld}");
+            let scale = gh.iter().fold(0f64, |m, v| m.max(v.abs()));
+            let err = gh.iter().zip(&gd).fold(0f64, |m, (a, b)| m.max((a - b).abs()));
+            assert!(err <= 1e-12 * scale, "{mode:?} tile {tile}: gradient {:e}", err / scale);
+        }
+    }
+}
