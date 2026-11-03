@@ -58,7 +58,8 @@ run:
 both:
   --block-pixels N      CPU engine block (default 16384)
   --ranks N             thread ranks (builds without MPI)
-  --gpu, --gpu-conv F, --gpu-fields F, --gpu-cache C, --gpu-block-rows N   as stl-synth
+  --gpu, --gpu-conv F, --gpu-fields F, --gpu-cache C, --geometry-cache P, --gpu-block-rows N
+                        as stl-synth
   --quiet
 ";
 
@@ -87,6 +88,7 @@ pub struct Args {
     pub gpu_conv: Option<String>,
     pub gpu_fields: Option<String>,
     pub gpu_cache: String,
+    pub geometry_cache: Option<String>,
     pub gpu_block_rows: usize,
     /// `--harmonic`: `Some(true)` on the device.
     pub harmonic_gpu: Option<bool>,
@@ -141,6 +143,7 @@ impl Args {
                 "--gpu-conv" => a.gpu_conv = Some(it.next().ok_or("--gpu-conv needs a value")?.clone()),
                 "--gpu-fields" => a.gpu_fields = Some(it.next().ok_or("--gpu-fields needs a value")?.clone()),
                 "--gpu-cache" => a.gpu_cache = it.next().ok_or("--gpu-cache needs a value")?.clone(),
+                "--geometry-cache" => a.geometry_cache = Some(it.next().ok_or("--geometry-cache needs a value")?.clone()),
                 "--gpu-block-rows" => a.gpu_block_rows = num(it.next(), k)?,
                 "--harmonic" => {
                     a.harmonic_gpu = Some(match it.next().map(|s| s.as_str()) {
@@ -206,8 +209,12 @@ mod device {
         batch: usize,
     ) -> Result<(GpuEvaluator<'a>, serde_json::Value, Arc<Gpu>), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
-        let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        let (cache, host) = match &args.geometry_cache {
+            Some(p) => GeometryCache::policy(p).ok_or("--geometry-cache: 'auto', 'device', 'host' or 'off'")?,
+            None => (GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?, false),
+        };
+        let host_cache_bytes = if host { stl_gpu::host_cache_budget() } else { 0 };
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }

@@ -8,12 +8,13 @@ use num_complex::Complex64;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use stl_core::engine::EngineConfig;
-use stl_core::lbfgs::LbfgsOptions;
+use stl_core::lbfgs::{LbfgsOptions, Preconditioner};
 use stl_core::local::LocalGeometry;
 use stl_core::plan::{build_plan, Family};
+use stl_core::precond::Bands;
 use stl_core::stencil::Gauge;
 use stl_mpi::io::{map_len, nside_of, read_map_range, SlicedMap};
-use stl_mpi::synthesis::{ergodic_weights, run_lbfgs_with, Ensemble, Objective};
+use stl_mpi::synthesis::{ergodic_weights, run_lbfgs_preconditioned, Ensemble, Objective};
 use stl_mpi::Comm;
 
 #[cfg(feature = "gpu")]
@@ -100,6 +101,12 @@ stl-synth --target MAP [options]
   --freeze-nside M      hold the means of the map over the pixels of nside M at those of the
                         initial map: only the scales finer than M move (coarse-to-fine steps)
   --history-size N      L-BFGS history (default 10)
+  --precondition P      initial inverse Hessian of L-BFGS, h sum_j alpha_j B_j over the bands B_j of
+                        the map (details of the groups of 4^j NESTED pixels, j < J, and their means
+                        at level J; symmetric positive definite, the map stays the variable):
+                        'none' (default, torch's h I), 'bands:G' (alpha_j = 4^(G j)), 'power'
+                        (alpha_j the target's band energy per degree of freedom over the finest
+                        band's) or 'auto' (per-band s.y / y.y of the last L-BFGS pair, bounded)
   --out PREFIX          writes PREFIX.json, PREFIX_synthesis.fits, PREFIX_synthesis_nested.npy,
                         PREFIX_target.fits (default synthesis_rust_nside<N>); with --ensemble B > 1,
                         PREFIX_mMMM_synthesis_nested.npy and _standardized.npy per member
@@ -110,6 +117,13 @@ stl-synth --target MAP [options]
   --gpu-cache C         convolution geometry kept on the device between sweeps: 'full', 'transposition'
                         (the weights are recomputed), 'none', or 'auto' (default: full if it fits,
                         else transposition); budget from the device memory or STL_GPU_CACHE_MB
+  --geometry-cache P    where the convolution geometry is kept between evaluations (overrides
+                        --gpu-cache): 'device' (as --gpu-cache full), 'host' (masks / transposition on
+                        the device, weights in page-locked host memory, uploaded at every use), 'auto'
+                        (device when it fits, else the weights of the blocks the device cannot hold on
+                        the host, the rest recomputed; host budget STL_HOST_CACHE_MB, else half of
+                        MemAvailable per node) or 'off' (rebuilt at every evaluation); same results
+                        to the bit
   --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
                         docs/dia_convolution.md) or 'stencils' (bound stencils and their
                         transposition); default STL_GPU_CONV, else dia
@@ -183,12 +197,16 @@ pub struct Args {
     pub marginal_weight: f64,
     pub niter: usize,
     pub history_size: usize,
+    /// `--precondition` (`None`: none).
+    pub precondition: Option<String>,
     pub out: Option<String>,
     pub ranks: usize,
     pub quiet: bool,
     pub gpu: bool,
     pub gpu_block_rows: usize,
     pub gpu_cache: String,
+    /// `--geometry-cache` (`None`: `--gpu-cache` without host copies).
+    pub geometry_cache: Option<String>,
     /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
     pub gpu_conv: Option<String>,
     /// `--gpu-fields` (`None`: `STL_GPU_FIELDS`, else auto).
@@ -233,12 +251,14 @@ impl Args {
             marginal_weight: 0.0,
             niter: 50,
             history_size: 10,
+            precondition: None,
             out: None,
             ranks: 1,
             quiet: false,
             gpu: false,
             gpu_block_rows: 0,
             gpu_cache: "auto".into(),
+            geometry_cache: None,
             gpu_conv: None,
             gpu_fields: None,
             gpu_terms_host: false,
@@ -338,6 +358,15 @@ impl Args {
                 "--freeze-nside" => a.freeze_nside = Some(num(it.next(), k)?),
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--history-size" => a.history_size = num(it.next(), k)?,
+                "--precondition" => {
+                    let v = it.next().ok_or("--precondition needs a value")?;
+                    let ok = matches!(v.as_str(), "none" | "power" | "auto")
+                        || v.strip_prefix("bands:").and_then(|g| g.parse::<f64>().ok()).is_some_and(f64::is_finite);
+                    if !ok {
+                        return Err("--precondition is 'none', 'bands:GAMMA', 'power' or 'auto'".into());
+                    }
+                    a.precondition = (v != "none").then(|| v.clone());
+                }
                 "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
                 "--ranks" => a.ranks = num(it.next(), k)?,
                 "--quiet" => a.quiet = true,
@@ -347,6 +376,12 @@ impl Args {
                     a.gpu_cache = match it.next().map(String::as_str) {
                         Some(v @ ("auto" | "full" | "transposition" | "none")) => v.to_string(),
                         _ => return Err("--gpu-cache is 'auto', 'full', 'transposition' or 'none'".into()),
+                    }
+                }
+                "--geometry-cache" => {
+                    a.geometry_cache = match it.next().map(String::as_str) {
+                        Some(v @ ("auto" | "device" | "host" | "off")) => Some(v.to_string()),
+                        _ => return Err("--geometry-cache is 'auto', 'device', 'host' or 'off'".into()),
                     }
                 }
                 "--gpu-conv" => {
@@ -723,6 +758,28 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     };
 
     let opts = LbfgsOptions { max_iter: args.niter, history_size: args.history_size, ..Default::default() };
+    // --precondition: bands down to the coarsest pyramid level (J), or as
+    // deep as every rank's range is aligned.
+    let mut precond = match &args.precondition {
+        None => None,
+        Some(p) => {
+            let max_depth = cfg.levels().min(nside.trailing_zeros() as usize);
+            let reduce = stl_mpi::synthesis::CommReduce(gcomm);
+            let depth = Bands::aligned_depth(&reduce, s, e, max_depth);
+            Some(match p.as_str() {
+                "power" => Bands::target_power(&reduce, &target, depth),
+                "auto" => Bands::curvature(depth),
+                g => Bands::power_law(depth, g["bands:".len()..].parse().unwrap()),
+            })
+        }
+    };
+    let precond_info = match &precond {
+        None => serde_json::json!("none"),
+        Some(b) => serde_json::json!({"spec": args.precondition, "depth": b.depth, "alpha_initial": b.alpha}),
+    };
+    if let (Some(b), true) = (&precond, root) {
+        eprintln!("[stl-synth] precondition {}: {} bands, alpha {:?}", args.precondition.as_deref().unwrap(), b.depth + 1, b.alpha);
+    }
     let calls_before = obj.exchange_calls();
     let started = Instant::now();
     let print = |i: usize, loss: f64, t: f64| {
@@ -761,7 +818,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             tick("host_evaluations", t);
             out
         };
-        device_history = Some(run_lbfgs_with(comm, &mut x, &opts, f, print));
+        device_history = Some(run_lbfgs_preconditioned(comm, &mut x, &opts, precond.as_mut().map(|p| p as &mut dyn Preconditioner), f, print));
     }
     let history = if let Some(h) = device_history {
         h
@@ -774,7 +831,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             tick("host_evaluations", t);
             out
         };
-        run_lbfgs_with(comm, &mut x, &opts, f, print)
+        run_lbfgs_preconditioned(comm, &mut x, &opts, precond.as_mut().map(|p| p as &mut dyn Preconditioner), f, print)
     } else {
         let loss_and_grad = |p: &[f64]| {
             let t_eval = Instant::now();
@@ -834,7 +891,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
             tick("host_evaluations", t_eval);
             (loss, g)
         };
-        run_lbfgs_with(comm, &mut x, &opts, loss_and_grad, print)
+        run_lbfgs_preconditioned(comm, &mut x, &opts, precond.as_mut().map(|p| p as &mut dyn Preconditioner), loss_and_grad, print)
     };
     let seconds = started.elapsed().as_secs_f64();
     // L-BFGS: what the evaluations leave of the run (two-loop recursion,
@@ -999,16 +1056,19 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     }
     let device_peaks = comm.allgather_i64(device_memory.map_or(0, |m| m.0 as i64));
     #[allow(unused_mut)]
-    let mut cache_used = 0i64;
+    let (mut cache_used, mut host_used) = (0i64, 0i64);
     #[cfg(feature = "gpu")]
     if let Some(dev) = &device {
         cache_used = dev.engine().geometry_cache().2 as i64;
+        host_used = dev.engine().geometry_host().1 as i64;
     }
     let cache_used = comm.allgather_i64(cache_used);
+    let host_used = comm.allgather_i64(host_used);
     if let Some(info) = gpu_info.as_object_mut() {
         info.insert("memory_peak_bytes_per_rank".into(), serde_json::json!(device_peaks));
         info.insert("memory_total_bytes".into(), serde_json::json!(device_memory.map(|m| m.1)));
         info.insert("geometry_cache_used_bytes_per_rank".into(), serde_json::json!(cache_used));
+        info.insert("geometry_host_used_bytes_per_rank".into(), serde_json::json!(host_used));
     }
     let floor = obj.memory_floor_bytes(args.history_size);
     let floors: Vec<i64> = comm.allgather_i64(
@@ -1066,7 +1126,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         return Ok(None);
     }
     let synthesis_files: Vec<PathBuf> = (0..members).map(|m| member_file(m, "_synthesis_nested.npy")).collect();
-    let report = serde_json::json!({
+    let mut report = serde_json::json!({
         "mode": "rust-local",
         "nside": nside,
         "target": {"file": args.target, "mean": mean, "std": std},
@@ -1121,6 +1181,7 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "timers_seconds": timers,
         "mpi_calls": mpi_calls,
     });
+    report["precondition"] = precond_info;
     std::fs::write(file(".json"), serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;
     Ok(Some(report))
 }
@@ -1137,7 +1198,8 @@ stl-stats --out STATS.json [--norm MAP] [engine options] -- MAP [MAP ...]
   --norm MAP     standardise every map with the mean and std of MAP (e.g. the target), so that
                  the statistics of all the maps are in the same units; default: its own moments
   engine options of stl-synth: --J, --L, --kernel-size, --fewer, --block-pixels, --conv-chunk,
-                 --ranks, --gpu, --gpu-block-rows, --gpu-cache, --gpu-conv, --gpu-fields, --quiet
+                 --ranks, --gpu, --gpu-block-rows, --gpu-cache, --geometry-cache, --gpu-conv,
+                 --gpu-fields, --quiet
 ";
 
 /// `stl-stats`: the ScatCov statistics of `maps` (NESTED, one nside) with
@@ -1237,8 +1299,12 @@ mod gpu {
         batch: usize,
     ) -> Result<(GpuEvaluator<'a>, serde_json::Value), String> {
         let gpu = Arc::new(Gpu::for_rank(rank)?);
-        let cache = GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?;
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, ..Default::default() };
+        let (cache, host) = match &args.geometry_cache {
+            Some(p) => GeometryCache::policy(p).ok_or("--geometry-cache: unknown policy")?,
+            None => (GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?, false),
+        };
+        let host_cache_bytes = if host { stl_gpu::host_cache_budget() } else { 0 };
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }
@@ -1264,6 +1330,7 @@ mod gpu {
             "field_bytes_estimate": engine.memory_parts().0,
             "decimation_rows_bytes": engine.memory_parts().1,
             "geometry_cache_budget_bytes": engine.geometry_cache().1,
+            "geometry_host_budget_bytes": engine.geometry_host().0,
         });
         Ok((GpuEvaluator::new(engine, plan), info))
     }
