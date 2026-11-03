@@ -1,6 +1,6 @@
 # Lagrangian (deformation-based) synthesis: assessment, literature, design
 
-Status: **design and plan, nothing run yet** (3 November 2026). Sections 1–4
+Status: **design, plan and step 0 diagnostic** (3 November 2026). Sections 1–4
 are the assessment and the design; section 5 is the experimental plan to be
 agreed with the user before any implementation; results will go in section 6.
 
@@ -432,4 +432,68 @@ Step 4: results and figures here, PR (not merged).
 
 ## 6. Results
 
-(to come)
+### 6.1 Step 0 and 0b: where the pixel L-BFGS iterations go (2D, 3 November)
+
+Setup: the STL-Dev 2D example (first 10 `Turb_6` images, 256², J = 6,
+L = 4, `f64`), 10 synthesised images, `stl-synth2d --gpu` on garoupe T4s,
+1000 L-BFGS iterations (history 50), `--trace 10`. Two losses: `stldev`
+(STL-Dev's loss: batch-mean features normalised by the target S2) and
+`ensemble` (ScatCov + spectrum + Minkowski, batch mean and variance against
+the targets' scatter, cold start). Two starts: Nyquist-filtered Gaussian
+noise (`e_*`) and a random permutation of the target pixels (`p_*`,
+`tools/lagrangian/permuted_init.py`). Script `tools/lagrangian/trace_families.py`;
+figures and reports in `benchmarks/lagrangian/step0/`.
+
+Evaluations to reach a loss (running minimum):
+
+| run | 1e2 | 1 | 1e-2 | 1e-4 | 1e-6 |
+|---|---|---|---|---|---|
+| stldev, noise | 15 | 46 | 216 | 453 | 844 |
+| stldev, permuted target | 16 | 49 | 211 | 429 | 848 |
+
+| run | 1e3 | 300 | 100 | 70 | final (≈1040 evals) |
+|---|---|---|---|---|---|
+| ensemble, noise | 80 | 268 | 675 | 877 | 54.7 |
+| ensemble, permuted target | 96 | 307 | 796 | – | 72.5 |
+
+Findings:
+
+1. **With STL-Dev's loss there is no slow phase to remove.** The loss falls
+   by 10^12 in 850 evaluations. The maps have the target's filaments and
+   voids by evaluation 100 (`e_stldev_maps.png`), and every family is
+   matched at the same pace. At 256² in 2D, gathering structures in pixel
+   space is not the bottleneck.
+2. **The slow case is the ensemble loss from a cold start**, and its
+   signature is a **transfer of variance across scales**, not in space.
+   After 1000 iterations the large scales are still 70 % short in power
+   (spectrum bin 0) and 40–80 % short in S1/S2 at j = 5. The small scales
+   are 0.8–1.2 times too strong in S2 at j = 0–2. Early on (evaluation 30)
+   the small scales were 27× too strong and the large ones 97 % short. The
+   maps show the same thing: small-scale texture, no large voids or bright
+   ridges (`e_ens_maps.png`). In units of the target scatter, S4 at scale
+   gaps 0–1 and the spectrum dominate the residual
+   (`e_ens_families.png`). This matches the known cold-start stall of the
+   ensemble mode (`docs/planar_2d.md`: 145 at 500 iterations, solved by
+   `--warm 100` on the stldev loss) and the large-scale C_ℓ deficits seen in
+   the HEALPix ensembles.
+3. **A histogram-exact start alone does nothing for pixel L-BFGS.**
+   `p_stldev` follows `e_stldev` within a few percent; `p_ens` is slightly
+   worse. The pixel updates destroy the permutation's histogram within the
+   first steps, so the start's histogram is lost. Its benefit can only
+   appear if the parameterisation keeps it, as the warp does.
+
+Consequences for the design:
+
+- The target of the Lagrangian scheme is the ensemble/cold regime: moving
+  variance from small to large scales at a fixed one-point histogram. A
+  rearrangement does exactly this. Grouping existing values into coherent
+  large regions creates large-scale power without creating or destroying
+  values. Eulerian L2 must instead shrink the small-scale modes and grow the
+  large ones separately, and in the ensemble loss the large-scale
+  coefficients weigh little (their target scatter is large). Step 2
+  therefore runs on the **ensemble loss from a cold start**, with the
+  permuted-target `x0` and an incompressible multi-scale displacement.
+  The reference is pixel L-BFGS (loss 100 at 675 evaluations, 55 at about
+  1040) and the `--warm 100` recipe.
+- The transport preconditioner (step 1) acts on spatial moves at fixed
+  scale. The diagnostic does not point at that, so it moves after step 2.
