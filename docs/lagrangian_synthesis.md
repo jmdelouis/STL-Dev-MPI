@@ -51,14 +51,49 @@ gradient is smoothed by an inverse Laplacian weighted by `x`. That is exactly
    naturally. The PR #11 result is evidence that the bottleneck is
    non-linear (morphological), which is what this proposal targets.
 
+**Histogram preservation is an asset (the user's remark, 3 November).** A
+pure warp keeps the one-point histogram of `x0`. So start from a field that
+*already has the target's histogram*: a random permutation of the target's
+pixels (white spectrum, exact PDF). This removes any Gaussianisation step,
+which matters most for data with badly non-Gaussian histograms (κ, LSS,
+dust): "we have the points, we only need to know where to place them".
+The theory says this search space is exactly right:
+
+- **Brenier's polar factorisation** (Brenier 1991, CPAM 44): every field
+  with the same histogram as `x0` is `x0 ∘ s` for a measure-preserving map
+  `s`. The set of syntheses with the right histogram is therefore the orbit
+  of `x0` under measure-preserving rearrangements.
+- **Shnirelman** (1987, Math. USSR Sb. 56) and Brenier: smooth
+  volume-preserving diffeomorphisms (incompressible flows) are dense in the
+  measure-preserving maps. A divergence-free displacement, `u = ∇^⊥ ω` (a
+  stream function `ω`), therefore spans the right set in the continuum, and
+  keeps the histogram exactly.
+
+Two discrete effects break exact preservation, and the design must control
+them:
+
+1. a compressive component (`div u ≠ 0`) re-weights the areas, and thus the
+   histogram, unless the Jacobian factor compensates in the mass form;
+2. interpolation mixes neighbouring values (next item), which shrinks the
+   tails.
+
+The cheap, exact fix for both is a **histogram re-projection** at every
+re-anchoring (section 3.5): replace the values of `x0 ∘ φ` by the target's
+sorted values, in the rank order of `x0 ∘ φ`. This is O(N log N), it is the
+projection step of Portilla & Simoncelli, and it is the discrete Brenier
+rearrangement. The heavy tails then come for free, and the Eulerian residual
+`r` is needed only for what the histogram constraint cannot reach. The limit
+case of fine displacements is a discrete permutation of pixels (pair swaps).
+It is not differentiable, but it is a useful mental model: the synthesis is a
+*sorting problem in space*.
+
 **Risks, stated plainly.**
 
-- A pure warp `x0 ∘ φ` cannot create values that are not in `x0`. Without a
-  Jacobian it keeps the one-point histogram up to area weighting. Heavy
-  positive tails (κ peaks) need either the mass-conserving form (compression
-  raises amplitude, as in Zel'dovich) or an amplitude field `A`, and usually a
-  small Eulerian residual `r`. The pure Lagrangian model is therefore a
-  *preconditioner*, not a replacement: the hybrid is the real candidate.
+- A pure warp `x0 ∘ φ` cannot create values that are not in `x0`. That is
+  the point when `x0` carries the target's histogram (above). From Gaussian
+  noise, heavy positive tails (κ peaks) would need the mass-conserving form
+  (compression raises amplitude, as in Zel'dovich), an amplitude field `A` or
+  a residual `r`.
 - **Warping white noise with sub-pixel displacements smooths it.** Bilinear
   interpolation at offset `t` multiplies the variance of white noise by
   `(1 - 2t(1 - t))` per axis, so by 1/4 at half a pixel in 2D. A smooth
@@ -115,6 +150,13 @@ wavelet-moment statistics**. The pieces exist:
   *Sinkhorn distances*, NeurIPS. Peyré & Cuturi (2019), *Computational
   optimal transport*, Found. Trends ML; Santambrogio (2015), *Optimal
   Transport for Applied Mathematicians*, ch. 8.
+- Brenier (1991), *Polar factorization and monotone rearrangement of
+  vector-valued functions*, CPAM 44; Shnirelman (1987), *On the geometry of
+  the group of diffeomorphisms and the dynamics of an ideal incompressible
+  fluid*, Math. USSR Sb. 56. Every field with a given histogram is a
+  measure-preserving rearrangement of any other, and incompressible flows
+  are dense in these rearrangements: the basis of the histogram-exact
+  Lagrangian synthesis (section 1).
 - Li & Montúfar (2018), *Natural gradient via optimal transport*, Inf. Geom.
   1; Chen & Li (2020), *Optimal transport natural gradient for statistical
   manifolds with continuous sample space*, Inf. Geom. 3: the Wasserstein
@@ -233,17 +275,23 @@ or, mass-conserving,
 
     x(p) = A(p) · Σ_q x0(q) W(p − q − u(q)) + r(p)                     (push-forward)
 
-- `x0`: the anchor field (white noise, a coarse synthesis upsampled, or the
-  current iterate, section 3.5).
+- `x0`: the anchor field. The default is **a random permutation of the
+  target's pixels** (exact histogram, section 1). Other choices: white
+  noise, a coarse synthesis upsampled, or the current iterate (section 3.5).
+  With several target images, the values are drawn from the pooled target
+  pixels; in the ensemble mode, from each target image in turn.
 - `u`: the displacement in pixel units of level 0. Parameterisations, from
   the simplest:
   1. **multi-scale grid**: `u = Σ_ℓ U_ℓ θ_ℓ`, `θ_ℓ` a 2-vector field on level
      `ℓ` of the pyramid (grid `N / 2^ℓ`), `U_ℓ` bilinear upsampling to level
      0; only levels `ℓ ≥ ℓ_min` (displacements smooth at the scale `2^ℓ_min`).
      Coarse displacement plus finer corrections, as the user proposed.
-  2. **potential flow** (Zel'dovich, lensing): `u = ∇ψ`, `ψ` multi-scale as
-     above; curl-free, one scalar per point, natural on the sphere. Optional
-     curl part `∇^⊥ ω` for shear and vortical structures (turbulence).
+  2. **Helmholtz split**: `u = ∇ψ + ∇^⊥ω`, with `ψ` and `ω` multi-scale
+     scalars as above. The **incompressible part `∇^⊥ω` keeps the
+     histogram** (section 1) and is the default with a permuted `x0`. The
+     compressive part `∇ψ` (Zel'dovich, lensing) packs and spreads, and
+     changes the histogram unless the Jacobian or a re-projection compensates.
+     Both are one scalar per point, natural on the sphere.
   3. **stationary velocity field**: `φ = exp(v)` by scaling-and-squaring,
      `φ_0 = id + v / 2^K`, `φ_{k+1} = φ_k ∘ φ_k`, K = 6; diffeomorphic. Only if
      folds turn out to be a problem.
@@ -333,6 +381,8 @@ is the cheapest experiment: no new variable, about 30 lines of code.
   L-BFGS history. With `K` large this is (H); with `K = 1` and a steepest
   step it is a demons/JKO-like flow. Also the alternating variant: K_L
   Lagrangian iterations, then K_E Eulerian ones.
+  At each re-anchoring, optionally re-project `x0` onto the target's
+  histogram (rank matching, section 1): `--reproject`.
 - **(P)** pixel L-BFGS with the transport preconditioner of section 3.4,
   frozen and refreshed every K iterations.
 
@@ -357,6 +407,11 @@ example (10 × 256², `stl-synth2d`, PR #9) for 1000 iterations, logging the
 loss per family. This shows where the iterations go. If S3/S4 at large `j`
 dominate the long tail, deformation is well targeted. If S1/S2 at small `j`
 dominate, it is not.
+
+Step 0b (same day, no new code): pixel L-BFGS started from a random
+permutation of the target pixels instead of Gaussian noise (`--init`). This
+separates the effect of the histogram-exact start from that of the
+deformation in step 2.
 
 Step 1, the cheap test: scheme (P), the transport preconditioner, in
 `stl_core::precond`. About 30 lines; one comparison run on the 2D example.
