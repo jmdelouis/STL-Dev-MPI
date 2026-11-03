@@ -81,7 +81,9 @@ def main():
     gen_seconds = None
     if ck:
         gen = Generator(a.nside, ck["nside0"], ck["channels"], up=ck.get("up", "nearest")).to(dev).eval()
-        gen.load_state_dict(ck["state"])
+        if "knots_g" in ck["state"]:
+            gen.knots_g, gen.knots_x = ck["state"]["knots_g"].clone(), ck["state"]["knots_x"].clone()
+        gen.load_state_dict(ck["state"], strict=False)
         g = torch.Generator(device=dev).manual_seed(a.seed)
         maps = []
         torch.cuda.synchronize(dev)

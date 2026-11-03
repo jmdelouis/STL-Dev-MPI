@@ -65,6 +65,7 @@ def main():
     p.add_argument("--init", default=None)
     p.add_argument("--freeze", type=int, default=0)
     p.add_argument("--up", default="smooth", choices=["smooth", "nearest"])
+    p.add_argument("--marginal", action="store_true", help="output through the target's Gaussian anamorphosis")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=500)
     a = p.parse_args()
@@ -92,6 +93,8 @@ def main():
         own.update(loaded)
         gen.load_state_dict(own)
         print(f"init: {len(loaded)} tensors from {a.init}", flush=True)
+    if a.marginal:
+        gen.set_marginal(target)
     for k in range(a.freeze):
         for prm in list(gen.blocks[k].parameters()) + list(gen.heads[k].parameters()):
             prm.requires_grad_(False)

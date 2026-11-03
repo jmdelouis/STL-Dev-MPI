@@ -54,9 +54,40 @@ class Generator(nn.Module):
             cin = 1 if k == 0 else ch[k - 1] + 1
             self.blocks.append(nn.Sequential(Conv3(self.pad, cin, c), act(), Conv3(self.pad, c, c), act()))
             self.heads.append(nn.Conv2d(c, 1, 1))
+        self.gain = nn.Parameter(torch.ones(()))
+        self.register_buffer("knots_g", torch.zeros(0))
+        self.register_buffer("knots_x", torch.zeros(0))
         fn = hf.face_nest(nside).ravel()
         self.register_buffer("face_of_nest", torch.as_tensor(np.argsort(fn)), persistent=False)
         self.register_buffer("nest_of_face", torch.as_tensor(fn), persistent=False)
+
+    def set_marginal(self, target, knots=2001):
+        """Fixed output anamorphosis: the network makes a field g close to a
+        unit Gaussian, the output is f(g), f the monotone map of the Gaussian
+        quantiles onto those of `target` (piecewise linear between `knots`
+        quantiles, linear beyond them), as `--kappa-table` in `stl-synth`.
+        The heavy tail of kappa then comes by construction."""
+        from scipy.special import ndtri
+
+        q = np.linspace(0.5 / target.size, 1 - 0.5 / target.size, knots)
+        self.knots_g = torch.as_tensor(ndtri(q), dtype=torch.float32, device=self.knots_g.device)
+        self.knots_x = torch.as_tensor(np.quantile(target, q), dtype=torch.float32, device=self.knots_g.device)
+        # Unit variance of g at initialisation, or f(g) is a constant.
+        with torch.no_grad():
+            k = self.knots_g
+            self.knots_g = torch.zeros(0, device=k.device)
+            g = self(self.noise(4, device=k.device))
+            self.knots_g = k
+            self.gain.fill_(1.0 / g.std().item())
+
+    def marginal(self, g):
+        if self.knots_g.numel() == 0:
+            return g
+        g = g * self.gain
+        kg, kx = self.knots_g, self.knots_x
+        i = torch.searchsorted(kg, g.contiguous()).clamp(1, kg.numel() - 1)
+        g0, g1, x0, x1 = kg[i - 1], kg[i], kx[i - 1], kx[i]
+        return x0 + (x1 - x0) / (g1 - g0) * (g - g0)
 
     def up(self, x):
         """Children of every pixel.  'nearest' copies the parent; 'smooth' then
@@ -96,4 +127,4 @@ class Generator(nn.Module):
                 h = self.blocks[k](torch.cat([self.up(h), zs[k]], 1))
             y = self.heads[k](h)
             x = y if x is None else self.up(x) + y
-        return self.to_nested(x)
+        return self.marginal(self.to_nested(x))
