@@ -296,5 +296,83 @@ Stages (garoupe unless said otherwise):
    the estimate of section 4.5) and the Takahashi full-covariance test
    (section 2, test 4) on 10 000 maps.
 
-The prototype of stages 0 to 2 is small enough to run before the next
-discussion if the user agrees; nothing is run before that.
+## 6. Prototype at nside 64 (stages 0 to 2, garoupe, 2026-11-03)
+
+Code: `amortized/` (`stl_torch.py` the Rust engine as a torch layer and
+the ensemble loss, `generator.py`, `train.py`, `evaluate.py`,
+`check_grad.py`, `run_eval.sh`).  `stl-bridge --features gpu` of this
+branch's base (9c52ff4) on one T4; generator in float32 on the same GPU.
+Target: Takahashi r000 zs1 kappa (not gaussianised) at nside 64, J = 5,
+L = 4, standardised; ergodic weights, scatter weight 1, batch B = 8, Adam
+(lr 1e-3, cosine), 3 000 steps.
+
+**Stage 0.**  The directional derivative of the ensemble loss through
+`StatsFunction` matches a central finite difference to 1e-8 relative
+(error falling as h^2, h = 1e-3 to 1e-5), on the maps and through the
+generator's weights: the bridge's complex convention is the one of torch.
+
+**Cost.**  0.45 s per step (B = 8: 0.06 s per map evaluation, forward +
+reverse sweep; the generator ~10 %), 3 000 steps in 22 to 29 minutes.
+Generation: 4.8 ms per map.  L-BFGS ensemble of 8 (same loss, 500
+iterations): 136 s, 17 s per map.  A batch of 16 with wider channels
+(96 to 64) costs 1.28 s per step and reached the same loss at the same
+step: neither gradient noise nor width is the limit.
+
+**Quality** (1 000 generated maps against the 8 L-BFGS members; per-map
+residual in ergodic sigma, rms over each family; scatter over the ergodic
+variance):
+
+| | S1 | S2 | S3 | S4 | var | scatter / ergodic | skewness (target 8.4) |
+|---|---|---|---|---|---|---|---|
+| L-BFGS, 8 maps | 0.96 | 0.93 | 0.95 | 0.94 | 0.82 | 0.97 to 1.03 | 5.0 |
+| generator `c` | 3.46 | 2.86 | 3.15 | 3.06 | 3.87 | 3 to 8 (var 0.2) | 3.7 |
+| generator `c` + 50 L-BFGS iterations | 1.12 | 0.90 | 1.04 | 0.99 | 2.92 | 0.6 to 1.1 (var 0.05) | 4.2 |
+
+- The population mean of the generator is 2 to 2.5 sigma off per family;
+  the maps are too different from each other in S1 to S4 and too alike in
+  their variance (scatter 0.2 of the ergodic one).
+- **Grid pattern** (first generator, `a`): with nearest-neighbour
+  up-sampling the generator adds a z-independent pattern, periodic on the
+  pixel grid, uniform over the faces, 7.7 % of the variance; the maps are
+  correlated with each other (0.07, up to 0.17; L-BFGS 0.007).  Smooth
+  up-sampling (nearest then [1, 2, 1]^2 / 16) removes it (0.011), and
+  does not change the residuals.
+- **Finest level and tail** (`tools/cv10.py`,
+  `figures/amortized_cv10_n64.png`): the generator's finest level has 0.4
+  of r000's detail variance (-4.2 cosmic sigma), the C_l fall above l ~
+  100, the kurtosis of the details is 3 cosmic sigma low at every level,
+  and the peaks above 10 sigma are 4.3 cosmic sigma short.  The 50-iteration
+  polish brings S1 to S4 to 1 sigma but keeps all of this: **the
+  statistics at 1 sigma do not certify the map**.  L-BFGS from white noise
+  gets the level variances right (within 0.7 cosmic sigma) and the C_l
+  (max 0.7 sigma), with the known kurtosis deficit of STL syntheses.
+- **Output anamorphosis** (`--marginal`, runs `e`/`f`): generating a
+  Gaussian-like field and mapping it through the target's quantile
+  function gives the tail by construction, but the linear extrapolation
+  beyond the knots makes the scatter term explode (10^4 to 5 x 10^4) and
+  training does not converge.  Its 50-iteration polish gives the best
+  skewness (5.5) but 1.2 to 1.7 sigma per member.
+
+**Reading.**  The pipeline (Rust loss and exact gradient inside a torch
+training loop) works and is cheap.  The plain convolutional generator
+trained through the strict ergodic loss stalls around 3 sigma per map
+in 3 000 steps, and its failures are structural (finest scale, tail, map
+variance) rather than a matter of training time.  Polish from it costs
+1.5 s per map against 17 s from white noise (11 x), but inherits the
+defects that the statistics do not see.  Break-even of generator +
+polish against L-BFGS at nside 64: about 85 maps; for 10 000 maps,
+4.5 T4 hours against 47.
+
+**Next fixes, in order of expected gain:**
+
+1. Finest level: no blur on the map path (smooth up for the features
+   only, nearest + learned detail for the map), and a level-power term
+   (`--level-power-weight` of `stl-synth`) in the training loss so that
+   every level's variance is held directly.
+2. Per-map variance: a global latent amplitude per map (one random
+   scalar per map modulating the heads), so that the variance of the maps
+   can scatter as much as the target's.
+3. Tail: generate the gaussianised field g and train on the statistics
+   of g and of kappa = f(g) (the `--kappa-table` objective of `stl-synth`),
+   with the extrapolation of f clamped.
+4. Then nside 128 and progressive growing (stage 3).
