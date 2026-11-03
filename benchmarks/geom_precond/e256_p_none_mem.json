@@ -1,0 +1,417 @@
+{
+  "J": 7,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 5882,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 0.752070989633176,
+    "loss_final_scatter_term": 0.06418809837666171,
+    "member_files": [
+      "e256_p_none_mem_m000_synthesis_nested.npy",
+      "e256_p_none_mem_m001_synthesis_nested.npy",
+      "e256_p_none_mem_m002_synthesis_nested.npy",
+      "e256_p_none_mem_m003_synthesis_nested.npy",
+      "e256_p_none_mem_m004_synthesis_nested.npy",
+      "e256_p_none_mem_m005_synthesis_nested.npy",
+      "e256_p_none_mem_m006_synthesis_nested.npy",
+      "e256_p_none_mem_m007_synthesis_nested.npy",
+      "e256_p_none_mem_m008_synthesis_nested.npy",
+      "e256_p_none_mem_m009_synthesis_nested.npy"
+    ],
+    "members": 10,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 1.280816983817306,
+        "scatter_over_ergodic_variance": 1.1448874022654747,
+        "scatter_rms_sigma": 1.015085544197595
+      },
+      "S2": {
+        "residual_rms_sigma": 1.16263194477387,
+        "scatter_over_ergodic_variance": 0.878118079123929,
+        "scatter_rms_sigma": 0.8889917160533816
+      },
+      "S3": {
+        "residual_rms_sigma": 1.0926177184097132,
+        "scatter_over_ergodic_variance": 1.157317116066136,
+        "scatter_rms_sigma": 1.020580915194636
+      },
+      "S4": {
+        "residual_rms_sigma": 1.028124122251391,
+        "scatter_over_ergodic_variance": 1.10407849862926,
+        "scatter_rms_sigma": 0.9968303008869346
+      },
+      "mean": {
+        "residual_rms_sigma": 0.1939202466957002,
+        "scatter_over_ergodic_variance": 0.0010107636118627213,
+        "scatter_rms_sigma": 0.030161022042968787
+      },
+      "var": {
+        "residual_rms_sigma": 0.8186316840366775,
+        "scatter_over_ergodic_variance": 0.009189573684045872,
+        "scatter_rms_sigma": 0.09094292889302215
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 1.0
+  },
+  "evaluations": 109,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 28,
+      "max_sigma": 4.505238046760429,
+      "rms_sigma": 2.4700070526132603
+    },
+    "S2": {
+      "count": 28,
+      "max_sigma": 5.7561180150622215,
+      "rms_sigma": 2.3694023883611
+    },
+    "S3": {
+      "count": 448,
+      "max_sigma": 6.2245203486030185,
+      "rms_sigma": 1.2338074165903292
+    },
+    "S4": {
+      "count": 5376,
+      "max_sigma": 4.762683082026183,
+      "rms_sigma": 0.7960437298846622
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 0.6057670742772736,
+      "rms_sigma": 0.6057670742772736
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 2.5727168864702263,
+      "rms_sigma": 2.5727168864702263
+    }
+  },
+  "fits": [
+    "e256_p_none_mem_target.fits",
+    "e256_p_none_mem_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 45148,
+    "blocks_per_level": [
+      18,
+      5,
+      2,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "dia",
+    "decimation_rows_bytes": 186393648,
+    "device": "Tesla T4",
+    "device_ordinal": 0,
+    "devices_visible": 1,
+    "field_bytes_estimate": 469800960,
+    "fields": "recompute",
+    "geometry_cache": "full",
+    "geometry_cache_budget_bytes": 3878453657,
+    "geometry_cache_used_bytes_per_rank": [
+      3833334380
+    ],
+    "geometry_host_budget_bytes": 0,
+    "geometry_host_used_bytes_per_rank": [
+      0
+    ],
+    "memory_peak_bytes_per_rank": [
+      12356157440
+    ],
+    "memory_total_bytes": 15843721216
+  },
+  "init": {
+    "file": "/tmp/jmdeloui-ens/init/synthesis_gauss_m{m}_nested.npy",
+    "noise_std": 0.0,
+    "nside": 256,
+    "per_member": true
+  },
+  "kappa": {
+    "coefficients": 58,
+    "families": [
+      "mean",
+      "var",
+      "S1",
+      "S2"
+    ],
+    "final_residual_in_ergodic_sigma": {
+      "S1": {
+        "count": 28,
+        "max_sigma": 1.1361818096716019,
+        "rms_sigma": 0.36101213398404647
+      },
+      "S2": {
+        "count": 28,
+        "max_sigma": 1.166518150484844,
+        "rms_sigma": 0.6354840450408665
+      },
+      "mean": {
+        "count": 1,
+        "max_sigma": 3.419469378876438,
+        "rms_sigma": 3.419469378876438
+      },
+      "var": {
+        "count": 1,
+        "max_sigma": 2.229426468047167,
+        "rms_sigma": 2.229426468047167
+      }
+    },
+    "kappa_mean": -0.000026235813732100943,
+    "kappa_std": 0.00035807470886394703,
+    "loss_final_term": 0.05451700985567064,
+    "s3_coefficients": 0,
+    "s3_levels_nside": null,
+    "s3_weight": 0.0,
+    "table": "/tmp/jmdeloui-ens/data/knots.npy",
+    "weight": 0.1
+  },
+  "kernel_size": 5,
+  "kurtosis": {
+    "all_levels_nside": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "final_excess_mean_over_members": [
+      684.4150400097508,
+      334.79943714314675,
+      310.81471955652245,
+      127.60712333835659,
+      25.25010182942122,
+      3.346224702561858
+    ],
+    "levels_nside": null,
+    "loss_final_term": 0.0,
+    "of": "kappa",
+    "target_excess": [
+      722.3127230045083,
+      396.5510203552021,
+      114.72915284013281,
+      57.645324548236815,
+      16.927451185156805,
+      4.280621004963588
+    ],
+    "weight": 0.0
+  },
+  "level_power": {
+    "levels_nside": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "loss_final_term": 0.022078623968023202,
+    "variance_over_target": [
+      1.0233124279054162,
+      0.9777530558945353,
+      0.999165762599883,
+      1.0166353798331462,
+      1.0249834564676368,
+      1.0124575727294132
+    ],
+    "weight": 10.0
+  },
+  "loss_final_map": 0.9135653443619328,
+  "loss_first": 10062.602488349676,
+  "loss_history": [
+    10062.602488349676,
+    10062.224842766343,
+    10058.824485353278,
+    10025.03734885525,
+    9904.956300159141,
+    9041.144440156057,
+    6334.79700070537,
+    4015.8012297517935,
+    1678.064038027273,
+    949.9650937342119,
+    575.4377045128322,
+    629.4689869566035,
+    424.45608874941695,
+    271.91838891647075,
+    169.52512495404514,
+    107.66304783741526,
+    72.43662550900613,
+    65.49609769201457,
+    57.25168480430127,
+    52.01438738414096,
+    44.40521936262921,
+    37.5759205904527,
+    33.12154194224424,
+    35.45020821333206,
+    30.145390289345674,
+    27.610925064576215,
+    23.588746155921505,
+    19.732111738619203,
+    16.972420900454896,
+    14.71037208502892,
+    12.553489388826067,
+    11.715226082664417,
+    10.58456173101175,
+    9.922601360715275,
+    8.761391365420172,
+    8.060568507202296,
+    7.782553703093782,
+    7.354188751178842,
+    6.859300535360131,
+    6.480953686538056,
+    6.142406518610796,
+    5.8601866877229565,
+    5.619746958370168,
+    5.260609450674867,
+    5.110612513578404,
+    4.860870763707179,
+    4.726522382228328,
+    4.6012817362453555,
+    4.384484722763695,
+    4.111090720106607,
+    4.088853075468356,
+    4.00642896210954,
+    3.870694433002252,
+    3.6043659971725575,
+    3.4660790485974653,
+    3.3343004654183916,
+    3.144131588086462,
+    2.9806568446530264,
+    2.8724799600192243,
+    2.775850885628392,
+    2.7175705737415807,
+    2.626701076971157,
+    2.5243275688344795,
+    2.467658699942925,
+    2.3981204725710423,
+    2.3472817709337312,
+    2.306822276141693,
+    2.225750390817393,
+    2.1423609633134593,
+    2.0469655880004165,
+    2.0515954858240346,
+    2.008256608754833,
+    1.953772269212288,
+    1.9001669703803499,
+    1.8360147852231679,
+    1.7295342274070142,
+    1.689011023708733,
+    1.6640776325777433,
+    1.632028842558045,
+    1.605299293765702,
+    1.5405783920076161,
+    1.485704523787124,
+    1.47081901544307,
+    1.4185925983088705,
+    1.3759690004510388,
+    1.323715498131539,
+    1.2993600349508456,
+    1.276656763242833,
+    1.2554166884886317,
+    1.2247418829031091,
+    1.2314569595367821,
+    1.2111152143363153,
+    1.2028862796845359,
+    1.1827445945015138,
+    1.1561285978813014,
+    1.1302912279558677,
+    1.096499222428158,
+    1.064996754874756,
+    1.0516576551832921,
+    1.0405893134153947,
+    1.0233731204947234,
+    1.0071328395147965,
+    0.9920724379741973,
+    0.9790743484559371,
+    0.9598656220821702,
+    0.9412102778158365,
+    0.9348529277549137,
+    0.9268279755646659,
+    0.9135653443619249
+  ],
+  "loss_last": 0.9135653443619249,
+  "marginal": {
+    "loss_final_term": 0.020710622528401286,
+    "weight": 10000.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 1509949440,
+    "maps_and_gradients": 167761920,
+    "stored_moduli_and_cotangents": 223395840
+  },
+  "memory_floor_bytes_per_rank": [
+    1901107200
+  ],
+  "memory_peak_bytes_per_rank": [
+    2517618688
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 2.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 100,
+  "nside": 256,
+  "precondition": "none",
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    518443008
+  ],
+  "seconds": 1051.1,
+  "seconds_per_evaluation": 9.643,
+  "setup_seconds": 25.19,
+  "target": {
+    "file": "/tmp/jmdeloui-geomcache/data/g256.npy",
+    "mean": -4.665968516688197e-16,
+    "std": 0.8993380013520285
+  },
+  "timers_seconds": {
+    "analysis_vjp": 2.26,
+    "device_transfers": 13.47,
+    "forward": 252.46,
+    "gpu_forward_coefficients": 58.65,
+    "gpu_forward_conv": 170.45,
+    "gpu_forward_decimation": 20.77,
+    "gpu_geometry": 1.57,
+    "gpu_host_lists": 8.45,
+    "gpu_load": 8.48,
+    "gpu_reverse_adjoint": 338.39,
+    "gpu_reverse_chain": 2.52,
+    "gpu_reverse_coefficients": 184.76,
+    "gpu_reverse_conv": 165.45,
+    "gpu_reverse_exchange": 0.03,
+    "gpu_setup_topology": 2.49,
+    "host_evaluations": 984.76,
+    "host_kappa_objective": 140.72,
+    "host_kappa_transform": 0.29,
+    "host_lbfgs": 66.33,
+    "host_level_power": 1.3,
+    "host_marginal": 15.84,
+    "host_synthesis_objective": 813.12,
+    "reverse": 694.9
+  },
+  "variables": "map",
+  "weights": "ergodic"
+}

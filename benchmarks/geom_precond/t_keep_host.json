@@ -1,0 +1,242 @@
+{
+  "J": 6,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 3970,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 0.004363135873296971,
+    "loss_final_scatter_term": 0.0,
+    "member_files": [
+      "t_keep_host_m000_synthesis_nested.npy",
+      "t_keep_host_m001_synthesis_nested.npy",
+      "t_keep_host_m002_synthesis_nested.npy",
+      "t_keep_host_m003_synthesis_nested.npy"
+    ],
+    "members": 4,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 15.091235397217794,
+        "scatter_over_ergodic_variance": 2.6473703183283352,
+        "scatter_rms_sigma": 1.4090875553869076
+      },
+      "S2": {
+        "residual_rms_sigma": 11.239151426183708,
+        "scatter_over_ergodic_variance": 1.0379341840287466,
+        "scatter_rms_sigma": 0.8822984971207647
+      },
+      "S3": {
+        "residual_rms_sigma": 20.214563048008127,
+        "scatter_over_ergodic_variance": 1.0691911157339549,
+        "scatter_rms_sigma": 0.8954849729618394
+      },
+      "S4": {
+        "residual_rms_sigma": 15.530044368774332,
+        "scatter_over_ergodic_variance": 0.6544250080663689,
+        "scatter_rms_sigma": 0.7005845816529045
+      },
+      "mean": {
+        "residual_rms_sigma": 1.2811180712021712,
+        "scatter_over_ergodic_variance": 2.0953780234641584,
+        "scatter_rms_sigma": 1.2536081993980888
+      },
+      "var": {
+        "residual_rms_sigma": 0.15551618916577226,
+        "scatter_over_ergodic_variance": 0.03206507494070274,
+        "scatter_rms_sigma": 0.1550767751970844
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 0.0
+  },
+  "evaluations": 25,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 24,
+      "max_sigma": 74.95374259312936,
+      "rms_sigma": 30.050614507892732
+    },
+    "S2": {
+      "count": 24,
+      "max_sigma": 38.30564483439212,
+      "rms_sigma": 22.408933409929684
+    },
+    "S3": {
+      "count": 336,
+      "max_sigma": 65.98504323641396,
+      "rms_sigma": 40.389437524436765
+    },
+    "S4": {
+      "count": 3584,
+      "max_sigma": 65.37472018194863,
+      "rms_sigma": 31.02846817617972
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 0.5281287523422785,
+      "rms_sigma": 0.5281287523422785
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 0.023364835725274043,
+      "rms_sigma": 0.023364835725274043
+    }
+  },
+  "fits": [
+    "t_keep_host_target.fits",
+    "t_keep_host_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 196063,
+    "blocks_per_level": [
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "dia",
+    "decimation_rows_bytes": 46561384,
+    "device": "Tesla T4",
+    "device_ordinal": 0,
+    "devices_visible": 1,
+    "field_bytes_estimate": 147542016,
+    "fields": "keep",
+    "geometry_cache": "host",
+    "geometry_cache_budget_bytes": 8377738240,
+    "geometry_cache_used_bytes_per_rank": [
+      5745388
+    ],
+    "geometry_host_budget_bytes": 32114225152,
+    "geometry_host_used_bytes_per_rank": [
+      830332160
+    ],
+    "memory_peak_bytes_per_rank": [
+      1456209920
+    ],
+    "memory_total_bytes": 15843721216
+  },
+  "init": {
+    "file": "init_m{m}.npy",
+    "noise_std": 0.0,
+    "nside": 128,
+    "per_member": true
+  },
+  "kappa": null,
+  "kernel_size": 5,
+  "kurtosis": null,
+  "level_power": {
+    "levels_nside": [],
+    "loss_final_term": 0.0,
+    "variance_over_target": [],
+    "weight": 0.0
+  },
+  "loss_final_map": 0.004363135873296971,
+  "loss_first": 0.04500650385330326,
+  "loss_history": [
+    0.04500650385330326,
+    0.0450064556669559,
+    0.04500602199459755,
+    0.04500385159340552,
+    0.04497999569834394,
+    0.044742864807594915,
+    0.0425119924844699,
+    0.01705626741224988,
+    0.04632124663973177,
+    0.012176607163079441,
+    0.010176998812090516,
+    0.008958017512747924,
+    0.008606891801093879,
+    0.007775897764368499,
+    0.00733422095854254,
+    0.006897866902578843,
+    0.006783974405085383,
+    0.006644260471160814,
+    0.006535676948997358,
+    0.006349265619155513,
+    0.005727083984498091,
+    0.005459310704323652,
+    0.004954155355179486,
+    0.0047135890899244115,
+    0.004363135873296971
+  ],
+  "loss_last": 0.004363135873296971,
+  "marginal": {
+    "loss_final_term": 0.0,
+    "weight": 0.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 150994944,
+    "maps_and_gradients": 16773120,
+    "stored_moduli_and_cotangents": 22265856
+  },
+  "memory_floor_bytes_per_rank": [
+    190033920
+  ],
+  "memory_peak_bytes_per_rank": [
+    1288642560
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 1.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 20,
+  "nside": 128,
+  "precondition": "none",
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    260292608
+  ],
+  "seconds": 14.66,
+  "seconds_per_evaluation": 0.586,
+  "setup_seconds": 17.92,
+  "target": {
+    "file": "/tmp/jmdeloui-geomcache/data/takahashi_r000_zs1_nside128_nested.npy",
+    "mean": -5.063505170710414e-12,
+    "std": 0.00033101775564236657
+  },
+  "timers_seconds": {
+    "analysis_vjp": 0.01,
+    "device_transfers": 0.1,
+    "forward": 5.7,
+    "gpu_forward_coefficients": 0.56,
+    "gpu_forward_conv": 1.43,
+    "gpu_forward_decimation": 0.36,
+    "gpu_geometry": 0.31,
+    "gpu_geometry_to_host": 0.55,
+    "gpu_geometry_upload": 4.73,
+    "gpu_host_lists": 0.26,
+    "gpu_load": 0.05,
+    "gpu_reverse_adjoint": 2.98,
+    "gpu_reverse_chain": 0.04,
+    "gpu_reverse_coefficients": 1.83,
+    "gpu_reverse_conv": 1.17,
+    "gpu_reverse_exchange": 0.22,
+    "gpu_setup_topology": 0.68,
+    "host_evaluations": 13.42,
+    "host_lbfgs": 1.23,
+    "host_synthesis_objective": 13.32,
+    "reverse": 8.63
+  },
+  "variables": "map",
+  "weights": "none"
+}

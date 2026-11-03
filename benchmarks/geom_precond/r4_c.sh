@@ -1,0 +1,4 @@
+export STL_GPU_DEVICE=0 CUDA_VISIBLE_DEVICES=2 STL_THREADS=4 STL_GPU_THREADS=4
+/tmp/jmdeloui-geomcache/target/release/stl-synth --target /tmp/jmdeloui-geomcache/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --quiet --gpu --gpu-fields recompute --gpu-block-rows 1024 --block-pixels 1024 --geometry-cache device --niter 100 --init c64_m{m}_synthesis_nested.npy --out c_c2f_mem > c_c2f_mem.log 2>&1; echo c2f_mem $?
+/tmp/jmdeloui-geomcache/target/release/stl-synth --target /tmp/jmdeloui-geomcache/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --quiet --gpu --gpu-fields recompute --gpu-block-rows 1024 --block-pixels 1024 --geometry-cache device --niter 100 --init c64_m{m}_synthesis_nested.npy --precondition bands:-0.25 --out c_c2f_bm025_mem > c_c2f_bm025_mem.log 2>&1; echo c2f_bm025_mem $?
+echo ALLDONE

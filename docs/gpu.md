@@ -99,6 +99,15 @@ between sweeps and evaluations within a budget measured on the device:
 for the blocks that fit. At `L = 2`, kernel 5, a row costs 4.8 kB in
 `full` and 0.8 kB in `transposition`.
 
+`--geometry-cache auto|device|host|off` (overrides `--gpu-cache`) adds a
+host tier: the weights of a block stripped on the device are copied once
+to page-locked host memory and uploaded at every use instead of
+recomputed (the same values; budget `STL_HOST_CACHE_MB`, else half of
+`MemAvailable` per node). `host` keeps only the transposition (or the DIA
+masks) on the device; `auto` is `--gpu-cache auto` plus the host tier when
+one upload beats one recomputation (timed once). Measurements in
+docs/geometry_cache_preconditioner.md.
+
 **DIA form** (the default; `--gpu-conv stencils` or
 `STL_GPU_CONV=stencils` selects the bound stencils above;
 `docs/dia_convolution.md`). The same operator written on the diagonals of
@@ -316,7 +325,7 @@ fields kept between the sweeps or recomputed per block, default
 `STL_GPU_FIELDS` else `auto`, §2.7), `--gpu-terms device|host` (the
 objective's terms on the device, the default, or on the host, §2.6b),
 `--gpu-cache auto|full|transposition|none`, `STL_GPU_CACHE_MB` (cache
-budget), `STL_GPU_THREADS` (host threads of the setup per rank),
+budget), `--geometry-cache auto|device|host|off`, `STL_HOST_CACHE_MB`, `STL_GPU_THREADS` (host threads of the setup per rank),
 `STL_GPU_DEVICE`, `STL_GPU_SYNC=1` (synchronise after every kernel, to
 locate a failing one), `STL_GPU_PROFILE=1` (geometry phases).
 
