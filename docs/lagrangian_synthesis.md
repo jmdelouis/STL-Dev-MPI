@@ -619,8 +619,17 @@ Reports: `benchmarks/lagrangian/step3/`.
   same C0/line-search failure as in section 6.3. With these settings, the
   gain comes entirely from the scale-by-scale construction with conditional
   draws. The per-scale displacement contributes nothing.
-- Not done (on the user's instruction: 2D only, minimum runs): HEALPix,
-  cosmic-variance checks, a Rust implementation of the conditional draw.
+- Not done (on the user's instruction: 2D only, minimum runs): HEALPix and
+  the cosmic-variance checks.
+
+**Rust port** (`stl_core::planar::cascade`, `stl-synth2d --c2f 32,64,128
+--c2f-iter 300,200,200 --warm 100 --niter 400`; tests
+`crates/stl-core/tests/planar_cascade.rs`; report
+`benchmarks/lagrangian/step5/`). One run on a garoupe T4 reproduces the
+prototype. It reaches loss 1.29 at 110 equivalent 256² evaluations
+(prototype: 111; pixel L-BFGS with `--warm 100`: 731) and ends at 0.254
+(prototype: 0.315) after 491 equivalent evaluations in total. The wall time
+is 311 s: 101 s for the coarse levels, 195 s for the 256² level.
 
 ### 6.5 Step 4: amortised attention generator of the displacement (torch, STL-Dev loss)
 

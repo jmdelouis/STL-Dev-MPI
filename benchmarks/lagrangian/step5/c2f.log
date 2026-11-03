@@ -1,0 +1,48 @@
+c2f level 32: 419 evaluations, loss 7.3398e1 -> 4.2810e-2
+c2f level 64: 202 evaluations, loss 1.5683e1 -> 9.1854e-2
+c2f level 128: 203 evaluations, loss 1.1189e1 -> 1.7986e-1
+eval    1  loss 8.077228e0  0.339 s
+eval   11  loss 2.630787e0  0.298 s
+eval   21  loss 1.756370e0  0.296 s
+eval   31  loss 1.485430e0  0.294 s
+eval   41  loss 1.273451e0  0.297 s
+eval   51  loss 1.073724e0  0.292 s
+eval   61  loss 9.207859e-1  0.299 s
+eval   71  loss 7.844004e-1  0.291 s
+eval   81  loss 7.492316e-1  0.298 s
+eval   91  loss 7.092662e-1  0.289 s
+eval  101  loss 6.801211e-1  0.293 s
+eval  111  loss 6.403759e-1  0.299 s
+eval  121  loss 6.039767e-1  0.299 s
+eval  131  loss 5.727716e-1  0.295 s
+eval  141  loss 5.489327e-1  0.294 s
+eval  151  loss 5.320531e-1  0.289 s
+eval  161  loss 5.177939e-1  0.293 s
+eval  171  loss 5.099708e-1  0.292 s
+eval  181  loss 5.002558e-1  0.293 s
+eval  191  loss 4.758138e-1  0.291 s
+eval  201  loss 4.624396e-1  0.297 s
+eval  211  loss 4.498959e-1  0.292 s
+eval  221  loss 4.332823e-1  0.318 s
+eval  231  loss 4.221268e-1  0.292 s
+eval  241  loss 4.065582e-1  0.299 s
+eval  251  loss 3.931885e-1  0.291 s
+eval  261  loss 3.814395e-1  0.296 s
+eval  271  loss 3.699839e-1  0.291 s
+eval  281  loss 3.587379e-1  0.293 s
+eval  291  loss 3.509050e-1  0.293 s
+eval  301  loss 3.399136e-1  0.293 s
+eval  311  loss 3.314526e-1  0.292 s
+eval  321  loss 3.238791e-1  0.293 s
+eval  331  loss 3.137644e-1  0.317 s
+eval  341  loss 3.043811e-1  0.299 s
+eval  351  loss 2.951737e-1  0.296 s
+eval  361  loss 2.862742e-1  0.294 s
+eval  371  loss 2.806292e-1  0.297 s
+eval  381  loss 2.759976e-1  0.293 s
+eval  391  loss 2.697044e-1  0.296 s
+eval  401  loss 2.633147e-1  0.291 s
+eval  411  loss 2.590259e-1  0.299 s
+eval  421  loss 2.543195e-1  0.290 s
+{"evaluations":421,"loss_first":8.07722774965367,"loss_last":0.2543195182817697,"peak_device_bytes":449576960,"peak_rss_bytes":1099186176,"seconds_per_evaluation":0.4630043716152019}
+wall 310.92 s
