@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.41s
+job 2749290: compute-116-15, GPU ?, 6 CPUs, niter 100, B 4, commit 9c52ff4
+/var/spool/slurmd/job2749290/slurm_script: line 41: nvidia-smi: command not found
+=== rust_cpu 17:24:39: mpirun -np 6 --oversubscribe --bind-to core /scratch/jmdeloui/stl-bench128/target/release/stl-synth --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --block-pixels 1024 --out rust_cpu
+exit 0, 1025 s wall
+[rust-local P=6] evaluation  116  loss = 3.700247e-6  t =  1019.0 s
+{"evaluations":116,"loss_first":0.04500650385330319,"loss_last":3.7002471871494542e-6,"ranks":6,"seconds":1019.0,"seconds_per_evaluation":8.785}
+done Mon Nov  2 05:41:45 PM CET 2026

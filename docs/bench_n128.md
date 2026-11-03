@@ -49,6 +49,7 @@ Codes:
 | STL-Dev legacy | minimum memory (sequential) | 4.723 | 114 | 538.4 | 20.2 | 12.26 | 3.99 | 6.35 | 28 | 2.46e-6 |
 | STL-Dev-MPI | minimum time (keep, device terms) | **0.106** | 116 | 12.3 | 9.4 | 2.23 | 2.02 | 0.74 | 58 | 2.17e-6 |
 | STL-Dev-MPI | minimum memory (recompute, 1024-cell blocks) | 0.885 | 116 | 102.7 | 2.8 | **0.58** | 0.58 | 0.72 | 75 | 2.38e-6 |
+| STL-Dev-MPI | CPU only, 6 MPI ranks, 1024-cell blocks | 8.785 | 116 | 1019.0 | 2.9 | 0 | 0 | 2.9 (0.48-0.49 per rank) | - | 3.70e-6 |
 
 Columns:
 
@@ -74,6 +75,17 @@ Ratios, legacy over STL-Dev-MPI:
 
 So STL-Dev-MPI in its *memory-minimal* form is still faster than STL-Dev in its
 *time-minimal* form, with 34 times less device memory.
+
+The CPU fallback (no GPU at all; job 2749290, 6 cores of the cpu-partition node
+compute-116-15, `mpirun -np 6 --oversubscribe`) takes 8.79 s per evaluation (forward
+373 s, reverse 644 s, L-BFGS 1.7 s over the run), 1.9 times the legacy minimum-memory
+run on the A100 and 83 times STL-Dev-MPI's minimum-time run. Its memory floor, the data
+the algorithm holds (`memory_floor_bytes`), is about 37 MB in all: 25 MB of L-BFGS
+history, 8 MB of stored moduli and their cotangents, 4 MB of maps and gradients; the
+measured RSS, 0.48-0.49 GB per rank, is mostly the process itself (binary, MPI
+runtime, per-rank buffers), not data. Its loss trajectory follows the GPU runs of
+STL-Dev-MPI (1.4e-12 relative over the first 10 evaluations against the minimum-time
+run) and parts from it later, like the other pairs.
 
 Where the time goes (Rust reports, whole run):
 
@@ -139,6 +151,8 @@ python tools/bench_n128/summarize.py $G/runs/JOB docs/figures/bench_n128_loss.pn
 ```
 
 Reports, nvidia-smi samples and logs: `benchmarks/bench_n128/a100/`
-(`summary.json` has the numbers of the table and the loss histories).
-The Rust CPU run (`RUNS=rust_cpu`, 6 MPI ranks) failed in job 2747854 (one MPI slot
-without `--oversubscribe`, fixed); it is resubmitted on the CPU partition.
+(`summary.json` has the numbers of the table and the loss histories). The CPU run
+(`RUNS=rust_cpu`, 6 MPI ranks) failed in job 2747854 (one MPI slot without
+`--oversubscribe`, fixed) and ran in job 2749290 on the cpu partition
+(`sbatch --partition=cpu --gres=none --export=ALL,G=$G,RUNS=rust_cpu ...`):
+`benchmarks/bench_n128/cpu/`.
