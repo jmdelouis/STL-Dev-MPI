@@ -1,0 +1,53 @@
+{
+ "levels": [
+  32,
+  64,
+  128,
+  256
+ ],
+ "niter": [
+  300,
+  200,
+  200,
+  400
+ ],
+ "warm0": 100,
+ "detail": "white",
+ "opt": "",
+ "per_level": [
+  {
+   "n": 32,
+   "evaluations": 422,
+   "wall_seconds": 24.781237602233887,
+   "loss_first": 73.39791484774156,
+   "loss_last": 0.04363699086744923,
+   "equivalent_evaluations": 6.59375
+  },
+  {
+   "n": 64,
+   "evaluations": 202,
+   "wall_seconds": 27.20845913887024,
+   "loss_first": 21.107801196099523,
+   "loss_last": 0.1019497242790287,
+   "equivalent_evaluations": 12.625
+  },
+  {
+   "n": 128,
+   "evaluations": 209,
+   "wall_seconds": 56.312458515167236,
+   "loss_first": 14.803008323641263,
+   "loss_last": 0.30726585269214507,
+   "equivalent_evaluations": 52.25
+  },
+  {
+   "n": 256,
+   "evaluations": 428,
+   "wall_seconds": 240.55006742477417,
+   "loss_first": 11.865908556391263,
+   "loss_last": 0.4120005571632883,
+   "equivalent_evaluations": 428.0
+  }
+ ],
+ "equivalent_evaluations": 499.46875,
+ "wall_seconds": 348.85222268104553
+}

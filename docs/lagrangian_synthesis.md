@@ -1,6 +1,6 @@
 # Lagrangian (deformation-based) synthesis: assessment, literature, design
 
-Status: **design, plan and step 0 diagnostic** (3 November 2026). Sections 1–4
+Status: **design, steps 0–3 in 2D** (3 November 2026). Summary: deformation-only syntheses lose to pixel L-BFGS (sections 6.2, 6.3); coarse-to-fine with detail conditioned on the coarse scale reaches pixel L-BFGS's loss 6.6 times sooner (section 6.4). Sections 1–4
 are the assessment and the design; section 5 is the experimental plan to be
 agreed with the user before any implementation; results will go in section 6.
 
@@ -584,3 +584,40 @@ pixel L-BFGS, and it stops early. The histories show three mechanisms:
 
 Verdict on the deformation-only route in 2D: **negative**, cold or warm.
 Pixel L-BFGS wins on every metric measured.
+
+### 6.4 Step 3: coarse-to-fine with conditional detail (the user's multi-scale idea)
+
+`tools/lagrangian/multiscale.py`, levels 32² → 64² → 128² → 256². Level
+32² is a pixel synthesis with `--warm 100` (300 iterations). At each finer
+level the synthesis is upsampled by Fourier zero padding and a detail field
+is added, then 200, 200 and 400 iterations follow. The detail is either
+white (the rms of the targets' missing scales) or **conditional**: drawn
+from the targets' detail pixels in the same 8 × 8 bin of (coarse value,
+coarse gradient modulus) quantiles, so that new small scales fall on the
+existing structures with the right histogram. The same ensemble loss is
+used at every level, on Fourier-truncated targets. Cost is counted in
+equivalent 256² evaluations, `sum evals (N / 256)^2`.
+Reports: `benchmarks/lagrangian/step3/`.
+
+| run | equivalent evals to loss 1.29 | final 256² loss | total equivalent evals | wall time |
+|---|---|---|---|---|
+| pixel, cold (`e_ens`) | – (54.7 at 1043) | 54.7 | 1043 | ~12 min |
+| pixel, `--warm 100` (`W_pixel`) | 731 | 1.29 | 731 | ~7 min |
+| coarse-to-fine, white detail, pixel | 128 | 0.412 | 499 | 5.8 min |
+| **coarse-to-fine, conditional detail, pixel** | **111** | **0.315** | 505 | 5.8 min |
+| coarse-to-fine, conditional detail, Lagrangian per level | – (stalls at 39.9) | 39.9 | 81 | 2.3 min |
+
+- **The multi-scale construction reaches pixel L-BFGS's final loss about
+  6.6 times sooner** (111 against 731 equivalent evaluations). It ends 4
+  times lower (0.32 against 1.29) for a smaller total budget. The
+  conditional detail gives a 1.3× better final loss than white detail and
+  reaches 1.29 slightly sooner. It starts the 256² level at 8.2 against 11.9
+  (`M_cond_pixel_256_maps.png`: voids and ridges are in place from the
+  first evaluation).
+- **The per-level Lagrangian optimisation does not move at all.** L-BFGS
+  stops after a few evaluations at every level with an unchanged loss, the
+  same C0/line-search failure as in section 6.3. With these settings, the
+  gain comes entirely from the scale-by-scale construction with conditional
+  draws. The per-scale displacement contributes nothing.
+- Not done (on the user's instruction: 2D only, minimum runs): HEALPix,
+  cosmic-variance checks, a Rust implementation of the conditional draw.
