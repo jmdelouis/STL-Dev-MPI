@@ -16,5 +16,5 @@ pub mod topology;
 
 pub use cudarc::driver::{CudaSlice, PinnedHostSlice};
 pub use device::Gpu;
-pub use engine::{ConvForm, FieldStore, GeometryCache, GpuEngine, GpuEvaluator, GpuOptions, HostForwardState};
+pub use engine::{host_cache_budget, ConvForm, FieldStore, GeometryCache, GpuEngine, GpuEvaluator, GpuOptions, HostForwardState};
 pub use harmonic::GpuSht;

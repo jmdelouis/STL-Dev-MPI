@@ -1,0 +1,4 @@
+export STL_GPU_DEVICE=0 CUDA_VISIBLE_DEVICES=1 STL_THREADS=4 STL_GPU_THREADS=4
+/tmp/jmdeloui-geomcache/target/release/stl-synth --target /tmp/jmdeloui-geomcache/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --quiet --gpu --gpu-fields recompute --gpu-block-rows 1024 --block-pixels 1024 --geometry-cache device --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --out p_none_mem > p_none_mem.log 2>&1; echo none_mem $?
+/tmp/jmdeloui-geomcache/target/release/stl-synth --target /tmp/jmdeloui-geomcache/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --quiet --gpu --gpu-fields recompute --gpu-block-rows 1024 --block-pixels 1024 --geometry-cache device --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --precondition auto --out p_auto_mem > p_auto_mem.log 2>&1; echo auto_mem $?
+echo ALLDONE

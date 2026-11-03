@@ -119,9 +119,10 @@ fn statistics_and_gradients() {
     }
 }
 
-/// The geometry cache only saves work: every policy and budget gives the
-/// same statistics and gradients, to the bit, over two evaluations, with
-/// either geometry.
+/// The geometry cache only saves work: every policy and budget, on the
+/// device and on the host, gives the same statistics and gradients, to the
+/// bit, over three evaluations (the third one reads the host copies made by
+/// the first two), with either geometry.
 #[test]
 fn geometry_cache_policies_agree() {
     use stl_gpu::GeometryCache;
@@ -130,30 +131,48 @@ fn geometry_cache_policies_agree() {
     let s = setup(&case);
     let x = case.f64("map0");
     let g = complex(&case, "gradient");
-    let run = |conv: ConvForm, cache: GeometryCache, cache_bytes: usize| {
+    let run = |conv: ConvForm, cache: GeometryCache, cache_bytes: usize, host_cache_bytes: usize| {
         let part = Partition::serial(&s.geo, s.cfg.levels());
-        let opts = GpuOptions { block_rows: 1500, conv, cache, cache_bytes, ..Default::default() };
+        // A budget ending in 1: calibrate the host copies (keep or drop them).
+        let host_calibrate = host_cache_bytes % 2 == 1;
+        let opts = GpuOptions { block_rows: 1500, conv, cache, cache_bytes, host_cache_bytes, host_calibrate, ..Default::default() };
         let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
         let mut out = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             e.load(&Serial, &x);
             let (v, _) = e.forward(&Serial, &s.plan, false);
             let mg = e.reverse(&Serial, &s.plan, &g);
             out.push((v, gpu.download(&e.analysis_vjp(&Serial, mg))));
         }
-        out
+        let (budget, used) = e.geometry_host();
+        assert!(used <= budget, "{cache:?}: host copies {used} over the budget {budget}");
+        let uploads = e.timers.contains_key("gpu_geometry_upload");
+        (out, used, uploads)
     };
     for conv in CONVS {
-        let reference = run(conv, GeometryCache::None, 0);
+        let (reference, _, _) = run(conv, GeometryCache::None, 0, 0);
         assert_eq!(reference[0], reference[1]);
-        for (cache, bytes) in [
-            (GeometryCache::Full, 1 << 34),
-            (GeometryCache::Full, 3 << 20),
-            (GeometryCache::Transposition, 1 << 34),
-            (GeometryCache::Transposition, 2 << 20),
-            (GeometryCache::Transposition, 64 << 10),
+        assert_eq!(reference[0], reference[2]);
+        for (cache, bytes, host) in [
+            (GeometryCache::Full, 1 << 34, 0),
+            (GeometryCache::Full, 3 << 20, 0),
+            (GeometryCache::Transposition, 1 << 34, 0),
+            (GeometryCache::Transposition, 2 << 20, 0),
+            (GeometryCache::Transposition, 64 << 10, 0),
+            (GeometryCache::Full, 3 << 20, 1 << 34),
+            (GeometryCache::Transposition, 2 << 20, 1 << 34),
+            (GeometryCache::Transposition, 2 << 20, 1 << 20),
+            (GeometryCache::Host, 1 << 34, 1 << 34),
+            (GeometryCache::Host, 1 << 34, 1 << 20),
+            (GeometryCache::Host, 1 << 34, 0),
+            (GeometryCache::Host, 1 << 34, (1 << 34) + 1),
+            (GeometryCache::Transposition, 2 << 20, (1 << 34) + 1),
         ] {
-            assert_eq!(run(conv, cache, bytes), reference, "{conv:?}: {cache:?} with {bytes} bytes");
+            let (out, used, uploads) = run(conv, cache, bytes, host);
+            assert_eq!(out, reference, "{conv:?}: {cache:?} with {bytes} bytes, {host} on the host");
+            if cache == GeometryCache::Host && host == 1 << 34 {
+                assert!(used > 0 && uploads, "{conv:?}: Host policy made no host copy");
+            }
         }
     }
 }

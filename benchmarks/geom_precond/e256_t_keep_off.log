@@ -1,0 +1,24 @@
+{"evaluations":6,"loss_first":10062.602488349676,"loss_last":9041.144440161397,"ranks":1,"seconds":45.74,"seconds_per_evaluation":7.624}
+	Command being timed: "/tmp/jmdeloui-geomcache/target/release/stl-synth --target /tmp/jmdeloui-geomcache/data/g256.npy --L 4 --weights ergodic --ensemble 10 --scatter-weight 1 --level-power-weight 10 --kappa-table /tmp/jmdeloui-ens/data/knots.npy --kappa-weight 0.1 --marginal-weight 10000 --init /tmp/jmdeloui-ens/init/synthesis_gauss_m{m}_nested.npy --init-noise 0 --quiet --gpu --niter 5 --gpu-fields keep --geometry-cache off --out e256_t_keep_off"
+	User time (seconds): 68.64
+	System time (seconds): 16.30
+	Percent of CPU this job got: 109%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:17.54
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1172764
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1875097
+	Voluntary context switches: 7896
+	Involuntary context switches: 1002
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 252104
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

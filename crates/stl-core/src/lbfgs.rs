@@ -19,6 +19,23 @@ pub trait Reduce {
     fn max(&self, local: f64) -> f64;
 }
 
+/// A symmetric positive-definite operator `P` for the initial inverse
+/// Hessian of the two-loop recursion, `H0 = h P` (`h = s.y / y.Py` of the
+/// last pair) instead of torch's `H0 = (s.y / y.y) I`: L-BFGS in the metric
+/// `P^-1`.  The first direction is `-P g` (step `min(1, 1 / |P g|_1) lr`).
+/// See `crate::precond`.
+pub trait Preconditioner {
+    /// `P g` on the local slice.
+    fn apply(&self, g: &[f64]) -> Vec<f64>;
+    /// A new pair `(s, y)` was accepted: an adaptive operator updates itself.
+    fn update(&mut self, _r: &dyn Reduce, _s: &[f64], _y: &[f64]) {}
+    /// `H0 = h P` with the scalar `h` (true), or `H0 = P` (an operator that
+    /// carries its own scaling).
+    fn scaled(&self) -> bool {
+        true
+    }
+}
+
 /// One process holding the whole variable.
 pub struct Local;
 
@@ -65,7 +82,7 @@ const CHUNK: usize = 1 << 16;
 
 /// Host threads of the vector operations: `STL_THREADS`, else the CPUs
 /// available to the process.
-fn threads() -> usize {
+pub(crate) fn threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("STL_THREADS")
@@ -325,6 +342,18 @@ fn strong_wolfe(
 /// `f(x)` returns the loss (identical on every process) and the local slice
 /// of its gradient.  Returns the number of evaluations.
 pub fn minimize(x: &mut [f64], opts: &LbfgsOptions, r: &dyn Reduce, f: &mut Objective) -> usize {
+    minimize_preconditioned(x, opts, r, f, None)
+}
+
+/// [`minimize`] with the initial inverse Hessian `H0` of `precond` (None:
+/// torch's, the same operations as [`minimize`]).
+pub fn minimize_preconditioned(
+    x: &mut [f64],
+    opts: &LbfgsOptions,
+    r: &dyn Reduce,
+    f: &mut Objective,
+    mut precond: Option<&mut dyn Preconditioner>,
+) -> usize {
     let max_eval = opts.max_eval.unwrap_or(opts.max_iter * 5 / 4);
     let (mut loss, mut flat_grad) = f(x);
     let mut current_evals = 1;
@@ -343,7 +372,13 @@ pub fn minimize(x: &mut [f64], opts: &LbfgsOptions, r: &dyn Reduce, f: &mut Obje
     while n_iter < opts.max_iter {
         n_iter += 1;
         if n_iter == 1 {
-            d = build(flat_grad.len(), |i| -flat_grad[i]);
+            d = match &precond {
+                None => build(flat_grad.len(), |i| -flat_grad[i]),
+                Some(p) => {
+                    let pg = p.apply(&flat_grad);
+                    build(pg.len(), |i| -pg[i])
+                }
+            };
         } else {
             let y = build(flat_grad.len(), |i| flat_grad[i] - prev_flat_grad[i]);
             let s = build(d.len(), |i| d[i] * t);
@@ -354,7 +389,17 @@ pub fn minimize(x: &mut [f64], opts: &LbfgsOptions, r: &dyn Reduce, f: &mut Obje
                     old_stps.remove(0);
                     ro.remove(0);
                 }
-                h_diag = ys / dot(r, &y, &y);
+                h_diag = match precond.as_deref_mut() {
+                    None => ys / dot(r, &y, &y),
+                    Some(p) => {
+                        p.update(r, &s, &y);
+                        if p.scaled() {
+                            ys / dot(r, &y, &p.apply(&y))
+                        } else {
+                            1.0
+                        }
+                    }
+                };
                 old_dirs.push(y);
                 old_stps.push(s);
                 ro.push(1.0 / ys);
@@ -365,7 +410,13 @@ pub fn minimize(x: &mut [f64], opts: &LbfgsOptions, r: &dyn Reduce, f: &mut Obje
                 al[i] = dot(r, &old_stps[i], &q) * ro[i];
                 axpy(&mut q, -al[i], &old_dirs[i]);
             }
-            d = build(q.len(), |i| q[i] * h_diag);
+            d = match &precond {
+                None => build(q.len(), |i| q[i] * h_diag),
+                Some(p) => {
+                    let pq = p.apply(&q);
+                    build(pq.len(), |i| pq[i] * h_diag)
+                }
+            };
             for i in 0..num_old {
                 let be_i = dot(r, &old_dirs[i], &d) * ro[i];
                 axpy(&mut d, al[i] - be_i, &old_stps[i]);
@@ -374,7 +425,12 @@ pub fn minimize(x: &mut [f64], opts: &LbfgsOptions, r: &dyn Reduce, f: &mut Obje
         prev_flat_grad = copy(&flat_grad);
         let prev_loss = loss;
 
-        t = if n_iter == 1 { py_min(1.0, 1.0 / abs_sum(r, &flat_grad)) * opts.lr } else { opts.lr };
+        t = if n_iter == 1 {
+            let first = if precond.is_some() { abs_sum(r, &d) } else { abs_sum(r, &flat_grad) };
+            py_min(1.0, 1.0 / first) * opts.lr
+        } else {
+            opts.lr
+        };
         let gtd = dot(r, &flat_grad, &d);
         if gtd > -opts.tolerance_change {
             break;
@@ -424,6 +480,49 @@ mod tests {
         let mut q = vec![0.0; n];
         fill(&mut q, |i| b[i].mul_add(-0.7, a[i]));
         assert!(q.iter().enumerate().all(|(i, v)| *v == b[i].mul_add(-0.7, a[i])));
+    }
+
+    /// The identity as a preconditioner reproduces the unpreconditioned
+    /// trajectory to the bit; a band preconditioner converges on an
+    /// ill-conditioned quadratic whose scales are the Haar bands.
+    #[test]
+    fn preconditioned_lbfgs() {
+        struct Identity;
+        impl Preconditioner for Identity {
+            fn apply(&self, g: &[f64]) -> Vec<f64> {
+                g.to_vec()
+            }
+        }
+        let n = 4 * 64;
+        // f = sum_j c_j |B_j (x - x*)|^2 with c_j = 4^-2j: large scales flat.
+        let bands = crate::precond::Bands::power_law(3, 0.0);
+        let star: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 / 3.0 - 1.5).collect();
+        let quad = |p: &[f64]| {
+            let e: Vec<f64> = p.iter().zip(&star).map(|(a, b)| a - b).collect();
+            let curv = crate::precond::Bands { depth: 3, alpha: (0..4).map(|j| 4f64.powi(-2 * j)).collect(), ..bands.clone() };
+            let ce = curv.apply(&e);
+            (e.iter().zip(&ce).map(|(a, b)| a * b).sum::<f64>(), ce.iter().map(|v| 2.0 * v).collect::<Vec<_>>())
+        };
+        let opts = LbfgsOptions { max_iter: 30, ..Default::default() };
+        let run = |p: Option<&mut dyn Preconditioner>| {
+            let mut x = vec![0.0; n];
+            let mut hist = Vec::new();
+            let mut f = |p: &[f64]| {
+                let out = quad(p);
+                hist.push(out.0);
+                out
+            };
+            minimize_preconditioned(&mut x, &opts, &Local, &mut f, p);
+            hist
+        };
+        let plain = run(None);
+        assert_eq!(run(Some(&mut Identity)), plain);
+        let mut flat = crate::precond::Bands::power_law(3, 0.0);
+        assert_eq!(run(Some(&mut flat)), plain);
+        let mut matched = crate::precond::Bands::power_law(3, 2.0);
+        let pre = run(Some(&mut matched));
+        assert!(pre.last().unwrap() < &(1e-20), "{pre:?}");
+        assert!(pre.last().unwrap() < plain.last().unwrap());
     }
 
     /// Rosenbrock from torch's own LBFGS test: converges to (1, 1).
