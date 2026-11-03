@@ -31,6 +31,9 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --init PATH         initial images (standardised units), .npy [B, (C,) H, W]
   --seed N            seed of the initial white noise (default 26)
   --bench K           only time K evaluations of the loss and gradient
+  --trace K           every K evaluations, the batch-mean feature residuals
+                      (mean_b f - mean_t f) and image 0: PREFIX_trace.npy
+                      [S, n, 2], PREFIX_trace_maps.npy [S, C, H, W]
   --gpu               the running batch on a CUDA device (feature gpu;
                       STL_GPU_DEVICE, default 0): ScatCov, spectra, Minkowski;
                       --tile as on the CPU (a tile larger than the image:
@@ -58,6 +61,7 @@ struct Args {
     init: Option<PathBuf>,
     seed: u64,
     bench: usize,
+    trace: usize,
     gpu: bool,
     out: Option<String>,
 }
@@ -80,6 +84,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         init: None,
         seed: 26,
         bench: 0,
+        trace: 0,
         gpu: false,
         out: None,
     };
@@ -113,6 +118,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--init" => a.init = Some(PathBuf::from(it.next().ok_or("--init needs a path")?)),
             "--seed" => a.seed = num(it.next(), k)?,
             "--bench" => a.bench = num(it.next(), k)?,
+            "--trace" => a.trace = num(it.next(), k)?,
             "--gpu" => a.gpu = true,
             "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
             "-h" | "--help" => return Err(USAGE.into()),
@@ -215,14 +221,30 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     let (f_init, m_init) = obj.batch_features(&u);
     let mut history = Vec::new();
     let mut times = Vec::new();
+    // Feature residuals and image 0 every `--trace` evaluations (an extra forward each).
+    let nf = obj.feature_count();
+    let target_mean: Vec<num_complex::Complex64> = (0..nf).map(|i| (0..bt_use).map(|k| obj.target[k * nf + i]).sum::<num_complex::Complex64>() / bt_use as f64).collect();
+    let mut trace: Vec<f64> = Vec::new();
+    let mut trace_maps: Vec<f64> = Vec::new();
+    let mut trace_evals: Vec<usize> = Vec::new();
     let t1 = Instant::now();
-    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>| {
+    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>, warm_offset: usize| {
         let opts = LbfgsOptions { lr: 1.0, max_iter: niter, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
         let mut f = |x: &[f64]| {
             let t = Instant::now();
             let r = obj.loss_and_grad(x);
             times.push(t.elapsed().as_secs_f64());
             history.push(r.0);
+            if a.trace > 0 && warm_offset != usize::MAX && (history.len() - 1) % a.trace == 0 {
+                let (f, _) = obj.batch_features(x);
+                let b = f.len() / nf;
+                for i in 0..nf {
+                    let d = (0..b).map(|k| f[k * nf + i]).sum::<num_complex::Complex64>() / b as f64 - target_mean[i];
+                    trace.extend([d.re, d.im]);
+                }
+                trace_maps.extend_from_slice(&x[..n]);
+                trace_evals.push(history.len() - 1 + warm_offset);
+            }
             if history.len() % 10 == 1 {
                 eprintln!("eval {:4}  loss {:.6e}  {:.3} s", history.len(), r.0, times.last().unwrap());
             }
@@ -236,10 +258,11 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         let mut wc = cfg.clone();
         wc.mode = Mode::StlDev;
         let warm = PlanarObjective::new(wc, &t)?;
-        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history);
+        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history, usize::MAX);
         report["warm_loss_history"] = serde_json::json!(warm_history);
     }
-    evals += lbfgs(&obj, a.niter, &mut u, &mut history);
+    evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals);
+    drop(lbfgs);
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
     report["evaluations"] = serde_json::json!(evals);
@@ -267,6 +290,13 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
             for (name, m, rows) in [("target", &obj.target_mf, bt_use), ("init", &m_init, a.nbatch), ("final", &m_final, a.nbatch)] {
                 write_npy_shape(Path::new(&format!("{p}_mf_{name}.npy")), m, &[rows, nm])?;
             }
+        }
+        if a.trace > 0 {
+            let s = trace_evals.len();
+            write_npy_shape(Path::new(&format!("{p}_trace.npy")), &trace, &[s, nf, 2])?;
+            write_npy_shape(Path::new(&format!("{p}_trace_maps.npy")), &trace_maps, &[s, c, h, w])?;
+            report["trace_evaluations"] = serde_json::json!(trace_evals);
+            report["plan"] = serde_json::json!(obj.plan().iter().map(|q| serde_json::json!({"family": q.family.name(), "j1": q.j1, "j2": q.j2, "j3": q.j3, "l1": q.l1, "l2": q.l2, "l3": q.l3})).collect::<Vec<_>>());
         }
         std::fs::write(format!("{p}.json"), serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;
     }
