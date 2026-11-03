@@ -1,0 +1,23 @@
+{
+ "target": "field_512.npy",
+ "shape": [
+  512,
+  512
+ ],
+ "ntarget": 10,
+ "nbatch": 10,
+ "power_spectrum": true,
+ "device": "cuda",
+ "threads": 16,
+ "torch": "2.11.0+cu128",
+ "seconds": [
+  0.32241502311080694,
+  0.24676817702129483,
+  0.24538364307954907
+ ],
+ "loss": 20893.09685284539,
+ "total_seconds": 1.982985228067264,
+ "peak_rss_bytes": 1360752640,
+ "peak_device_bytes": 12750291456,
+ "gpu": "NVIDIA A100-SXM4-80GB"
+}

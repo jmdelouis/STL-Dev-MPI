@@ -254,13 +254,21 @@ fn re(c: Vec<C64>) -> Vec<f64> {
 /// `2.5 mean log((v + e) / (v_t + e))^2` over the bands of centre in
 /// `[20, cutoff]`, `e = 0.01 max(v_t, 1e-30)`.
 pub fn power_loss(x: &[f64], target: &[f64], target_var: &[f64], centers: &[f64], cutoff: f64) -> Result<(Block, Vec<f64>), String> {
+    let mask: Vec<bool> = centers.iter().map(|&c| c >= 20.0 && c <= cutoff).collect();
+    if !mask.iter().any(|&m| m) {
+        return Err("C_l variance: no band between 20 and the cutoff".into());
+    }
+    power_loss_masked(x, target, target_var, &mask)
+}
+
+/// [`power_loss`] with the bands of the variance term given by `mask`.
+pub fn power_loss_masked(x: &[f64], target: &[f64], target_var: &[f64], mask: &[bool]) -> Result<(Block, Vec<f64>), String> {
     let n = target.len();
     let xc = real(x);
     let (mu, var) = moments(&xc, n);
-    let mask: Vec<bool> = centers.iter().map(|&c| c >= 20.0 && c <= cutoff).collect();
     let count = mask.iter().filter(|&&m| m).count();
     if count == 0 {
-        return Err("C_l variance: no band between 20 and the cutoff".into());
+        return Err("power variance: no band selected".into());
     }
     let eps = 1e-12 * torch_median(&target.iter().map(|v| v.abs()).collect::<Vec<_>>()).max(1e-30);
     let mut dm = vec![C64::default(); n];

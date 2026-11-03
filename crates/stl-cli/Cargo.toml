@@ -1,6 +1,6 @@
 [package]
 name = "stl-cli"
-description = "Command-line tools: stl-synth (synthesis of HEALPix maps from ScatCov statistics), stl-stats, stl-minkowski"
+description = "Command-line tools: stl-synth (synthesis of HEALPix maps from ScatCov statistics), stl-synth2d (planar images), stl-stats, stl-minkowski"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -32,6 +32,10 @@ path = "src/bin/stl-minkowski.rs"
 [[bin]]
 name = "stl-ensemble"
 path = "src/bin/stl-ensemble.rs"
+
+[[bin]]
+name = "stl-synth2d"
+path = "src/bin/stl-synth2d.rs"
 
 [[bin]]
 name = "stl-stats"

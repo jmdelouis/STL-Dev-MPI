@@ -6,6 +6,7 @@
 use super::lut::linspace;
 use num_complex::Complex64;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use stl_core::planar::spectrum::Fft2;
 use stl_core::sht::Sht;
 
 /// Host threads: `STL_THREADS`, else the CPUs available to the process.
@@ -185,9 +186,38 @@ impl Cic {
     }
 }
 
+/// First and second derivatives `[x_1, x_2, x_11, x_22, x_12]` of a map
+/// and their adjoint: harmonic covariant derivatives of a full-sky map,
+/// spectral derivatives of a periodic image (pixel units).
+pub trait Derivatives {
+    fn map_derivatives(&self, x: &[f64]) -> [Vec<f64>; 5];
+    fn map_derivatives_vjp(&self, g: [&[f64]; 5]) -> Vec<f64>;
+}
+
+impl Derivatives for Sht {
+    fn map_derivatives(&self, x: &[f64]) -> [Vec<f64>; 5] {
+        self.derivatives(&self.analysis(x))
+    }
+
+    fn map_derivatives_vjp(&self, g: [&[f64]; 5]) -> Vec<f64> {
+        self.analysis_vjp(&self.derivatives_vjp(g))
+    }
+}
+
+impl Derivatives for Fft2 {
+    fn map_derivatives(&self, x: &[f64]) -> [Vec<f64>; 5] {
+        self.derivatives(x)
+    }
+
+    fn map_derivatives_vjp(&self, g: [&[f64]; 5]) -> Vec<f64> {
+        self.derivatives_vjp(g)
+    }
+}
+
 /// Soft Minkowski functionals V0, V1, V2 of the standardised map at 65
 /// thresholds in [-4, 4] (width 0.125), with the harmonic covariant
-/// derivatives and the detached curvature floor of the source.
+/// derivatives (spectral ones on the plane) and the detached curvature
+/// floor of the source.
 pub struct Minkowski {
     pub nu: Vec<f64>,
     pub eps: f64,
@@ -251,12 +281,12 @@ impl Minkowski {
     }
 
     /// Functionals `[3, 65]` (flattened) and the state.
-    pub fn forward(&self, sht: &Sht, x: &[f64]) -> (Vec<f64>, MinkowskiState) {
+    pub fn forward<D: Derivatives + ?Sized>(&self, deriv: &D, x: &[f64]) -> (Vec<f64>, MinkowskiState) {
         let n = x.len() as f64;
         let mean = x.iter().sum::<f64>() / n;
         let sigma = (x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n + 1e-12).sqrt();
         let u: Vec<f64> = x.iter().map(|v| (v - mean) / sigma).collect();
-        let d = sht.derivatives(&sht.analysis(&u));
+        let d = deriv.map_derivatives(&u);
         let floor = 1e-4 * d[0].iter().zip(&d[1]).map(|(a, b)| a * a + b * b).sum::<f64>() / n + 1e-12;
         let k = self.nu.len();
         let c = 1.0 / ((2.0 * std::f64::consts::PI).sqrt() * self.eps);
@@ -286,7 +316,7 @@ impl Minkowski {
 
     /// Map cotangent from the cotangent `[3, 65]` of the functionals (the
     /// floor held fixed).
-    pub fn vjp(&self, sht: &Sht, s: &MinkowskiState, cot: &[f64]) -> Vec<f64> {
+    pub fn vjp<D: Derivatives + ?Sized>(&self, deriv: &D, s: &MinkowskiState, cot: &[f64]) -> Vec<f64> {
         let k = self.nu.len();
         let npix = s.u.len();
         let n = npix as f64;
@@ -330,7 +360,7 @@ impl Minkowski {
                 a.extend(b);
             }
         }
-        let back = sht.analysis_vjp(&sht.derivatives_vjp([&gd[0], &gd[1], &gd[2], &gd[3], &gd[4]]));
+        let back = deriv.map_derivatives_vjp([&gd[0], &gd[1], &gd[2], &gd[3], &gd[4]]);
         gu.iter_mut().zip(back).for_each(|(a, b)| *a += b);
         // u = (x - mean) / sqrt(mean((x - mean)^2) + 1e-12).
         let mg = gu.iter().sum::<f64>() / n;
