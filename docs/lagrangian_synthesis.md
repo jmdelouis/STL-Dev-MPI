@@ -631,6 +631,18 @@ prototype. It reaches loss 1.29 at 110 equivalent 256² evaluations
 (prototype: 0.315) after 491 equivalent evaluations in total. The wall time
 is 311 s: 101 s for the coarse levels, 195 s for the 256² level.
 
+**Diversity check** (`tools/lagrangian/diversity.py`,
+`benchmarks/lagrangian/step5/diversity.{json,png}`). Two runs, seeds 26 and
+27 (final losses 0.254 and 0.583). The correlation of each synthesis with
+each target, maximised over periodic translations, averages 0.38
+(max 0.46). The same measure between the targets themselves averages 0.47
+(max 0.58). Between syntheses it is 0.34 (max 0.39), with a zero-shift
+Pearson of 0.07 (max 0.17). The values are the same at 32², 64², 128² and
+256². Between the two seeds, the zero-shift Pearson is 0.09 (max 0.27) and
+the translated maximum 0.38. The syntheses are therefore neither copies nor
+translations of the targets, nor of each other, and a new seed gives new
+images.
+
 ### 6.5 Step 4: amortised attention generator of the displacement (torch, STL-Dev loss)
 
 `tools/lagrangian/attention_generator.py`, a single model trained once. The
