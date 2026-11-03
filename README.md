@@ -290,6 +290,11 @@ until they are redrawn in the paper's style.
   adds the `stl-stats` binary and the scripts `plots/scripts/` that the
   appendix cites. Populations: r000-r009 (target), the A100 run 2570602,
   the recipe's 1024 ensemble (Datarmor job 7775548, 600 iterations).
+  The two map figures (C.2, C.3) were redrawn with histogram-equalised
+  colours (one healpy HistEqNorm built on the quantiles of r000, u from
+  -0.414 to 191, shared by all panels): branch
+  `claude/campeti-1024-maps-hist` (PR #12, head dcbd4fe, merged into main on
+  3 Nov, c72286c).
 - Kappa terms: `docs/kappa_power_spectrum.md` (section 7: kurtosis term;
   section 8: Minkowski term and its nside-256 tests). The nside-512 test of
   the Minkowski term (Table `tab:mink512`): `mf_levels.py` judge on hpc,
