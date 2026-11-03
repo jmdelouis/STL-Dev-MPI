@@ -27,7 +27,7 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "python", "stl_ensemble"))
-from generator import Generator  # noqa: E402
+from generator import load  # noqa: E402
 from stl_torch import EnsembleLoss  # noqa: E402
 from stl_port.native import NativeEngine  # noqa: E402
 from train import load_target, target_statistics  # noqa: E402
@@ -72,7 +72,7 @@ def main():
     raw = load_target(a.target, a.nside)
     mu, sd = raw.mean(), raw.std()
     target = (raw - mu) / sd
-    ck = torch.load(a.model, map_location=dev, weights_only=False) if a.model else None
+    gen, ck = load(a.model, dev) if a.model else (None, None)
     j = ck["j"] if ck else int(math.log2(a.nside)) - 1
     tstats, tvar, plan = target_statistics(target, a.nside, j, a.device)
     report_fn = EnsembleLoss(tstats, tvar, plan, a.nside, 1, 0.0)
@@ -80,17 +80,16 @@ def main():
 
     gen_seconds = None
     if ck:
-        gen = Generator(a.nside, ck["nside0"], ck["channels"], up=ck.get("up", "nearest")).to(dev).eval()
-        if "knots_g" in ck["state"]:
-            gen.knots_g, gen.knots_x = ck["state"]["knots_g"].clone(), ck["state"]["knots_x"].clone()
-        gen.load_state_dict(ck["state"], strict=False)
         g = torch.Generator(device=dev).manual_seed(a.seed)
         maps = []
         torch.cuda.synchronize(dev)
         t0 = time.time()
         with torch.no_grad():
             for _ in range(math.ceil(a.count / a.batch)):
-                maps.append(gen(gen.noise(a.batch, generator=g, device=dev)).double().cpu().numpy())
+                x = gen(gen.noise(a.batch, generator=g, device=dev)).double()
+                if ck.get("gauss"):
+                    x = gen.kappa(x)
+                maps.append(x.cpu().numpy())
         torch.cuda.synchronize(dev)
         gen_seconds = time.time() - t0
         maps = np.concatenate(maps)[: a.count]

@@ -11,6 +11,15 @@ ensemble loss of `stl-synth --ensemble B --weights ergodic --scatter-weight X`.
 `--init` loads a generator trained at a lower nside into the coarse levels
 (progressive growing); `--freeze K` freezes its first K levels.
 
+`--level-power-weight X` adds the `stl-synth` term
+`X / B sum_m sum_n (V_n(map_m) / V_n(target) - 1)^2`, `V_n` the variance of
+the 4-children details of level n (finest down to nside 8).  `--gauss`
+trains the generator on the gaussianised target `g` (rank transform) and
+adds the statistics of `kappa = f(g)` (`f` the monotone table of the
+target, 256 knots) as a second reduced chi^2 of factor `--kappa-weight`
+(0.1), as `stl-synth --kappa-table`; the generator's `kappa` method gives
+the maps.  `--latent` and `--map-up` are the generator options.
+
 Writes DIR/model.pt, DIR/train.json (loss history, timers, configuration).
 """
 
@@ -48,6 +57,27 @@ def target_statistics(m, nside, j, device):
     return v[0], var[0], plan
 
 
+def gaussianize(m):
+    """Rank transform to a unit Gaussian, standardised."""
+    from scipy.special import ndtri
+
+    g = np.empty_like(m)
+    g[np.argsort(m, kind="stable")] = ndtri((np.arange(m.size) + 0.5) / m.size)
+    return (g - g.mean()) / g.std()
+
+
+def level_powers(x, levels):
+    """`[B, levels]`: variance of the 4-children details of every level, finest first."""
+    out = []
+    cur = x
+    for _ in range(levels):
+        c = cur.reshape(cur.shape[0], -1, 4)
+        par = c.mean(-1)
+        out.append(((c - par[..., None]) ** 2).mean((1, 2)))
+        cur = par
+    return torch.stack(out, 1)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--target", required=True)
@@ -65,7 +95,11 @@ def main():
     p.add_argument("--init", default=None)
     p.add_argument("--freeze", type=int, default=0)
     p.add_argument("--up", default="smooth", choices=["smooth", "nearest"])
-    p.add_argument("--marginal", action="store_true", help="output through the target's Gaussian anamorphosis")
+    p.add_argument("--map-up", default="nearest", choices=["smooth", "nearest"])
+    p.add_argument("--latent", action="store_true")
+    p.add_argument("--level-power-weight", type=float, default=0.0)
+    p.add_argument("--gauss", action="store_true")
+    p.add_argument("--kappa-weight", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=500)
     a = p.parse_args()
@@ -77,24 +111,35 @@ def main():
     raw = load_target(a.target, a.nside)
     mu, sd = raw.mean(), raw.std()
     target = (raw - mu) / sd
+    main_target = gaussianize(raw) if a.gauss else target
     t0 = time.time()
-    tstats, tvar, plan = target_statistics(target, a.nside, j, a.device)
+    tstats, tvar, plan = target_statistics(main_target, a.nside, j, a.device)
     engine = NativeEngine(a.nside, j, batch=a.batch, backend="gpu", device=a.device)
     stats = Stats(engine)
     loss_fn = EnsembleLoss(tstats, tvar, plan, a.nside, a.batch, a.scatter_weight, device=dev)
+    if a.gauss:
+        kstats_t, kvar_t, _ = target_statistics(target, a.nside, j, a.device)
+        kengine = NativeEngine(a.nside, j, batch=a.batch, backend="gpu", device=a.device)
+        kstats = Stats(kengine)
+        kloss_fn = EnsembleLoss(kstats_t, kvar_t, plan, a.nside, a.batch, 0.0, device=dev)
+    nlev = int(math.log2(a.nside)) - 2
+    vt = level_powers(torch.as_tensor(main_target[None], device=dev), nlev)[0]
     setup = time.time() - t0
 
     channels = [int(c) for c in a.channels.split(",")] if a.channels else None
-    gen = Generator(a.nside, a.nside0, channels, up=a.up).to(dev)
+    gen = Generator(a.nside, a.nside0, channels, up=a.up, map_up=a.map_up, latent=a.latent).to(dev)
+    if a.gauss:
+        order = np.argsort(main_target, kind="stable")
+        gs, ks = main_target[order], target[order]
+        knots = np.linspace(gs[0], gs[-1], 256)
+        gen.set_transform(knots, np.interp(knots, gs, ks))
     if a.init:
         ck = torch.load(a.init, map_location=dev, weights_only=False)
         own = gen.state_dict()
-        loaded = {k: v for k, v in ck["state"].items() if k in own and own[k].shape == v.shape}
+        loaded = {k: v for k, v in ck["state"].items() if k in own and own[k].shape == v.shape and not k.startswith("knots")}
         own.update(loaded)
         gen.load_state_dict(own)
         print(f"init: {len(loaded)} tensors from {a.init}", flush=True)
-    if a.marginal:
-        gen.set_marginal(target)
     for k in range(a.freeze):
         for prm in list(gen.blocks[k].parameters()) + list(gen.heads[k].parameters()):
             prm.requires_grad_(False)
@@ -105,12 +150,12 @@ def main():
     print(f"nside {a.nside} J {j} coefficients {len(plan)} params {nparams} trainable {sum(q.numel() for q in params)} "
           f"setup {setup:.1f} s", flush=True)
 
-    hist = {"step": [], "loss": [], "mean_term": [], "scatter_term": []}
+    hist = {"step": [], "loss": [], "mean_term": [], "scatter_term": [], "kappa_term": [], "level_power_term": []}
     timers = {"generator": 0.0, "engine": 0.0, "loss_and_step": 0.0}
     started = time.time()
 
     def save(tag="model.pt"):
-        torch.save({"state": gen.state_dict(), "nside": a.nside, "nside0": a.nside0, "channels": gen.channels, "up": gen.up_mode,
+        torch.save({"state": gen.state_dict(), **gen.config(), "gauss": a.gauss,
                     "target_mean": float(mu), "target_std": float(sd), "j": j}, os.path.join(a.out, tag))
 
     for step in range(1, a.steps + 1):
@@ -120,8 +165,14 @@ def main():
         torch.cuda.synchronize(dev)
         tg = time.time()
         s = stats(x)
+        lk = lp = torch.zeros((), dtype=x.dtype, device=dev)
+        if a.gauss:
+            lk = a.kappa_weight * kloss_fn(kstats(gen.kappa(x)))[0]
+        if a.level_power_weight > 0:
+            lp = a.level_power_weight / a.batch * ((level_powers(x, nlev) / vt - 1) ** 2).sum()
         te = time.time()
         loss, lm, ls = loss_fn(s)
+        loss = loss + lk + lp
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -136,7 +187,10 @@ def main():
             hist["loss"].append(loss.item())
             hist["mean_term"].append(lm.item())
             hist["scatter_term"].append(ls.item())
+            hist["kappa_term"].append(lk.item())
+            hist["level_power_term"].append(lp.item())
             print(f"step {step} loss {loss.item():.6g} mean {lm.item():.6g} scatter {ls.item():.6g} "
+                  f"kappa {lk.item():.4g} levels {lp.item():.4g} "
                   f"{(time.time() - started) / step:.3f} s/step", flush=True)
         if step % a.save_every == 0:
             save()
