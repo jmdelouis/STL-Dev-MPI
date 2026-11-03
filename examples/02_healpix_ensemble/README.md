@@ -52,9 +52,10 @@ The production options at nside 1024 are the same with `--nside 1024`, `--ps-var
 ![loss](loss.png)
 
 Top: Mollweide views of the first reference (block-averaged to nside 64) and of two members;
-bottom: one base face. After this short run the members have the filaments and peaks of the
-references but are visibly clumpier, and their brightest peaks are too bright: the loss is still
-falling.
+bottom: one base face. All panels share one histogram-equalised colour scale, set by the
+reference's pixel distribution (healpy's `norm='hist'`), which balances the colours of the skewed
+κ field. After this short run the members have the large-scale structure of the references but
+not yet their network of thin filaments, and the loss is still falling.
 
 | Step | Time | Notes |
 |---|---|---|

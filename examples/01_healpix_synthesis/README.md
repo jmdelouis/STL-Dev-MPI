@@ -28,7 +28,8 @@ stl-synth --target target_map.npy --L 4 --weights ergodic --niter 100 --seed 1 -
 
 ![maps](maps.png)
 
-Top: Mollweide views; bottom: one base face (64 × 64 pixels). At nside 64 (pixels of 0.9°) the
+Top: Mollweide views; bottom: one base face (64 × 64 pixels). All panels share one
+histogram-equalised colour scale, set by the target (healpy's `norm='hist'`). At nside 64 (pixels of 0.9°) the
 WebSky κ map is dominated by small-scale fluctuations and looks almost Gaussian; the strongly
 non-Gaussian case is [example 02](https://github.com/jmdelouis/STL-Dev-MPI/tree/main/examples/02_healpix_ensemble).
 

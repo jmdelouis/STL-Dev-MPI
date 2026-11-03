@@ -1,13 +1,16 @@
 """Small figures for the examples (numpy, matplotlib, healpix_geo).
 
-    python examples/plotting.py maps OUT.png [--range P1,P2] TITLE=MAP.npy [TITLE=MAP.npy ...]
+    python examples/plotting.py maps OUT.png [--norm hist|linear] [--range P1,P2] TITLE=MAP.npy [TITLE=MAP.npy ...]
     python examples/plotting.py loss OUT.png LABEL=REPORT.json [LABEL=REPORT.json ...]
     python examples/plotting.py stats OUT.png STATS.json
     python examples/plotting.py summary REPORT.json [REPORT.json ...]
 
 maps     Mollweide views of NESTED maps and one base face of each (face 4,
-         on the equator), on the colour scale of the first map (percentiles
-         P1, P2, default 0.5, 99.5).
+         on the equator), on one colour scale for all maps.  --norm hist
+         (default, healpy's mollview norm='hist'): histogram equalisation by
+         the first map's pixel distribution, which balances the colours of
+         skewed fields such as the lensing convergence; --norm linear: the
+         [P1, P2] percentiles of the first map (default 0.5, 99.5).
 loss     loss against evaluation for stl-synth / stl-synth2d / stl-ensemble
          reports (field `loss_history`).
 stats    stl-stats output: S1 and S2 per scale (mean over orientations) and
@@ -53,15 +56,29 @@ def face_image(m, face):
     return m[face * nside * nside + ids][::-1]
 
 
+def hist_norm(reference):
+    """Histogram equalisation by the pixel distribution of `reference` (healpy's
+    norm='hist'): a value maps to its rank among the reference pixels, in [0, 1].
+    The same mapping is applied to every map, so their colours stay comparable."""
+    ref = np.sort(reference)
+    return lambda v: np.searchsorted(ref, v, side="left") / (ref.size - 1.0)
+
+
 def split_specs(args):
     return [(s.split("=", 1)[0], s.split("=", 1)[1]) for s in args]
 
 
-def plot_maps(out, specs, prange=(0.5, 99.5), face=4):
-    """Mollweide views (top row) and base face `face` of every map (bottom row)."""
+def plot_maps(out, specs, prange=(0.5, 99.5), face=4, norm="hist"):
+    """Mollweide views (top row) and base face `face` of every map (bottom row),
+    on the colour scale of the first map."""
     maps = [(t, np.load(p).astype(np.float64).reshape(-1)) for t, p in specs]
     nside = int(round((maps[0][1].size / 12) ** 0.5))
-    vmin, vmax = np.percentile(maps[0][1], prange)
+    if norm == "hist":
+        f = hist_norm(maps[0][1])
+        maps = [(t, f(m)) for t, m in maps]
+        vmin, vmax = 0.0, 1.0
+    else:
+        vmin, vmax = np.percentile(maps[0][1], prange)
     idx = mollweide_index(nside)
     n = len(maps)
     fig, axes = plt.subplots(2, n, figsize=(4.2 * n, 6.4), squeeze=False, gridspec_kw={"height_ratios": [1, 1.6]})
@@ -150,12 +167,16 @@ def main():
         return
     cmd, rest = argv[0], argv[1:]
     if cmd == "maps":
-        prange = (0.5, 99.5)
+        prange, norm = (0.5, 99.5), "hist"
+        if "--norm" in rest:
+            i = rest.index("--norm")
+            norm = rest[i + 1]
+            rest = rest[:i] + rest[i + 2 :]
         if "--range" in rest:
             i = rest.index("--range")
             prange = tuple(float(v) for v in rest[i + 1].split(","))
             rest = rest[:i] + rest[i + 2 :]
-        plot_maps(rest[0], split_specs(rest[1:]), prange)
+        plot_maps(rest[0], split_specs(rest[1:]), prange, norm=norm)
     elif cmd == "loss":
         plot_loss(rest[0], split_specs(rest[1:]))
     elif cmd == "stats":

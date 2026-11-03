@@ -25,5 +25,5 @@ step "run" "$STL_BIN/stl-ensemble" run --calibration "$OUT/cal.json" --niter "$N
 # mean removed as the members' kappa = f(g) - mean.
 set -- $REFS
 "$PY" -c "import numpy as np; r = np.load('$1').astype(float); r = r.reshape(12 * $NSIDE**2, -1).mean(1); np.save('$OUT/ref0.npy', r - r.mean())"
-"$PY" "$HERE/../plotting.py" maps "$HERE/maps.png" --range 1,99.5 "reference r000=$OUT/ref0.npy"     "member 0=$OUT/ens_m000_physical_nested.npy" "member 1=$OUT/ens_m001_physical_nested.npy"
+"$PY" "$HERE/../plotting.py" maps "$HERE/maps.png" "reference r000=$OUT/ref0.npy"     "member 0=$OUT/ens_m000_physical_nested.npy" "member 1=$OUT/ens_m001_physical_nested.npy"
 "$PY" "$HERE/../plotting.py" loss "$HERE/loss.png" "stl-ensemble, 10 members=$OUT/ens.json"
