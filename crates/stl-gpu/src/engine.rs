@@ -102,7 +102,9 @@ impl GeometryCache {
     /// weights of the blocks not kept whole on the device go to the host.
     /// `auto`: whole on the device when everything fits, else the
     /// transposition on the device and the weights on the host within the
-    /// host budget, the rest recomputed; `device`: `Full` without host;
+    /// host budget, the rest recomputed (the drivers time one upload against
+    /// one recomputation, `GpuOptions::host_calibrate`, and keep the faster);
+    /// `device`: `Full` without host;
     /// `host`: `Host`; `off`: `None`.
     pub fn policy(s: &str) -> Option<(Self, bool)> {
         match s {
@@ -213,6 +215,9 @@ pub struct GpuOptions {
     /// whose geometry is stripped on the device (uploaded instead of
     /// recomputed); 0: none (`Host` then recomputes like `Transposition`).
     pub host_cache_bytes: usize,
+    /// Keep the host copies only if uploading the weights of a block is
+    /// faster than recomputing them (timed once, on the first upload).
+    pub host_calibrate: bool,
     /// Host threads for the setup.
     pub threads: usize,
 }
@@ -232,6 +237,7 @@ impl Default for GpuOptions {
             cache: GeometryCache::Auto,
             cache_bytes: 0,
             host_cache_bytes: 0,
+            host_calibrate: false,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
@@ -483,6 +489,10 @@ pub struct GpuEngine<'a> {
     host: Vec<Vec<Option<HostWeights>>>,
     host_budget: usize,
     host_used: usize,
+    /// Calibration of the host copies still to do, and its outcome
+    /// (seconds to recompute and to upload one block, copies kept).
+    host_calibrate: bool,
+    host_choice: Option<(f64, f64, bool)>,
     dmap: CudaSlice<i32>,
     /// `maps[n]` `[B C, |layout n|]`.
     pub maps: Vec<CudaSlice<f64>>,
@@ -628,6 +638,8 @@ impl<'a> GpuEngine<'a> {
             host,
             host_budget: opts.host_cache_bytes,
             host_used: 0,
+            host_calibrate: opts.host_calibrate && opts.host_cache_bytes > 0,
+            host_choice: None,
             dmap,
             maps: Vec::new(),
             m: BTreeMap::new(),
@@ -727,6 +739,12 @@ impl<'a> GpuEngine<'a> {
         (self.host_budget, self.host_used)
     }
 
+    /// Outcome of the calibration of the host copies, if done: seconds to
+    /// recompute and to upload the weights of one block, copies kept.
+    pub fn geometry_host_choice(&self) -> Option<(f64, f64, bool)> {
+        self.host_choice
+    }
+
     /// Ends a phase: synchronises the stream (unless `STL_GPU_PHASE_SYNC=0`:
     /// the host then prepares the next phase while the device runs, and the
     /// phase timers count launches only), adds its time, samples the memory.
@@ -770,6 +788,43 @@ impl<'a> GpuEngine<'a> {
         self.diag.as_ref().is_some_and(|d| self.topo.levels[n].nside > 2 * d.w)
     }
 
+    /// Recomputes the weights of the stripped geometry `g` of block `b`.
+    fn refresh_weights(&self, n: usize, b: usize, g: &mut BlockGeometry) {
+        let spec = self.spec(n);
+        let (grid, rows) = (&self.grids[n], &self.a1_ids[n][b]);
+        match g {
+            BlockGeometry::Stencils(s) => s.refresh(&self.gpu, grid, rows, &spec),
+            BlockGeometry::Dia(d) => {
+                d.refresh(&self.gpu, grid, rows, &spec, self.diag.as_ref().unwrap(), &self.ker);
+                assert_eq!(d.misses, 0, "DIA coefficients off the masks of their first build");
+            }
+        }
+    }
+
+    /// `GpuOptions::host_calibrate`: times the recomputation and the upload
+    /// of the weights of the stripped `g` (the same values) and drops the
+    /// host copies if recomputing is faster.  Leaves `g` whole.
+    fn calibrate_host(&mut self, n: usize, b: usize, g: &mut BlockGeometry) {
+        self.host_calibrate = false;
+        self.gpu.sync();
+        let t = Instant::now();
+        self.refresh_weights(n, b, g);
+        self.gpu.sync();
+        let recompute = t.elapsed().as_secs_f64();
+        g.strip();
+        let t = Instant::now();
+        self.host[n][b].as_ref().unwrap().restore(&self.gpu, g);
+        self.gpu.sync();
+        let upload = t.elapsed().as_secs_f64();
+        let keep = upload < recompute;
+        if !keep {
+            self.host.iter_mut().flatten().for_each(|h| *h = None);
+            (self.host_budget, self.host_used) = (0, 0);
+        }
+        self.host_choice = Some((recompute, upload, keep));
+        self.tick("gpu_geometry_upload", t);
+    }
+
     fn take_geometry(&mut self, n: usize, b: usize) -> BlockGeometry {
         let spec = self.spec(n);
         if let Some(mut g) = self.cache[n][b].take() {
@@ -777,20 +832,15 @@ impl<'a> GpuEngine<'a> {
             if !g.is_stripped() && self.cache_mode != GeometryCache::Full {
                 self.whole_used -= g.bytes() - g.stripped_bytes();
             }
-            if g.is_stripped() && self.host[n][b].is_some() {
+            if g.is_stripped() && self.host[n][b].is_some() && self.host_calibrate {
+                self.calibrate_host(n, b, &mut g);
+            } else if g.is_stripped() && self.host[n][b].is_some() {
                 let t = Instant::now();
                 self.host[n][b].as_ref().unwrap().restore(&self.gpu, &mut g);
                 self.tick("gpu_geometry_upload", t);
             } else if g.is_stripped() {
                 let t = Instant::now();
-                let (grid, rows) = (&self.grids[n], &self.a1_ids[n][b]);
-                match &mut g {
-                    BlockGeometry::Stencils(s) => s.refresh(&self.gpu, grid, rows, &spec),
-                    BlockGeometry::Dia(d) => {
-                        d.refresh(&self.gpu, grid, rows, &spec, self.diag.as_ref().unwrap(), &self.ker);
-                        assert_eq!(d.misses, 0, "DIA coefficients off the masks of their first build");
-                    }
-                }
+                self.refresh_weights(n, b, &mut g);
                 self.tick("gpu_geometry_weights", t);
             }
             return g;

@@ -133,7 +133,9 @@ fn geometry_cache_policies_agree() {
     let g = complex(&case, "gradient");
     let run = |conv: ConvForm, cache: GeometryCache, cache_bytes: usize, host_cache_bytes: usize| {
         let part = Partition::serial(&s.geo, s.cfg.levels());
-        let opts = GpuOptions { block_rows: 1500, conv, cache, cache_bytes, host_cache_bytes, ..Default::default() };
+        // A budget ending in 1: calibrate the host copies (keep or drop them).
+        let host_calibrate = host_cache_bytes % 2 == 1;
+        let opts = GpuOptions { block_rows: 1500, conv, cache, cache_bytes, host_cache_bytes, host_calibrate, ..Default::default() };
         let mut e = GpuEngine::new(gpu.clone(), &s.geo, &s.cfg, part, s.batch, s.channels, &opts);
         let mut out = Vec::new();
         for _ in 0..3 {
@@ -163,6 +165,8 @@ fn geometry_cache_policies_agree() {
             (GeometryCache::Host, 1 << 34, 1 << 34),
             (GeometryCache::Host, 1 << 34, 1 << 20),
             (GeometryCache::Host, 1 << 34, 0),
+            (GeometryCache::Host, 1 << 34, (1 << 34) + 1),
+            (GeometryCache::Transposition, 2 << 20, (1 << 34) + 1),
         ] {
             let (out, used, uploads) = run(conv, cache, bytes, host);
             assert_eq!(out, reference, "{conv:?}: {cache:?} with {bytes} bytes, {host} on the host");

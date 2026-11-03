@@ -121,9 +121,9 @@ stl-synth --target MAP [options]
                         --gpu-cache): 'device' (as --gpu-cache full), 'host' (masks / transposition on
                         the device, weights in page-locked host memory, uploaded at every use), 'auto'
                         (device when it fits, else the weights of the blocks the device cannot hold on
-                        the host, the rest recomputed; host budget STL_HOST_CACHE_MB, else half of
-                        MemAvailable per node) or 'off' (rebuilt at every evaluation); same results
-                        to the bit
+                        the host if uploading one block is faster than recomputing it, timed once;
+                        host budget STL_HOST_CACHE_MB, else half of MemAvailable per node) or 'off'
+                        (rebuilt at every evaluation); same results to the bit
   --gpu-conv F          form of the convolution geometry: 'dia' (masked diagonals,
                         docs/dia_convolution.md) or 'stencils' (bound stencils and their
                         transposition); default STL_GPU_CONV, else dia
@@ -1061,6 +1061,9 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     if let Some(dev) = &device {
         cache_used = dev.engine().geometry_cache().2 as i64;
         host_used = dev.engine().geometry_host().1 as i64;
+        if let (Some((recompute, upload, kept)), Some(info)) = (dev.engine().geometry_host_choice(), gpu_info.as_object_mut()) {
+            info.insert("geometry_host_calibration".into(), serde_json::json!({"recompute_seconds": recompute, "upload_seconds": upload, "host_copies_kept": kept}));
+        }
     }
     let cache_used = comm.allgather_i64(cache_used);
     let host_used = comm.allgather_i64(host_used);
@@ -1304,7 +1307,8 @@ mod gpu {
             None => (GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?, false),
         };
         let host_cache_bytes = if host { stl_gpu::host_cache_budget() } else { 0 };
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, ..Default::default() };
+        let host_calibrate = args.geometry_cache.as_deref() == Some("auto");
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, host_calibrate, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }

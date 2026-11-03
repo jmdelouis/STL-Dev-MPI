@@ -214,7 +214,8 @@ mod device {
             None => (GeometryCache::parse(&args.gpu_cache).ok_or("--gpu-cache: unknown policy")?, false),
         };
         let host_cache_bytes = if host { stl_gpu::host_cache_budget() } else { 0 };
-        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, ..Default::default() };
+        let host_calibrate = args.geometry_cache.as_deref() == Some("auto");
+        let mut opts = GpuOptions { block_rows: args.gpu_block_rows, cache, host_cache_bytes, host_calibrate, ..Default::default() };
         if let Some(c) = &args.gpu_conv {
             opts.conv = ConvForm::parse(c).ok_or("--gpu-conv: unknown form")?;
         }
