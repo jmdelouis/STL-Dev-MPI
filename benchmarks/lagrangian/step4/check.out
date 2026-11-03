@@ -1,0 +1,9 @@
+/tmp/jmdeloui-planar2d/stl-dev/STL_main/__init__.py:9: UserWarning: In development mode: Please run 'pip install -e .' in the root directory of the STL repository to properly install the package, its dependencies and enable proper version tracking.
+  warnings.warn(
+Running synthesis on device: cuda:0 dtype: torch.float64
+Initial shape for u: (10, 1, 256, 256)
+Prefiltering target to remove sub-pixel frequencies
+Synthesis on 3986 ST coefficients
+Prefiltering initial map to remove sub-pixel frequencies
+torch_loss 476819.09469577146
+{"bench_seconds":[0.46196355],"loss":476819.09469577775,"peak_rss_bytes":228446208}

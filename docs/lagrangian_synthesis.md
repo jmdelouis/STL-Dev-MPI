@@ -621,3 +621,33 @@ Reports: `benchmarks/lagrangian/step3/`.
   draws. The per-scale displacement contributes nothing.
 - Not done (on the user's instruction: 2D only, minimum runs): HEALPix,
   cosmic-variance checks, a Rust implementation of the conditional draw.
+
+### 6.5 Step 4: amortised attention generator of the displacement (torch, STL-Dev loss)
+
+`tools/lagrangian/attention_generator.py`, a single model trained once. The
+loss is STL-Dev's `synthesize_from_maps` loss in torch, which agrees with
+`stl-synth2d --mode stldev` to 1.3e-14 relative on a noise map
+(`benchmarks/lagrangian/step4/check.out`). The pipeline:
+
+- bases at 32²: pixel L-BFGS, 300 evaluations, i.e. 4.7 equivalent 256²
+  evaluations;
+- at each 2× step: Fourier upsampling plus the step 3 conditional detail,
+  which a shared local-attention generator moves and modulates. Fine pixels
+  are the queries, the 5 × 5 coarse tokens are the keys,
+  `u = sum_k softmax(q.k / 4 + b_k)(pos_k - x)`, the warp is bicubic, and the
+  amplitude is `exp(a)`;
+- training: Adam, 300 steps on 3 bases, 10 minutes on a T4;
+- evaluation on a held-out base: forward pass, then pixel L-BFGS at 256².
+
+| start (STL-Dev loss, 256²) | loss after forward | evals to 1e-2 | to 1e-4 | loss at 300 evals |
+|---|---|---|---|---|
+| pixel L-BFGS from noise (`e_stldev`) | 4.8e5 | 216 | 453 | 1.2e-3 (1e-7 at 1055) |
+| step 3 conditional draw, no network | 8.07 | 52 | 244 | 4.6e-5 |
+| attention generator | 3.28 | 52 | 241 | 4.0e-5 |
+
+The generator lowers the starting loss 2.5-fold (forward 0.4 s), but L-BFGS
+erases that lead within about 10 evaluations. After refinement it is
+indistinguishable from the conditional draw alone. Both reach every
+loss level about 2 times sooner than pixel L-BFGS from noise. Within the
+300-evaluation budget, neither reaches pixel L-BFGS's final 1e-7
+(1055 evaluations).
