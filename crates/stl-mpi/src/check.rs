@@ -13,11 +13,14 @@ use stl_core::stencil::Gauge;
 
 /// One fixture case directory (`fixtures/stats/<case>`).
 pub struct Fixture {
+    /// Case directory.
     pub dir: PathBuf,
+    /// Contents of `meta.json`.
     pub meta: serde_json::Value,
 }
 
 impl Fixture {
+    /// Opens the case at `dir` and reads its `meta.json`; panics on failure.
     pub fn open(dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref().to_path_buf();
         let text = std::fs::read_to_string(dir.join("meta.json"))
@@ -25,25 +28,31 @@ impl Fixture {
         Fixture { meta: serde_json::from_str(&text).unwrap(), dir }
     }
 
+    /// Case name (`name` of `meta.json`).
     pub fn name(&self) -> &str {
         self.meta["name"].as_str().unwrap()
     }
 
+    /// Integer `key` of `meta.json`; panics if absent.
     pub fn int(&self, key: &str) -> i64 {
         self.meta[key].as_i64().unwrap_or_else(|| panic!("{}: no integer {key}", self.name()))
     }
 
+    /// Real array `<array>.npy` of the case.
     pub fn f64(&self, array: &str) -> Vec<f64> {
         let path = self.dir.join(format!("{array}.npy"));
         let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         npyz::NpyFile::new(std::io::BufReader::new(file)).unwrap().into_vec::<f64>().unwrap()
     }
 
+    /// Complex array from `<name>_re.npy` and `<name>_im.npy`.
     pub fn complex(&self, name: &str) -> Vec<Complex64> {
         let (re, im) = (self.f64(&format!("{name}_re")), self.f64(&format!("{name}_im")));
         re.iter().zip(&im).map(|(&a, &b)| Complex64::new(a, b)).collect()
     }
 
+    /// Geometry of `meta.json`: `nside`, `kernel_sz`, `L`, `gauge`,
+    /// `block_pixels`.
     pub fn geometry(&self) -> LocalGeometry {
         LocalGeometry::new(
             self.int("nside"),
@@ -54,12 +63,14 @@ impl Fixture {
         )
     }
 
+    /// Engine configuration: `J`, `fewer` and `j_to_dg` of `meta.json`.
     pub fn config(&self) -> EngineConfig {
         let mut cfg = EngineConfig::new(self.int("J") as usize, self.meta["fewer"].as_bool().unwrap());
         cfg.j_to_dg = self.meta["j_to_dg"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
         cfg
     }
 
+    /// The complete plan (`Family::ALL`) of the fixture's configuration.
     pub fn plan(&self) -> Vec<Coefficient> {
         let cfg = self.config();
         build_plan(cfg.j_count, self.int("L") as usize, &cfg.j_to_dg, self.int("channels") as usize, None, &Family::ALL)
@@ -70,12 +81,17 @@ impl Fixture {
 /// owned slices `[B, C, end - start]` of the gradients.
 #[derive(Clone, Debug)]
 pub struct RankResult {
+    /// Statistics, in the order of the plan.
     pub values: Vec<Complex64>,
+    /// Owned NESTED range `(start, end)` per level.
     pub owned: Vec<(i64, i64)>,
+    /// Owned slices of the map cotangents, per level.
     pub maps_gradient: Vec<Vec<f64>>,
+    /// Owned slices of the band cotangents (after `analysis_vjp`), per level.
     pub bands: Vec<Vec<f64>>,
     /// Cells held per level (owned + halo) and halo cells per level.
     pub held: Vec<usize>,
+    /// Halo cells per level.
     pub halo: Vec<usize>,
 }
 
@@ -324,6 +340,7 @@ pub fn to_flat(a: &Assembled) -> Vec<f64> {
     flat(&a.values).into_iter().chain(a.maps_gradient.iter().chain(&a.bands).flatten().copied()).collect()
 }
 
+/// Inverse of [`to_flat`], with the shapes of `like`.
 pub fn from_flat(v: &[f64], like: &Assembled) -> Assembled {
     let nv = like.values.len();
     let values = v[..2 * nv].chunks(2).map(|c| Complex64::new(c[0], c[1])).collect();
@@ -341,11 +358,17 @@ pub fn from_flat(v: &[f64], like: &Assembled) -> Assembled {
 /// Full-sky gradients assembled from the ranks' owned slices.
 #[derive(Clone, Debug)]
 pub struct Assembled {
+    /// Statistics, in the order of the plan.
     pub values: Vec<Complex64>,
+    /// Map cotangent of every level, full sky `[B, C, N_d]`.
     pub maps_gradient: Vec<Vec<f64>>,
+    /// Band cotangent of every level (after `analysis_vjp`), full sky
+    /// `[B, C, N_d]`.
     pub bands: Vec<Vec<f64>>,
 }
 
+/// Full-sky statistics and gradients from the results of all the ranks;
+/// `rows = B * C`.  Panics if the statistics differ between ranks.
 pub fn assemble(results: &[RankResult], rows: usize) -> Assembled {
     let levels = results[0].owned.len();
     for r in results {
@@ -377,6 +400,7 @@ pub fn close_ratio(a: &[f64], b: &[f64], atol: f64, rtol: f64) -> f64 {
     a.iter().zip(b).fold(0f64, |m, (x, y)| m.max((x - y).abs() / (atol + rtol * y.abs())))
 }
 
+/// Largest absolute difference between `a` and `b` (same length).
 pub fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b).fold(0f64, |m, (x, y)| m.max((x - y).abs()))
@@ -401,11 +425,15 @@ pub struct Report {
 }
 
 impl Report {
+    /// Statistics and gradients within tolerance (ratios at most 1) and, if
+    /// compared, the other result within 1e-13.
     pub fn passed(&self) -> bool {
         self.stats_ratio <= 1.0 && self.gradient_ratio <= 1.0 && self.other_diff.is_none_or(|d| d <= 1e-13)
     }
 }
 
+/// [`Report`] of `a` against the fixture's `values`, `maps_gradient<d>`
+/// and `band_gradient<d>`, and against `other` if given.
 pub fn compare(fx: &Fixture, a: &Assembled, other: Option<&Assembled>) -> Report {
     let stats_ratio = close_ratio(&flat(&a.values), &flat(&fx.complex("values")), 1e-11, 1e-10);
     let mut gradient_ratio = 0f64;

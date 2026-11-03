@@ -65,6 +65,7 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
+    /// `j_count` scales with `dg(j) = j`, no overlap mode.
     pub fn new(j_count: usize, fewer: bool) -> Self {
         EngineConfig { j_count, j_to_dg: (0..j_count).collect(), fewer, overlap: None }
     }
@@ -79,11 +80,14 @@ impl EngineConfig {
 /// set (owned range plus halo).  Fields over a layout are `[R, len]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Layout {
+    /// The whole level of `n` pixels: positions are the NESTED ids.
     Full(usize),
+    /// Sorted NESTED ids held (owned range plus halo).
     Sparse(Vec<i64>),
 }
 
 impl Layout {
+    /// Number of pixels held.
     pub fn len(&self) -> usize {
         match self {
             Layout::Full(n) => *n,
@@ -91,6 +95,7 @@ impl Layout {
         }
     }
 
+    /// True when no pixel is held.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -133,7 +138,9 @@ impl Layout {
 /// level-0 ghost reduction of the map cotangent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Overlap {
+    /// First level held whole and evaluated by the root process.
     pub coarse: usize,
+    /// This process is the root.
     pub root: bool,
 }
 
@@ -143,7 +150,9 @@ pub struct Overlap {
 /// of the owned range of level `d`.
 #[derive(Clone, Debug)]
 pub struct Partition {
+    /// Owned NESTED range `[start, end)` of every level.
     pub owned: Vec<(i64, i64)>,
+    /// Layout of the fields of every level.
     pub layouts: Vec<Layout>,
     /// Blocks whose coefficient terms this process counts.
     pub blocks: Vec<Vec<Vec<i64>>>,
@@ -153,6 +162,7 @@ pub struct Partition {
     /// chains the map cotangent back): the owned blocks, or in overlap
     /// mode the whole region its blocks read.
     pub map_blocks: Vec<Vec<Vec<i64>>>,
+    /// Overlapping-patch mode, if any.
     pub overlap: Option<Overlap>,
 }
 
@@ -176,6 +186,7 @@ impl Partition {
         self.overlap.map_or(self.layouts.len(), |o| o.coarse)
     }
 
+    /// True when `id` is in the owned range of `level`.
     #[inline]
     pub fn owns(&self, level: usize, id: i64) -> bool {
         let (s, e) = self.owned[level];
@@ -258,11 +269,16 @@ static SERIAL: Serial = Serial;
 
 /// One forward (and optionally reverse) pass of a plan.
 pub struct LocalEngine<'a> {
+    /// Geometry parameters and per-domain operators.
     pub geo: &'a LocalGeometry,
+    /// Model parameters (scales, levels, S3/S4 definitions).
     pub cfg: &'a EngineConfig,
+    /// What this process holds and works on.
     pub part: Partition,
     ex: &'a dyn Exchange,
+    /// Batch size `B`.
     pub batch: usize,
+    /// Number of channels `C`.
     pub channels: usize,
     /// `maps[d]`, `[B, C, |layout d|]`.
     pub maps: Vec<Vec<f64>>,
@@ -339,6 +355,7 @@ impl<'a> LocalEngine<'a> {
         }
     }
 
+    /// Number of pyramid levels.
     pub fn levels(&self) -> usize {
         self.maps.len()
     }

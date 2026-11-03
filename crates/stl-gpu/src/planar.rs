@@ -74,10 +74,14 @@ struct Grads {
     br: Vec<CudaSlice<f64>>,
 }
 
+/// The planar engine on one device: the sweeps of `cpu` for `batch` images
+/// at once.
 pub struct GpuPlanar {
+    /// The device.
     pub gpu: Arc<Gpu>,
     /// The CPU engine of the same operator (plan, tiles, level sizes).
     pub cpu: PlanarEngine,
+    /// Images evaluated together (`B`).
     pub batch: usize,
     ranges: Vec<Range<usize>>,
     wre: CudaSlice<f64>,
@@ -88,6 +92,8 @@ pub struct GpuPlanar {
 }
 
 impl GpuPlanar {
+    /// The engine of `cpu` on `gpu` for `batch` images: uploads the wavelet and
+    /// smoothing kernels and the coefficient ranges of every native level.
     pub fn new(gpu: Arc<Gpu>, cpu: PlanarEngine, batch: usize) -> Self {
         let plan = cpu.plan();
         let ranges = (0..cpu.levels())
@@ -100,6 +106,7 @@ impl GpuPlanar {
         GpuPlanar { wre: gpu.upload(&wre), wim: gpu.upload(&wim), smooth: gpu.upload(&s), gpu, cpu, batch, ranges, peak_used: AtomicUsize::new(0) }
     }
 
+    /// The coefficient plan (that of `cpu`).
     pub fn plan(&self) -> &[Coefficient] {
         self.cpu.plan()
     }
@@ -532,13 +539,17 @@ use stl_core::planar::spectrum::{GaussianRings, CUT};
 /// transposition, columns, transposition (cuFFT plans per plane count).
 pub struct GpuFft2 {
     gpu: Arc<Gpu>,
+    /// Rows `H` of a plane.
     pub h: usize,
+    /// Columns `W` of a plane.
     pub w: usize,
     fft: &'static CuFft,
     plans: Mutex<HashMap<usize, (Handle, Handle, CudaSlice<u8>)>>,
 }
 
 impl GpuFft2 {
+    /// The transform of `H x W` planes; fails if cuFFT does not load.  Plans are
+    /// made at the first use of each plane count.
     pub fn new(gpu: Arc<Gpu>, h: usize, w: usize) -> Result<Self, String> {
         Ok(GpuFft2 { gpu, h, w, fft: cufft()?, plans: Mutex::new(HashMap::new()) })
     }
@@ -605,7 +616,9 @@ pub struct TermsState {
 /// `channels` channels on the device.
 pub struct GpuPlanarTerms {
     gpu: Arc<Gpu>,
+    /// Images per batch (`B`).
     pub batch: usize,
+    /// Channels per image (`C`).
     pub channels: usize,
     fft: GpuFft2,
     /// Ring tables: log centres, log widths, log f per pixel; bin norms on the host.
@@ -615,6 +628,9 @@ pub struct GpuPlanarTerms {
 }
 
 impl GpuPlanarTerms {
+    /// The terms of `H x W` images: the spectrum on the Gaussian `rings` and the
+    /// Minkowski functionals at the thresholds and smoothing `minkowski`, each if
+    /// given; fails if cuFFT does not load.
     pub fn new(gpu: Arc<Gpu>, h: usize, w: usize, channels: usize, batch: usize, rings: Option<&GaussianRings>, minkowski: Option<(&[f64], f64)>) -> Result<Self, String> {
         let rings = rings.map(|r| {
             let (lc, ls, lr, norm) = r.tables();

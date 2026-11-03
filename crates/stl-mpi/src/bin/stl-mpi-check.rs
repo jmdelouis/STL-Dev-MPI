@@ -1,7 +1,9 @@
 //! Distributed statistics and gradients of STL-Dev `stats` fixtures under
 //! MPI, compared with the fixtures and, optionally, with a saved run.
 //!
-//!     mpirun -n 4 stl-mpi-check fixtures/stats/<case> [--save out.bin] [--reference ref.bin]
+//! ```text
+//! mpirun -n 4 stl-mpi-check fixtures/stats/<case> [--save out.bin] [--reference ref.bin]
+//! ```
 //!
 //! Exit status 1 when a comparison fails (CLAUDE.md validation 2-4).
 

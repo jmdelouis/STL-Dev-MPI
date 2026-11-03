@@ -126,13 +126,17 @@ pub fn band_powers_vjp(sht: &Sht, windows: &[Vec<f64>], alm: &[Complex64], cot: 
 /// Cloud-in-cell density on `bins` centres from `lo` to `hi` (mass outside
 /// the centres partly dropped, not renormalised), per pixel and bin width.
 pub struct Cic {
+    /// First centre.
     pub lo: f64,
+    /// Last centre.
     pub hi: f64,
+    /// Number of centres.
     pub bins: usize,
     dx: f64,
 }
 
 impl Cic {
+    /// `bins` equally spaced centres from `lo` to `hi` inclusive.
     pub fn new(lo: f64, hi: f64, bins: usize) -> Self {
         Cic { lo, hi, bins, dx: (hi - lo) / (bins - 1) as f64 }
     }
@@ -142,6 +146,7 @@ impl Cic {
         self.dx
     }
 
+    /// Density of the map `x` on the `bins` centres.
     pub fn forward(&self, x: &[f64]) -> Vec<f64> {
         let parts = chunked(x.len(), CHUNK, |a, b| {
             let mut h = vec![0.0; self.bins];
@@ -168,6 +173,8 @@ impl Cic {
         h
     }
 
+    /// Map cotangent of the cotangents `cot` (`bins`) of the density at `x`
+    /// (piecewise-constant derivative of the CIC weights).
     pub fn vjp(&self, x: &[f64], cot: &[f64]) -> Vec<f64> {
         let norm = x.len() as f64 * self.dx * self.dx;
         x.iter()
@@ -190,7 +197,9 @@ impl Cic {
 /// and their adjoint: harmonic covariant derivatives of a full-sky map,
 /// spectral derivatives of a periodic image (pixel units).
 pub trait Derivatives {
+    /// The five derivatives `[x_1, x_2, x_11, x_22, x_12]` of the map `x`.
     fn map_derivatives(&self, x: &[f64]) -> [Vec<f64>; 5];
+    /// Map cotangent of the cotangents `g` of the five derivatives.
     fn map_derivatives_vjp(&self, g: [&[f64]; 5]) -> Vec<f64>;
 }
 
@@ -219,7 +228,9 @@ impl Derivatives for Fft2 {
 /// derivatives (spectral ones on the plane) and the detached curvature
 /// floor of the source.
 pub struct Minkowski {
+    /// Thresholds `nu_t` on the standardised map.
     pub nu: Vec<f64>,
+    /// Width of the soft threshold step, `z_t = (u - nu_t) / eps`.
     pub eps: f64,
 }
 
@@ -249,6 +260,7 @@ impl Default for Minkowski {
 }
 
 impl Minkowski {
+    /// Number of values, `3 * nu.len()` (V0, V1, V2 at every threshold).
     pub fn count(&self) -> usize {
         3 * self.nu.len()
     }

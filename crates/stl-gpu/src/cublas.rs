@@ -10,12 +10,16 @@ use libloading::Library;
 use std::ffi::{c_int, c_void};
 use std::sync::OnceLock;
 
+/// A cuBLAS handle (`cublasHandle_t`).
 pub type Handle = *mut c_void;
+/// `CUBLAS_OP_N`: the operand is used as stored.
 pub const OP_N: c_int = 0;
+/// `CUBLAS_OP_T`: the operand is transposed.
 pub const OP_T: c_int = 1;
 
 type Dgemm = unsafe extern "C" fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f64, *const f64, c_int, *const f64, c_int, *const f64, *mut f64, c_int) -> c_int;
 
+/// The cuBLAS entry points resolved from the loaded library (see `cublas`).
 pub struct CuBlas {
     _lib: Library,
     create: unsafe extern "C" fn(*mut Handle) -> c_int,
@@ -81,6 +85,7 @@ impl CuBlas {
         Ok(h)
     }
 
+    /// Releases a handle made by `handle` (errors are ignored).
     pub fn destroy(&self, h: Handle) {
         unsafe {
             (self.destroy)(h);

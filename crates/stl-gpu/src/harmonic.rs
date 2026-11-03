@@ -117,10 +117,16 @@ impl Gemm {
     }
 }
 
+/// Spherical harmonic transforms of full-sky NESTED maps at `nside` up to
+/// `lmax` on the device (the transforms of a `stl_core::sht::Sht`).
 pub struct GpuSht {
+    /// Resolution of the maps.
     pub nside: usize,
+    /// Largest multipole.
     pub lmax: usize,
+    /// Pixels per map (`12 nside^2`).
     pub npix: usize,
+    /// Number of packed `a_lm`, `m <= l <= lmax` (`(lmax + 1)(lmax + 2) / 2`).
     pub nalm: usize,
     nr: usize,
     pairs: usize,
@@ -147,7 +153,7 @@ pub struct GpuSht {
     phases: Option<std::cell::RefCell<[f64; 4]>>,
 }
 
-/// Names of [`GpuSht::phases`].
+/// Names of the phases timed in `GpuSht::phases`.
 pub const PHASES: [&str; 4] = ["legendre_tables", "legendre_gemms", "legendre_columns", "ring_ffts"];
 
 impl Drop for GpuSht {
@@ -778,8 +784,11 @@ pub fn standardize(gpu: &Gpu, x: &CudaSlice<f64>, mean: f64, sigma: f64) -> Cuda
 
 /// The parameters of the soft Minkowski functionals (`Minkowski` of stl-cli).
 pub struct MinkowskiParams {
+    /// The `k` thresholds, in units of the standardised map.
     pub nu: CudaSlice<f64>,
+    /// Number of thresholds.
     pub k: usize,
+    /// Width of the Gaussian smoothing of the thresholds (standardised units).
     pub eps: f64,
 }
 

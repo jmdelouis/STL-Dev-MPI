@@ -4,6 +4,7 @@
 
 use std::f64::consts::PI;
 
+/// 3 x 3 matrix, row-major (`m[i][j]`, row `i`).
 pub type Mat3 = [[f64; 3]; 3];
 
 /// Orientation convention of the rotated stencils.
@@ -16,6 +17,7 @@ pub enum Gauge {
 }
 
 impl Gauge {
+    /// Gauge of its STL-Dev name (`cosmo`, `phi`), if any.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "cosmo" => Some(Gauge::Cosmo),
@@ -85,6 +87,7 @@ pub fn rotation_matrices(theta: f64, phi: f64, g_count: usize, gauge: Gauge) -> 
         .collect()
 }
 
+/// Matrix product `a b`.
 #[inline]
 pub fn matmul(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut c = [[0.0; 3]; 3];
@@ -96,6 +99,7 @@ pub fn matmul(a: &Mat3, b: &Mat3) -> Mat3 {
     c
 }
 
+/// Matrix-vector product `r v`.
 #[inline]
 pub fn apply(r: &Mat3, v: &[f64; 3]) -> [f64; 3] {
     [

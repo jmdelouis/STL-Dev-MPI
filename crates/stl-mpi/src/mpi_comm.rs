@@ -19,6 +19,7 @@ use mpi::traits::*;
 use mpi::{Count, Tag};
 use std::cell::Cell;
 
+/// [`Comm`] over an MPI communicator (see the module header).
 pub struct MpiComm {
     world: SimpleCommunicator,
     seq: Cell<u64>,
@@ -26,6 +27,7 @@ pub struct MpiComm {
 }
 
 impl MpiComm {
+    /// Backend on the communicator `world`; reads `STL_MPI_HALO`.
     pub fn new(world: SimpleCommunicator) -> Self {
         let alltoall_halo = std::env::var("STL_MPI_HALO").map_or(false, |v| v == "alltoall");
         MpiComm { world, seq: Cell::new(0), alltoall_halo }

@@ -15,6 +15,7 @@ type C64 = Complex64;
 /// `f32` epsilon and smallest normal: the fallbacks of the source's float32
 /// statistics.
 pub const SOURCE_EPS: f64 = f32::EPSILON as f64;
+/// `f32::MIN_POSITIVE`: the source's floor of variances and offsets.
 pub const SOURCE_TINY: f64 = f32::MIN_POSITIVE as f64;
 /// Dimensionless floor of the SC variance ratio (v2).
 pub const RATIO_FLOOR: f64 = 1e-12;
@@ -92,6 +93,9 @@ pub struct ScCoordinates {
 }
 
 impl ScCoordinates {
+    /// Coordinates of `plan` at `nside`: locates its single `mean` and `var`
+    /// coefficients and the pixel count of every native level.  Errors if the
+    /// plan has not exactly one of each.
     pub fn new(plan: &[Coefficient], nside: usize) -> Result<Self, String> {
         let find = |f: Family| {
             let v: Vec<usize> = plan.iter().enumerate().filter(|(_, c)| c.family == f).map(|(i, _)| i).collect();
@@ -191,8 +195,11 @@ pub fn equalize_sigma(sigma: &[f64], plan: &[Coefficient]) -> Result<Vec<f64>, S
 /// Value of a block: total, mean part, variance part.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Block {
+    /// Value of the block, `mean + variance`.
     pub loss: f64,
+    /// Term on the batch mean of the features.
     pub mean: f64,
+    /// Term on the batch variance of the features.
     pub variance: f64,
 }
 

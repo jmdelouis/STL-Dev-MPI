@@ -1,7 +1,9 @@
 //! Synthesis of planar images from the statistics of target images
 //! (`stl_cli::planar`, `docs/planar_2d.md`).
 //!
-//!     stl-synth2d --target Turb_6.npy --ntarget 10 --nbatch 10 --niter 100 --out run
+//! ```text
+//! stl-synth2d --target Turb_6.npy --ntarget 10 --nbatch 10 --niter 100 --out run
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

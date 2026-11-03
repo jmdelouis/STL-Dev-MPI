@@ -4,17 +4,26 @@
 /// Coefficient families.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {
+    /// Pixel mean of the map.
     Mean,
+    /// Pixel mean of the squared map.
     Var,
+    /// First-order wavelet moments.
     S1,
+    /// Second-order wavelet moments.
     S2,
+    /// Covariances of a second wavelet of a modulus with a first wavelet
+    /// (with the map under `has_fewer_convolutions`).
     S3,
+    /// Covariances of two second wavelets of moduli.
     S4,
 }
 
 impl Family {
+    /// Every family, in plan order.
     pub const ALL: [Family; 6] = [Family::Mean, Family::Var, Family::S1, Family::S2, Family::S3, Family::S4];
 
+    /// Name of the family as in STL-Dev (`mean`, `var`, `S1` .. `S4`).
     pub fn name(self) -> &'static str {
         match self {
             Family::Mean => "mean",
@@ -26,6 +35,7 @@ impl Family {
         }
     }
 
+    /// Family of the STL-Dev name `name`, if any.
     pub fn parse(name: &str) -> Option<Self> {
         Family::ALL.into_iter().find(|f| f.name() == name)
     }
@@ -35,16 +45,25 @@ impl Family {
 /// Unused scale/orientation indices are `None`, as in STL-Dev.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Coefficient {
+    /// Coefficient family.
     pub family: Family,
     /// Level at which the coefficient is a pixel mean.
     pub native_dg: usize,
+    /// First channel.
     pub c1: usize,
+    /// Second channel.
     pub c2: usize,
+    /// Scale `j1`.
     pub j1: Option<usize>,
+    /// Scale `j2`.
     pub j2: Option<usize>,
+    /// Scale `j3`.
     pub j3: Option<usize>,
+    /// Orientation `l1`.
     pub l1: Option<usize>,
+    /// Orientation `l2`.
     pub l2: Option<usize>,
+    /// Orientation `l3`.
     pub l3: Option<usize>,
 }
 

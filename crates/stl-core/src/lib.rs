@@ -6,6 +6,8 @@
 //! reference (`STL_main/TorchGeometry.py`, `LocalGeometry.py`) and is
 //! tested against fixtures dumped from it (`tools/dump_reference.py`).
 
+#![warn(missing_docs)]
+
 pub mod conv;
 pub mod decimation;
 pub mod dia;

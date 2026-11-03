@@ -77,6 +77,8 @@ pub enum GeometryCache {
 }
 
 impl GeometryCache {
+    /// Policy from its name (`auto`, `full`/`yes`, `transposition`, `host`,
+    /// `none`/`no`).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "auto" => Some(GeometryCache::Auto),
@@ -88,6 +90,7 @@ impl GeometryCache {
         }
     }
 
+    /// Name of the policy, as accepted by `parse`.
     pub fn name(self) -> &'static str {
         match self {
             GeometryCache::Auto => "auto",
@@ -147,6 +150,7 @@ pub enum ConvForm {
 }
 
 impl ConvForm {
+    /// Form from its name (`stencils` or `dia`).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "stencils" => Some(ConvForm::Stencils),
@@ -155,6 +159,7 @@ impl ConvForm {
         }
     }
 
+    /// Name of the form, as accepted by `parse`.
     pub fn name(self) -> &'static str {
         match self {
             ConvForm::Stencils => "stencils",
@@ -180,6 +185,7 @@ pub enum FieldStore {
 }
 
 impl FieldStore {
+    /// Policy from its name (`auto`, `keep` or `recompute`).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "auto" => Some(FieldStore::Auto),
@@ -189,6 +195,7 @@ impl FieldStore {
         }
     }
 
+    /// Name of the policy, as accepted by `parse`.
     pub fn name(self) -> &'static str {
         match self {
             FieldStore::Auto => "auto",
@@ -198,6 +205,8 @@ impl FieldStore {
     }
 }
 
+/// Device-side settings of a [`GpuEngine`]: block size, convolution form,
+/// field storage and geometry cache.
 #[derive(Clone, Debug)]
 pub struct GpuOptions {
     /// Owned cells per device block; 0: from the device memory.
@@ -208,6 +217,7 @@ pub struct GpuOptions {
     /// Wavelet fields kept or recomputed (`STL_GPU_FIELDS`: `auto`, the
     /// default, `keep` or `recompute`).
     pub fields: FieldStore,
+    /// What is kept of the block geometries between sweeps.
     pub cache: GeometryCache,
     /// Bytes for the geometry cache; 0: from the device memory.
     pub cache_bytes: usize,
@@ -442,10 +452,13 @@ pub(crate) const R_GB: i32 = 7;
 /// ([`GpuEngine::checkpoint_forward`]): maps run through one engine one after
 /// the other keep their forward state on the host until their reverse sweep.
 pub struct HostForwardState {
+    /// `maps[n]` of every level, as `GpuEngine::maps`.
     pub maps: Vec<Vec<f64>>,
+    /// The stored moduli `m[d][n]`, as `GpuEngine::m`.
     pub m: BTreeMap<(usize, usize), Vec<f64>>,
     /// `|z_n|` and `z_n` (`Keep`; empty with `Recompute`).
     pub absz: Vec<Vec<f64>>,
+    /// `z_n` of every level (`Keep`; empty with `Recompute`).
     pub z: Vec<Vec<f64>>,
     batch: usize,
     channels: usize,
@@ -462,12 +475,19 @@ impl HostForwardState {
 
 /// One process's sweeps on its device.
 pub struct GpuEngine<'a> {
+    /// The rank's device.
     pub gpu: Arc<Gpu>,
+    /// Geometry of the pyramid (wavelet kernel, stencils, decimations).
     pub geo: &'a LocalGeometry,
+    /// Configuration of the engine (levels, plan settings).
     pub cfg: &'a EngineConfig,
+    /// The rank's share of every level.
     pub part: Partition,
+    /// Blocks, halos and decimation rows of every level, built from `part`.
     pub topo: Topology,
+    /// Maps evaluated together (`B`).
     pub batch: usize,
+    /// Channels per map (`C`).
     pub channels: usize,
     ker: CudaSlice<f64>,
     grids: Vec<Grid>,
@@ -509,6 +529,7 @@ pub struct GpuEngine<'a> {
     /// blocks' convolution rows (and halo for `|z_n|`).
     absz: Vec<CudaSlice<f64>>,
     z: Vec<CudaSlice<f64>>,
+    /// Accumulated seconds by phase.
     pub timers: BTreeMap<&'static str, f64>,
     block_rows: usize,
     /// Largest device memory in use seen at the phase ends (whole device).
@@ -520,6 +541,10 @@ pub struct GpuEngine<'a> {
 }
 
 impl<'a> GpuEngine<'a> {
+    /// The engine of one rank for `batch` maps of `channels` channels: chooses
+    /// the field store and the block size from the free device memory (unless set
+    /// in `opts`), builds the topology of `part`, uploads it with the wavelet
+    /// kernel and sets the geometry cache budget.
     pub fn new(
         gpu: Arc<Gpu>,
         geo: &'a LocalGeometry,
@@ -706,6 +731,7 @@ impl<'a> GpuEngine<'a> {
         (self.peak_used.max(total - free), total)
     }
 
+    /// Number of levels of the pyramid.
     pub fn levels(&self) -> usize {
         self.cfg.levels()
     }
@@ -1050,6 +1076,7 @@ impl<'a> GpuEngine<'a> {
         self.gpu.download(&self.maps[n])
     }
 
+    /// The stored moduli `m[d][n]` on the host.
     pub fn m_host(&self, d: usize, n: usize) -> Vec<f64> {
         self.gpu.download(&self.m[&(d, n)])
     }

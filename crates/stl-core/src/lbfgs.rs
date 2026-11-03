@@ -51,12 +51,18 @@ impl Reduce for Local {
 /// `torch.optim.LBFGS` settings (`PyramidLBFGS` defaults).
 #[derive(Clone, Debug)]
 pub struct LbfgsOptions {
+    /// Learning rate: scale of the step along the L-BFGS direction.
     pub lr: f64,
+    /// Maximum number of iterations per call.
     pub max_iter: usize,
     /// Default `max_iter * 5 / 4`.
     pub max_eval: Option<usize>,
+    /// Stop when the largest absolute gradient component is at most this.
     pub tolerance_grad: f64,
+    /// Stop when the step, the directional derivative or the loss change
+    /// falls below this.
     pub tolerance_change: f64,
+    /// Number of `(s, y)` pairs kept in the history.
     pub history_size: usize,
 }
 

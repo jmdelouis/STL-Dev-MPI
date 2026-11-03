@@ -1,7 +1,9 @@
 //! Synthesis of a HEALPix map from ScatCov statistics (see `stl_cli::USAGE`).
 //!
-//!     stl-synth --target kap_nside64_nested.npy --niter 20 --out run
-//!     mpirun -n 28 stl-synth --target ... --niter 20 --out run   (feature `mpi`)
+//! ```text
+//! stl-synth --target kap_nside64_nested.npy --niter 20 --out run
+//! mpirun -n 28 stl-synth --target ... --niter 20 --out run   (feature `mpi`)
+//! ```
 
 use stl_cli::{run, Args};
 

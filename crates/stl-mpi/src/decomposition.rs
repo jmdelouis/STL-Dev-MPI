@@ -15,8 +15,11 @@ use stl_core::neighbours::{children, dilate_fine, parents};
 /// owned by the neighbour of its children's owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decomposition {
+    /// Number of levels of the pyramid.
     pub levels: usize,
+    /// Level-0 range boundaries, `size + 1` values from 0 to `12 nside^2`.
     pub starts: Vec<i64>,
+    /// Alignment of the level-0 range boundaries (a power of 4).
     pub unit: i64,
 }
 
@@ -42,6 +45,7 @@ impl Decomposition {
         Decomposition { levels, starts, unit }
     }
 
+    /// Number of ranks.
     pub fn size(&self) -> usize {
         self.starts.len() - 1
     }

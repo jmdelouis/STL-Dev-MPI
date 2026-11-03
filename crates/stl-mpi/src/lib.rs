@@ -9,6 +9,8 @@
 //! any [`Comm`] backend: threads in one process ([`threads`]) or MPI
 //! (feature `mpi`).
 
+#![warn(missing_docs)]
+
 pub mod check;
 pub mod comm;
 pub mod decomposition;

@@ -46,13 +46,18 @@ pub fn default_nu() -> Vec<f64> {
 /// Smoothing `h` of the thresholds and regularisation `eps` of V2, relative
 /// to the target's std and mean squared gradient at each level.
 pub const DEFAULT_H: f64 = 0.2;
+/// Default regularisation `eps` of V2, relative to the target's mean squared
+/// gradient at each level.
 pub const DEFAULT_EPS: f64 = 0.01;
 
 /// Standard deviations of the functionals over realizations, per level
 /// (`stl-minkowski --sigma-out`), with the estimator's parameters.
 pub struct SigmaFile {
+    /// Thresholds in units of the level's std.
     pub nu: Vec<f64>,
+    /// Width of the logistic, relative to the level's std.
     pub h: f64,
+    /// Regularisation of V2, relative to the mean squared gradient.
     pub eps: f64,
     /// Level maps standardised by their own mean and std.
     pub standardise: bool,
@@ -61,6 +66,9 @@ pub struct SigmaFile {
 }
 
 impl SigmaFile {
+    /// Reads the JSON written by `stl-minkowski --sigma-out` (`nu`, `h`,
+    /// `eps`, `standardise`, and `levels` keyed by nside with the `sigma`
+    /// rows of V0, V1, V2).
     pub fn read(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -342,11 +350,19 @@ impl Level {
     }
 }
 
+/// The Minkowski functional term of the objective (`--minkowski-weight`):
+/// per level, the target's functionals, thresholds and sigma, and the
+/// stencils of the cells owned by this rank plus one ring of neighbours.
 pub struct Minkowski {
+    /// Factor `w` of the term.
     pub weight: f64,
+    /// Thresholds in units of the level's std.
     pub nu: Vec<f64>,
+    /// Width of the logistic, relative to the level's std.
     pub h: f64,
+    /// Regularisation of V2, relative to the target's `<|grad x|^2>`.
     pub eps: f64,
+    /// Level maps standardised by their own mean and std.
     pub standardise: bool,
     /// Where sigma comes from (a file, or 1 % of the target's maximum).
     pub sigma_source: String,

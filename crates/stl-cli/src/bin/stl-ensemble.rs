@@ -1,8 +1,10 @@
 //! Ensemble synthesis with the objective of P. Campeti (see
 //! `stl_cli::ensemble::cli::USAGE`).
 //!
-//!     stl-ensemble calibrate --references r000.npy ... r009.npy --nside 128 --out cal.json
-//!     stl-ensemble run --calibration cal.json --niter 100 --gpu --out ens
+//! ```text
+//! stl-ensemble calibrate --references r000.npy ... r009.npy --nside 128 --out cal.json
+//! stl-ensemble run --calibration cal.json --niter 100 --gpu --out ens
+//! ```
 
 use stl_cli::ensemble::cli::{run_calibrate, run_synthesis, Args};
 
