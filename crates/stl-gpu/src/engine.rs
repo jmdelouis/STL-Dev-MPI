@@ -41,7 +41,7 @@ use crate::device::{Arg, Gpu, NULL};
 use crate::dia::{DeviceDiagonals, DiaGeometry, OwnRows};
 use crate::geometry::{DeviceGeometry, Grid, Spec};
 use crate::topology::{HostCsr, Topology};
-use cudarc::driver::{CudaSlice, DeviceRepr};
+use cudarc::driver::{CudaSlice, DeviceRepr, PinnedHostSlice};
 use num_complex::Complex64;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -68,6 +68,10 @@ pub enum GeometryCache {
     /// The transposition only (4 bytes per entry; the weights are
     /// recomputed at every sweep), for the blocks that fit.
     Transposition,
+    /// The transposition on the device and the weights in page-locked host
+    /// memory ([`GpuOptions::host_cache_bytes`]), uploaded at every use:
+    /// the device holds what `Transposition` holds.
+    Host,
     /// Nothing: everything recomputed at every sweep.
     None,
 }
@@ -78,6 +82,7 @@ impl GeometryCache {
             "auto" => Some(GeometryCache::Auto),
             "full" | "yes" => Some(GeometryCache::Full),
             "transposition" => Some(GeometryCache::Transposition),
+            "host" => Some(GeometryCache::Host),
             "none" | "no" => Some(GeometryCache::None),
             _ => None,
         }
@@ -88,9 +93,44 @@ impl GeometryCache {
             GeometryCache::Auto => "auto",
             GeometryCache::Full => "full",
             GeometryCache::Transposition => "transposition",
+            GeometryCache::Host => "host",
             GeometryCache::None => "none",
         }
     }
+
+    /// `--geometry-cache` of the drivers: the device policy and whether the
+    /// weights of the blocks not kept whole on the device go to the host.
+    /// `auto`: whole on the device when everything fits, else the
+    /// transposition on the device and the weights on the host within the
+    /// host budget, the rest recomputed (the drivers time one upload against
+    /// one recomputation, `GpuOptions::host_calibrate`, and keep the faster);
+    /// `device`: `Full` without host;
+    /// `host`: `Host`; `off`: `None`.
+    pub fn policy(s: &str) -> Option<(Self, bool)> {
+        match s {
+            "auto" => Some((GeometryCache::Auto, true)),
+            "device" => Some((GeometryCache::Full, false)),
+            "host" => Some((GeometryCache::Host, true)),
+            "off" => Some((GeometryCache::None, false)),
+            _ => None,
+        }
+    }
+}
+
+/// Bytes of page-locked host memory for the geometry weights of one rank:
+/// `STL_HOST_CACHE_MB` if set, else half of the available memory
+/// (`MemAvailable`) shared by the ranks of the node.
+pub fn host_cache_budget() -> usize {
+    if let Some(mb) = std::env::var("STL_HOST_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return mb << 20;
+    }
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<usize>().ok()))
+        .map_or(0, |kb| kb << 10);
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    let local = env("OMPI_COMM_WORLD_LOCAL_SIZE").or_else(|| env("MPI_LOCALNRANKS")).or_else(|| env("SLURM_NTASKS_PER_NODE")).unwrap_or(1).max(1);
+    available / 2 / local
 }
 
 /// The form of the convolution geometry of the blocks.
@@ -171,6 +211,13 @@ pub struct GpuOptions {
     pub cache: GeometryCache,
     /// Bytes for the geometry cache; 0: from the device memory.
     pub cache_bytes: usize,
+    /// Bytes of page-locked host memory for the weights of the blocks
+    /// whose geometry is stripped on the device (uploaded instead of
+    /// recomputed); 0: none (`Host` then recomputes like `Transposition`).
+    pub host_cache_bytes: usize,
+    /// Keep the host copies only if uploading the weights of a block is
+    /// faster than recomputing them (timed once, on the first upload).
+    pub host_calibrate: bool,
     /// Host threads for the setup.
     pub threads: usize,
 }
@@ -189,6 +236,8 @@ impl Default for GpuOptions {
                 .unwrap_or(FieldStore::Auto),
             cache: GeometryCache::Auto,
             cache_bytes: 0,
+            host_cache_bytes: 0,
+            host_calibrate: false,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
@@ -227,6 +276,48 @@ impl BlockGeometry {
         match self {
             BlockGeometry::Stencils(g) => g.is_stripped(),
             BlockGeometry::Dia(g) => g.is_stripped(),
+        }
+    }
+}
+
+/// Page-locked host copy of what stripping a block's geometry drops (the
+/// weights: positions and weights by row and by cell, or the DIA
+/// coefficients), uploaded instead of recomputed: the same values.
+enum HostWeights {
+    Stencils(PinnedHostSlice<u32>, PinnedHostSlice<f64>, PinnedHostSlice<f64>),
+    Dia(PinnedHostSlice<f64>),
+}
+
+impl HostWeights {
+    /// The copy of a whole geometry (None if a host allocation fails).
+    fn of(gpu: &Gpu, g: &BlockGeometry) -> Option<Self> {
+        match g {
+            BlockGeometry::Stencils(s) => Some(HostWeights::Stencils(
+                gpu.pinned_copy(s.pos.as_ref()?)?,
+                gpu.pinned_copy(s.w.as_ref()?)?,
+                gpu.pinned_copy(s.wt.as_ref()?)?,
+            )),
+            BlockGeometry::Dia(d) => Some(HostWeights::Dia(gpu.pinned_copy(d.coef.as_ref()?)?)),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            HostWeights::Stencils(p, w, wt) => p.num_bytes() + w.num_bytes() + wt.num_bytes(),
+            HostWeights::Dia(c) => c.num_bytes(),
+        }
+    }
+
+    /// Makes the stripped `g` whole again.
+    fn restore(&self, gpu: &Gpu, g: &mut BlockGeometry) {
+        match (self, g) {
+            (HostWeights::Stencils(p, w, wt), BlockGeometry::Stencils(s)) => {
+                s.pos = Some(gpu.upload_pinned(p));
+                s.w = Some(gpu.upload_pinned(w));
+                s.wt = Some(gpu.upload_pinned(wt));
+            }
+            (HostWeights::Dia(c), BlockGeometry::Dia(d)) => d.coef = Some(gpu.upload_pinned(c)),
+            _ => unreachable!("host weights of another geometry form"),
         }
     }
 }
@@ -394,6 +485,14 @@ pub struct GpuEngine<'a> {
     /// Part of the budget for whole geometries under `Transposition`.
     whole_budget: usize,
     whole_used: usize,
+    /// Host copies of the weights of stripped blocks, their budget and use.
+    host: Vec<Vec<Option<HostWeights>>>,
+    host_budget: usize,
+    host_used: usize,
+    /// Calibration of the host copies still to do, and its outcome
+    /// (seconds to recompute and to upload one block, copies kept).
+    host_calibrate: bool,
+    host_choice: Option<(f64, f64, bool)>,
     dmap: CudaSlice<i32>,
     /// `maps[n]` `[B C, |layout n|]`.
     pub maps: Vec<CudaSlice<f64>>,
@@ -511,6 +610,7 @@ impl<'a> GpuEngine<'a> {
             m => m,
         };
         let cache = topo.levels.iter().map(|lv| lv.blocks.iter().map(|_| None).collect()).collect();
+        let host = topo.levels.iter().map(|lv| lv.blocks.iter().map(|_| None).collect()).collect();
         let dmap = gpu.zeros::<i32>(held.iter().copied().max().unwrap_or(0));
         let mut timers = BTreeMap::new();
         timers.insert("gpu_setup_topology", setup);
@@ -535,6 +635,11 @@ impl<'a> GpuEngine<'a> {
             cached_bytes: 0,
             whole_budget: cache_bytes.saturating_sub(stripped_total),
             whole_used: 0,
+            host,
+            host_budget: opts.host_cache_bytes,
+            host_used: 0,
+            host_calibrate: opts.host_calibrate && opts.host_cache_bytes > 0,
+            host_choice: None,
             dmap,
             maps: Vec::new(),
             m: BTreeMap::new(),
@@ -629,6 +734,17 @@ impl<'a> GpuEngine<'a> {
         (self.cache_mode, self.cache_bytes, self.cached_bytes)
     }
 
+    /// Budget and use of the host copies of the geometry weights, bytes.
+    pub fn geometry_host(&self) -> (usize, usize) {
+        (self.host_budget, self.host_used)
+    }
+
+    /// Outcome of the calibration of the host copies, if done: seconds to
+    /// recompute and to upload the weights of one block, copies kept.
+    pub fn geometry_host_choice(&self) -> Option<(f64, f64, bool)> {
+        self.host_choice
+    }
+
     /// Ends a phase: synchronises the stream (unless `STL_GPU_PHASE_SYNC=0`:
     /// the host then prepares the next phase while the device runs, and the
     /// phase timers count launches only), adds its time, samples the memory.
@@ -672,6 +788,43 @@ impl<'a> GpuEngine<'a> {
         self.diag.as_ref().is_some_and(|d| self.topo.levels[n].nside > 2 * d.w)
     }
 
+    /// Recomputes the weights of the stripped geometry `g` of block `b`.
+    fn refresh_weights(&self, n: usize, b: usize, g: &mut BlockGeometry) {
+        let spec = self.spec(n);
+        let (grid, rows) = (&self.grids[n], &self.a1_ids[n][b]);
+        match g {
+            BlockGeometry::Stencils(s) => s.refresh(&self.gpu, grid, rows, &spec),
+            BlockGeometry::Dia(d) => {
+                d.refresh(&self.gpu, grid, rows, &spec, self.diag.as_ref().unwrap(), &self.ker);
+                assert_eq!(d.misses, 0, "DIA coefficients off the masks of their first build");
+            }
+        }
+    }
+
+    /// `GpuOptions::host_calibrate`: times the recomputation and the upload
+    /// of the weights of the stripped `g` (the same values) and drops the
+    /// host copies if recomputing is faster.  Leaves `g` whole.
+    fn calibrate_host(&mut self, n: usize, b: usize, g: &mut BlockGeometry) {
+        self.host_calibrate = false;
+        self.gpu.sync();
+        let t = Instant::now();
+        self.refresh_weights(n, b, g);
+        self.gpu.sync();
+        let recompute = t.elapsed().as_secs_f64();
+        g.strip();
+        let t = Instant::now();
+        self.host[n][b].as_ref().unwrap().restore(&self.gpu, g);
+        self.gpu.sync();
+        let upload = t.elapsed().as_secs_f64();
+        let keep = upload < recompute;
+        if !keep {
+            self.host.iter_mut().flatten().for_each(|h| *h = None);
+            (self.host_budget, self.host_used) = (0, 0);
+        }
+        self.host_choice = Some((recompute, upload, keep));
+        self.tick("gpu_geometry_upload", t);
+    }
+
     fn take_geometry(&mut self, n: usize, b: usize) -> BlockGeometry {
         let spec = self.spec(n);
         if let Some(mut g) = self.cache[n][b].take() {
@@ -679,16 +832,15 @@ impl<'a> GpuEngine<'a> {
             if !g.is_stripped() && self.cache_mode != GeometryCache::Full {
                 self.whole_used -= g.bytes() - g.stripped_bytes();
             }
-            if g.is_stripped() {
+            if g.is_stripped() && self.host[n][b].is_some() && self.host_calibrate {
+                self.calibrate_host(n, b, &mut g);
+            } else if g.is_stripped() && self.host[n][b].is_some() {
                 let t = Instant::now();
-                let (grid, rows) = (&self.grids[n], &self.a1_ids[n][b]);
-                match &mut g {
-                    BlockGeometry::Stencils(s) => s.refresh(&self.gpu, grid, rows, &spec),
-                    BlockGeometry::Dia(d) => {
-                        d.refresh(&self.gpu, grid, rows, &spec, self.diag.as_ref().unwrap(), &self.ker);
-                        assert_eq!(d.misses, 0, "DIA coefficients off the masks of their first build");
-                    }
-                }
+                self.host[n][b].as_ref().unwrap().restore(&self.gpu, &mut g);
+                self.tick("gpu_geometry_upload", t);
+            } else if g.is_stripped() {
+                let t = Instant::now();
+                self.refresh_weights(n, b, &mut g);
                 self.tick("gpu_geometry_weights", t);
             }
             return g;
@@ -790,7 +942,9 @@ impl<'a> GpuEngine<'a> {
 
     /// Keeps the geometry of a block as the policy and the budget allow:
     /// with `Transposition`, the budget left once every block's
-    /// transposition is counted keeps whole geometries, first come.
+    /// transposition is counted keeps whole geometries, first come.  A
+    /// geometry stripped on the device leaves its weights on the host
+    /// (once, first come) while the host budget allows.
     fn put_geometry(&mut self, n: usize, b: usize, mut g: BlockGeometry) {
         if self.cache_mode == GeometryCache::None {
             return;
@@ -799,6 +953,7 @@ impl<'a> GpuEngine<'a> {
         let mut stripped = g.stripped_bytes();
         let keep_whole = match self.cache_mode {
             GeometryCache::Full => self.cached_bytes + whole <= self.cache_bytes,
+            GeometryCache::Host => false,
             _ => self.whole_used + (whole - stripped) <= self.whole_budget,
         };
         if keep_whole {
@@ -807,6 +962,21 @@ impl<'a> GpuEngine<'a> {
             }
             stripped = whole;
         } else {
+            let kept = self.cached_bytes + stripped <= self.cache_bytes;
+            if kept && !g.is_stripped() && self.host[n][b].is_none() && self.host_used + (whole - stripped) <= self.host_budget {
+                let t = Instant::now();
+                match HostWeights::of(&self.gpu, &g) {
+                    Some(h) => {
+                        self.host_used += h.bytes();
+                        self.host[n][b] = Some(h);
+                    }
+                    // Page-locked memory exhausted: no more host copies.
+                    None => self.host_budget = self.host_used,
+                }
+                // The copy completes before the device buffers are freed.
+                self.gpu.sync();
+                self.tick("gpu_geometry_to_host", t);
+            }
             g.strip();
         }
         if self.cached_bytes + stripped <= self.cache_bytes {

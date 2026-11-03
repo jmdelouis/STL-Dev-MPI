@@ -1,0 +1,429 @@
+{
+  "J": 7,
+  "L": 4,
+  "backend": "gpu",
+  "block_pixels": 16384,
+  "coefficients": 5882,
+  "conv_chunk": null,
+  "ensemble": {
+    "groups": 1,
+    "loss": "sum_i w_i |mean over members of S_i - S_target,i|^2 + scatter_weight / n sum_i (D_i / sigma_i^2 - 1)^2",
+    "loss_final_mean_term": 0.7632010089485233,
+    "loss_final_scatter_term": 0.08274365317719064,
+    "member_files": [
+      "e256_p_bm025_m000_synthesis_nested.npy",
+      "e256_p_bm025_m001_synthesis_nested.npy",
+      "e256_p_bm025_m002_synthesis_nested.npy",
+      "e256_p_bm025_m003_synthesis_nested.npy",
+      "e256_p_bm025_m004_synthesis_nested.npy",
+      "e256_p_bm025_m005_synthesis_nested.npy",
+      "e256_p_bm025_m006_synthesis_nested.npy",
+      "e256_p_bm025_m007_synthesis_nested.npy",
+      "e256_p_bm025_m008_synthesis_nested.npy",
+      "e256_p_bm025_m009_synthesis_nested.npy"
+    ],
+    "members": 10,
+    "per_member_in_ergodic_sigma": {
+      "S1": {
+        "residual_rms_sigma": 1.308989789845959,
+        "scatter_over_ergodic_variance": 1.2530997987225014,
+        "scatter_rms_sigma": 1.0619744906777426
+      },
+      "S2": {
+        "residual_rms_sigma": 1.1868973779783172,
+        "scatter_over_ergodic_variance": 1.0214409586098783,
+        "scatter_rms_sigma": 0.9587996989720488
+      },
+      "S3": {
+        "residual_rms_sigma": 1.112233222599037,
+        "scatter_over_ergodic_variance": 1.194191506596495,
+        "scatter_rms_sigma": 1.0367122821385126
+      },
+      "S4": {
+        "residual_rms_sigma": 1.0345257441186881,
+        "scatter_over_ergodic_variance": 1.118509458100571,
+        "scatter_rms_sigma": 1.0033237325462414
+      },
+      "mean": {
+        "residual_rms_sigma": 1.1495133421466557,
+        "scatter_over_ergodic_variance": 0.11076250039154553,
+        "scatter_rms_sigma": 0.3157312945407708
+      },
+      "var": {
+        "residual_rms_sigma": 1.7623942383935236,
+        "scatter_over_ergodic_variance": 0.060629476913537324,
+        "scatter_rms_sigma": 0.23359479707858136
+      }
+    },
+    "ranks_per_group": 1,
+    "scatter_weight": 1.0
+  },
+  "evaluations": 108,
+  "family_weights": {},
+  "fewer": false,
+  "final_residual_in_ergodic_sigma": {
+    "S1": {
+      "count": 28,
+      "max_sigma": 4.3965347202371,
+      "rms_sigma": 2.4200505182138845
+    },
+    "S2": {
+      "count": 28,
+      "max_sigma": 3.7885935202226118,
+      "rms_sigma": 2.2123031507976294
+    },
+    "S3": {
+      "count": 448,
+      "max_sigma": 5.892677819187332,
+      "rms_sigma": 1.2739324374400418
+    },
+    "S4": {
+      "count": 5376,
+      "max_sigma": 5.315616639573023,
+      "rms_sigma": 0.7974020501215814
+    },
+    "mean": {
+      "count": 1,
+      "max_sigma": 3.495274915397619,
+      "rms_sigma": 3.495274915397619
+    },
+    "var": {
+      "count": 1,
+      "max_sigma": 5.524008437991796,
+      "rms_sigma": 5.524008437991796
+    }
+  },
+  "fits": [
+    "e256_p_bm025_target.fits",
+    "e256_p_bm025_synthesis.fits"
+  ],
+  "freeze_nside": null,
+  "gpu": {
+    "block_rows": 81887,
+    "blocks_per_level": [
+      10,
+      3,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "conv_form": "dia",
+    "decimation_rows_bytes": 186393648,
+    "device": "Tesla T4",
+    "device_ordinal": 0,
+    "devices_visible": 1,
+    "field_bytes_estimate": 1476372480,
+    "fields": "keep",
+    "geometry_cache": "full",
+    "geometry_cache_budget_bytes": 7112235520,
+    "geometry_cache_used_bytes_per_rank": [
+      3682219856
+    ],
+    "geometry_host_budget_bytes": 0,
+    "geometry_host_used_bytes_per_rank": [
+      0
+    ],
+    "memory_peak_bytes_per_rank": [
+      13295681536
+    ],
+    "memory_total_bytes": 15843721216
+  },
+  "init": {
+    "file": "/tmp/jmdeloui-ens/init/synthesis_gauss_m{m}_nested.npy",
+    "noise_std": 0.0,
+    "nside": 256,
+    "per_member": true
+  },
+  "kappa": {
+    "coefficients": 58,
+    "families": [
+      "mean",
+      "var",
+      "S1",
+      "S2"
+    ],
+    "final_residual_in_ergodic_sigma": {
+      "S1": {
+        "count": 28,
+        "max_sigma": 1.1147057237459568,
+        "rms_sigma": 0.508884776935394
+      },
+      "S2": {
+        "count": 28,
+        "max_sigma": 1.859809066905634,
+        "rms_sigma": 0.6214711289009397
+      },
+      "mean": {
+        "count": 1,
+        "max_sigma": 3.93200952247376,
+        "rms_sigma": 3.93200952247376
+      },
+      "var": {
+        "count": 1,
+        "max_sigma": 2.7045216720819094,
+        "rms_sigma": 2.7045216720819094
+      }
+    },
+    "kappa_mean": -0.000026235813732100943,
+    "kappa_std": 0.00035807470886394703,
+    "loss_final_term": 0.0704145838046498,
+    "s3_coefficients": 0,
+    "s3_levels_nside": null,
+    "s3_weight": 0.0,
+    "table": "/tmp/jmdeloui-ens/data/knots.npy",
+    "weight": 0.1
+  },
+  "kernel_size": 5,
+  "kurtosis": {
+    "all_levels_nside": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "final_excess_mean_over_members": [
+      1290.6539638189047,
+      518.2970817628293,
+      318.2486002728309,
+      87.98501839977766,
+      36.03900658196989,
+      5.829365354749951
+    ],
+    "levels_nside": null,
+    "loss_final_term": 0.0,
+    "of": "kappa",
+    "target_excess": [
+      722.3127230045083,
+      396.5510203552021,
+      114.72915284013281,
+      57.645324548236815,
+      16.927451185156805,
+      4.280621004963588
+    ],
+    "weight": 0.0
+  },
+  "level_power": {
+    "levels_nside": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8
+    ],
+    "loss_final_term": 0.07297397453115426,
+    "variance_over_target": [
+      0.9584997706791769,
+      0.9647326579099529,
+      1.0067442242877065,
+      1.0311567659382292,
+      1.0429163559405246,
+      1.036291524197217
+    ],
+    "weight": 10.0
+  },
+  "loss_final_map": 1.0482528407475384,
+  "loss_first": 10062.602488349676,
+  "loss_history": [
+    10062.602488349676,
+    10062.251468125218,
+    10059.090805445338,
+    10027.786721948829,
+    9932.03959458749,
+    9298.501484881348,
+    7029.598478696181,
+    4357.709454788956,
+    2131.3870137220806,
+    1153.6163568164925,
+    744.6849559411988,
+    1007.8327166307229,
+    501.52835398866665,
+    341.1890356604639,
+    248.09645092864284,
+    184.72434436262517,
+    151.072626705498,
+    124.86610065597822,
+    108.92163762664124,
+    98.1646379706786,
+    83.93399575649283,
+    66.68346416874262,
+    50.627253196690155,
+    42.8726017698671,
+    37.85439696945465,
+    34.37784442166871,
+    32.22387216903077,
+    29.374549004742228,
+    25.82825734387327,
+    24.508145214663376,
+    21.538359087036255,
+    20.68668867072529,
+    18.727403484099234,
+    17.634383151840133,
+    16.596892933420452,
+    15.526483377595332,
+    13.77479940625685,
+    13.587494722316752,
+    12.041489664291948,
+    11.196681709730507,
+    10.62913434983246,
+    9.673380869572533,
+    9.238830353048918,
+    8.644443331327324,
+    8.336403862670497,
+    7.945735891988145,
+    7.594755345192604,
+    7.76533613022178,
+    7.372603173679511,
+    7.2238160291390745,
+    6.74871551155009,
+    6.508046025056188,
+    6.1261057395594145,
+    5.609164847108882,
+    5.313267035555456,
+    4.870676038843703,
+    4.573222905899476,
+    4.315550996508504,
+    4.04979823096919,
+    3.991847944968708,
+    3.750073548435891,
+    3.559060546106434,
+    3.4006427480040875,
+    3.039245684607395,
+    2.9811813146756228,
+    2.9123492488637672,
+    2.74536345515261,
+    2.6881916397905896,
+    2.618496775910496,
+    2.5489852259994468,
+    2.3690388134412066,
+    2.3089827208663634,
+    2.1794961014832186,
+    2.0481636800211604,
+    1.9203226420409516,
+    1.840247116090484,
+    1.7591645582782944,
+    1.7527221592066247,
+    1.8512693777506477,
+    1.7461969598123674,
+    1.6928888918915876,
+    1.6548639432745396,
+    1.6235887734896506,
+    1.5992863422293417,
+    1.5338721773940907,
+    1.6682353856725636,
+    1.5109459911179084,
+    1.4853854825301949,
+    1.4215333889855322,
+    1.3776685539092313,
+    1.3437477728820986,
+    1.3259042982327993,
+    1.301247464360988,
+    1.2448698120864057,
+    1.2218252749324314,
+    1.1938964833030106,
+    1.182573432832349,
+    1.1683650950903504,
+    1.1436904657055185,
+    1.123408335721214,
+    1.0999390413528096,
+    1.0890442089057442,
+    1.0828387741143781,
+    1.0798244216630715,
+    1.077241229963083,
+    1.0599669193911287,
+    1.052648986680806,
+    1.0482528407475349
+  ],
+  "loss_last": 1.0482528407475349,
+  "marginal": {
+    "loss_final_term": 0.058919620286020394,
+    "weight": 10000.0
+  },
+  "memory_floor_bytes": {
+    "cells_held_per_level": [
+      786432,
+      196608,
+      49152,
+      12288,
+      3072,
+      768,
+      192
+    ],
+    "lbfgs_history": 1509949440,
+    "maps_and_gradients": 167761920,
+    "stored_moduli_and_cotangents": 223395840
+  },
+  "memory_floor_bytes_per_rank": [
+    1901107200
+  ],
+  "memory_peak_bytes_per_rank": [
+    2517827584
+  ],
+  "minkowski": null,
+  "mode": "rust-local",
+  "mpi_calls": {
+    "engine_allreduces_per_evaluation": 2.0,
+    "halo_mode": "point-to-point",
+    "neighbour_exchanges_per_evaluation": 0.0,
+    "overlap_first_coarse_level": null
+  },
+  "niter": 100,
+  "nside": 256,
+  "precondition": {
+    "alpha_initial": [
+      1.0,
+      0.7071067811865476,
+      0.5,
+      0.3535533905932738,
+      0.25,
+      0.1767766952966369,
+      0.125,
+      0.08838834764831845
+    ],
+    "depth": 7,
+    "spec": "bands:-0.25"
+  },
+  "ranks": 1,
+  "rss_baseline_bytes_per_rank": [
+    518139904
+  ],
+  "seconds": 876.01,
+  "seconds_per_evaluation": 8.111,
+  "setup_seconds": 25.12,
+  "target": {
+    "file": "/tmp/jmdeloui-geomcache/data/g256.npy",
+    "mean": -4.665968516688197e-16,
+    "std": 0.8993380013520285
+  },
+  "timers_seconds": {
+    "analysis_vjp": 2.08,
+    "device_transfers": 12.73,
+    "forward": 211.52,
+    "gpu_forward_coefficients": 51.85,
+    "gpu_forward_conv": 138.16,
+    "gpu_forward_decimation": 19.98,
+    "gpu_geometry": 0.86,
+    "gpu_host_lists": 8.17,
+    "gpu_load": 7.72,
+    "gpu_reverse_adjoint": 295.99,
+    "gpu_reverse_chain": 2.14,
+    "gpu_reverse_coefficients": 155.29,
+    "gpu_reverse_conv": 94.2,
+    "gpu_reverse_exchange": 0.01,
+    "gpu_setup_topology": 2.51,
+    "host_evaluations": 796.92,
+    "host_kappa_objective": 89.6,
+    "host_kappa_transform": 0.3,
+    "host_lbfgs": 79.09,
+    "host_level_power": 0.96,
+    "host_marginal": 13.8,
+    "host_synthesis_objective": 679.51,
+    "reverse": 550.93
+  },
+  "variables": "map",
+  "weights": "ergodic"
+}

@@ -9,7 +9,7 @@ use crate::halo::HaloExchange;
 use num_complex::Complex64;
 use std::time::Instant;
 use stl_core::engine::{EngineConfig, Evaluator, LocalEngine, Partition};
-use stl_core::lbfgs::{minimize, LbfgsOptions, Reduce};
+use stl_core::lbfgs::{minimize_preconditioned, LbfgsOptions, Preconditioner, Reduce};
 use stl_core::local::LocalGeometry;
 use stl_core::plan::Coefficient;
 
@@ -317,6 +317,19 @@ pub fn run_lbfgs_with<C: Comm>(
     comm: &C,
     x: &mut [f64],
     opts: &LbfgsOptions,
+    loss_and_grad: impl FnMut(&[f64]) -> (f64, Vec<f64>),
+    report: impl FnMut(usize, f64, f64),
+) -> Vec<f64> {
+    run_lbfgs_preconditioned(comm, x, opts, None, loss_and_grad, report)
+}
+
+/// [`run_lbfgs_with`] with the initial inverse Hessian of `precond`
+/// (`stl_core::precond`; None: torch's).
+pub fn run_lbfgs_preconditioned<C: Comm>(
+    comm: &C,
+    x: &mut [f64],
+    opts: &LbfgsOptions,
+    precond: Option<&mut dyn Preconditioner>,
     mut loss_and_grad: impl FnMut(&[f64]) -> (f64, Vec<f64>),
     mut report: impl FnMut(usize, f64, f64),
 ) -> Vec<f64> {
@@ -329,7 +342,7 @@ pub fn run_lbfgs_with<C: Comm>(
         report(history.len() - 1, loss, started.elapsed().as_secs_f64());
         (loss, g)
     };
-    minimize(x, opts, &reduce, &mut f);
+    minimize_preconditioned(x, opts, &reduce, &mut f, precond);
     history
 }
 

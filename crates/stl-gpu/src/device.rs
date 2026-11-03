@@ -277,6 +277,24 @@ impl Gpu {
         unsafe { self.ctx.alloc_pinned_with_flags::<f64>(n, 0) }.expect("page-locked host allocation")
     }
 
+    /// A page-locked host copy of `s` (a transfer on the stream), or None
+    /// if `s` is empty or the host allocation fails.
+    pub fn pinned_copy<T: DeviceRepr + ValidAsZeroBits>(&self, s: &CudaSlice<T>) -> Option<PinnedHostSlice<T>> {
+        if s.is_empty() {
+            return None;
+        }
+        let mut h = unsafe { self.ctx.alloc_pinned_with_flags::<T>(s.len(), 0) }.ok()?;
+        self.stream.memcpy_dtoh(s, &mut h).expect("device to host copy");
+        Some(h)
+    }
+
+    /// A new device buffer holding the page-locked `h` (one transfer).
+    pub fn upload_pinned<T: DeviceRepr + ValidAsZeroBits>(&self, h: &PinnedHostSlice<T>) -> CudaSlice<T> {
+        let mut d = unsafe { self.stream.alloc::<T>(h.len()) }.expect("device allocation");
+        self.stream.memcpy_htod(h, &mut d).expect("host to device copy");
+        d
+    }
+
     /// `x` to a new device buffer through the page-locked `stage` of the
     /// same length: a copy on the host threads, then one transfer.  (With
     /// the event tracking off, the stream is synchronised before the stage

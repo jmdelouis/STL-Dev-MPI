@@ -277,6 +277,7 @@ mpirun -np 192 --map-by core --bind-to core stl-synth --target T_gauss_up.npy --
 | `--marginal-weight X` | 0 | hold the pixel histogram: squared 1-D Wasserstein distance to the target's values (below) |
 | `--niter N` | 50 | L-BFGS iterations (strong Wolfe line search, as `torch.optim.LBFGS`) |
 | `--history-size N` | 10 | L-BFGS history |
+| `--precondition P` | `none` | initial inverse Hessian of L-BFGS on the Haar bands of the map: `bands:G` (factors `4^(G j)`), `power` (target's band energies) or `auto` (per-band curvature); none of them beats `none` from white noise (docs/geometry_cache_preconditioner.md) |
 | `--block-pixels N` | 16384 | block size per level: smaller blocks need less memory and run a little slower |
 | `--conv-chunk N` | whole block | convolution geometry rebuilt by sub-blocks of N rows (least memory, slowest) |
 | `--out PREFIX` | `synthesis_rust_nside<N>` | output prefix |
