@@ -47,7 +47,8 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
                       square sides, e.g. 32,64,128 (the image side last is
                       implied); pixel L-BFGS at each coarse level (--warm at
                       the first one), then upsampling plus detail drawn
-                      conditionally on the coarse value and gradient bins
+                      conditionally on the coarse value and gradient bins;
+                      with --out, PREFIX_c2f_<n>_maps.npy per coarse level
   --c2f-iter LIST     L-BFGS iterations per coarse level (default 300,200,...)
   --c2f-detail D      conditional (default) or white
   --c2f-bins Q        quantile bins per feature (default 8)
@@ -353,6 +354,9 @@ fn c2f_init(a: &Args, cfg: &Config, target: &[f64], (bt, c, h): (usize, usize, u
         per_level.push(serde_json::json!({"n": n, "evaluations": evals, "seconds": t0.elapsed().as_secs_f64(),
             "loss_first": hist[0], "loss_last": hist[hist.len() - 1], "equivalent_evaluations": eq}));
         prev = u.chunks(np).enumerate().flat_map(|(k, p)| p.iter().map(|v| v * sn[k % c] + mn[k % c]).collect::<Vec<_>>()).collect();
+        if let Some(p) = &a.out {
+            write_npy_shape(Path::new(&format!("{p}_c2f_{n}_maps.npy")), &prev, &[a.nbatch, c, n, n])?;
+        }
     }
     unreachable!()
 }
