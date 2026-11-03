@@ -497,3 +497,90 @@ Consequences for the design:
   1040) and the `--warm 100` recipe.
 - The transport preconditioner (step 1) acts on spatial moves at fixed
   scale. The diagnostic does not point at that, so it moves after step 2.
+
+### 6.2 Step 2: Lagrangian synthesis from a cold start (2D, 3 November)
+
+Code: `stl_core::planar::warp` and `stl-synth2d --lagrangian`. The
+displacement comes from white variables through a spectral stream function
+(`stream`, exactly divergence-free on the grid) and/or a potential
+(`potential`, `both`), with spectrum `|u(k)| ~ exp(-(4 |k|)^2 / 2) |k|^-1`
+and 1 pixel rms for unit variables. The warp is a periodic bilinear
+pull-back with an exact VJP (tests `crates/stl-core/tests/planar_warp.rs`).
+Options: re-anchoring every K iterations (`x0 <- x`, new L-BFGS history),
+`--reproject` (rank matching onto the targets' pooled histogram at every
+anchor), `--residual` (Eulerian hybrid). All runs start from the same
+permuted-target images as `p_ens`, on the cold ensemble loss, for 1000
+iterations. Results are in `benchmarks/lagrangian/step2/`.
+
+| run | evals to 1e4 | to 1e3 | to 300 | final loss (evals) |
+|---|---|---|---|---|
+| pixel, Gaussian noise (`e_ens`) | 15 | 80 | 268 | 54.7 (1043) |
+| pixel, permuted target (`p_ens`) | 19 | 96 | 307 | 72.5 (1038) |
+| stream, fixed anchor | – | – | – | 53 300 (1009) |
+| stream, anchor 50, reproject | 183 | 795 | – | 614 (1188) |
+| stream + residual 0.1, anchor 100, reproject | 314 | 855 | – | 566 (1084) |
+| stream + potential, anchor 50, reproject | 181 | 610 | – | 324 (1198) |
+
+**The Lagrangian syntheses are 6–10 times slower than pixel L-BFGS to every
+loss level, and end 5–1000 times higher.** The maps show why
+(`*_maps.png`):
+
+1. **A smooth displacement cannot sort a white field.** With a fixed
+   anchor, `x0 ∘ φ` for a φ smooth at scale `s` is locally an affine
+   distortion of white noise. It stays white at every scale above `s`,
+   whatever φ is, so the large-scale power the loss asks for (section 6.1)
+   cannot appear. The loss stalls at 5e4. Brenier's map from a white field to
+   a structured one exists, and Shnirelman's density result holds, but the
+   approximating flows are rough at the pixel scale and folded everywhere.
+   They are out of reach of any smooth, low-dimensional parameterisation.
+2. **Re-anchoring makes progress mostly through interpolation diffusion.**
+   Each anchor composes a new sub-pixel bilinear resampling, which acts as a
+   small diffusion and removes small-scale power. Together with the
+   histogram re-projection, this mimics the needed small→large transfer, but
+   slowly and with artefacts: swirls of the stream function (stream runs), and
+   with the potential part a large circular void, a Zel'dovich-like
+   expansion that runs away (`L_both_a50r_maps.png`, evaluation 1190).
+3. An evaluation costs more: 0.8–1.4 s against 0.7–1.0 s (CPU FFTs of the
+   displacement for 10 planes, not optimised). This is secondary next to
+   the iteration counts.
+
+The diagnosis of section 6.1 is therefore confirmed, and it points away from
+the user's mechanism *for a cold start*. The slow part is not moving
+existing structures, since there are none yet. It is creating large-scale
+coherence from white noise, and rearrangements cannot create it smoothly.
+
+### 6.3 Step 2b: Lagrangian refinement after a warm start
+
+Same ensemble loss, but from Gaussian noise with `--warm 100` (pixel
+iterations on the stldev loss, which already give the right large scales,
+section 6.1), then 500 iterations (`benchmarks/lagrangian/step2b/`).
+
+| run | evals to 30 | to 10 | to 3 | final loss (main-phase evals) |
+|---|---|---|---|---|
+| pixel (`W_pixel`) | 11 | 47 | 176 | 1.29 (620) |
+| stream + potential, anchor 50 | 21 | 108 | – | 9.85 (174) |
+| same, `--reproject` | 46 | – | – | 23.1 (620) |
+| stream + residual 0.1, anchor 100 | 12 | 77 | – | 4.33 (243) |
+
+Even when the structures exist and only need to be moved and sharpened,
+the displacement parameterisation is 2–3 times slower per evaluation than
+pixel L-BFGS, and it stops early. The histories show three mechanisms:
+
+- **The loss is only C0 in the displacement.** The bilinear interpolant is
+  piecewise linear, so its gradient jumps on pixel edges. L-BFGS's
+  curvature pairs are then inconsistent and the strong-Wolfe search fails
+  on plateaus: `W_both_a50` repeats 15.55 and its 50-iteration cycles end
+  after about 6 evaluations (174 evaluations for a nominal 500 iterations).
+  A C1 interpolant (bicubic, or spectral) would remove this.
+- **Every re-anchoring restarts L-BFGS** with the tiny first step of
+  `torch.optim.LBFGS` (`lr min(1, 1/|g|_1)`), which costs about 4 nearly
+  wasted evaluations per cycle.
+- **The histogram re-projection hurts** in both regimes. It doubles the cold
+  loss at each anchor (48 700 → 95 800 at evaluation 57 of `L_both_a50r`)
+  and raises the warm start from 67 to 1269. The ensemble loss weighs the
+  multi-scale statistics, and forcing the exact one-point histogram of an
+  unconverged field breaks them. Histogram exactness is a property to
+  *start* from (step 3), not a projection to impose along the way.
+
+Verdict on the deformation-only route in 2D: **negative**, cold or warm.
+Pixel L-BFGS wins on every metric measured.
