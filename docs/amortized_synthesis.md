@@ -363,7 +363,84 @@ defects that the statistics do not see.  Break-even of generator +
 polish against L-BFGS at nside 64: about 85 maps; for 10 000 maps,
 4.5 T4 hours against 47.
 
-**Next fixes, in order of expected gain:**
+### 6.1 The three fixes (runs `g`, `h`, `i`, 3 000 steps each)
+
+- `i`: map path up-sampled by nearest neighbour (features still smooth)
+  and `--level-power-weight 10` (the `stl-synth` term, transcribed in
+  `train.py`).
+- `g`: `i` plus a per-map latent amplitude: every block also sees one
+  constant channel per map, the global mean of the map's noise times
+  sqrt(npix) (a N(0, 1) scalar, so a function of the noise and
+  reproducible).
+- `h`: `g` with the generator making the gaussianised field g (main loss
+  on the statistics of g) and the statistics of kappa = f(g) as a second
+  reduced chi^2 of factor 0.1, f the target's monotone table (256 knots,
+  piecewise linear, linear beyond the ends): the `--kappa-table`
+  objective.
+
+Per-map residuals (ergodic sigma) and the cosmic-variance test
+(`tools/cv10.py`, members against the 10 Takahashi skies, in cosmic
+sigma; "finest" is the detail variance of level 64):
+
+| | S1 | S2 | S3 | S4 | var | finest | max \|z\| C_l, l >= 31 | peaks > 3 / 5 / 10 sigma |
+|---|---|---|---|---|---|---|---|---|
+| L-BFGS from white noise | 0.96 | 0.93 | 0.95 | 0.94 | 0.82 | +0.1 | 0.7 | -1.0 / -1.2 / -1.8 |
+| `c` (section 6) | 3.46 | 2.86 | 3.15 | 3.06 | 3.87 | -4.2 | 4.9 | -1.4 / -2.7 / -4.3 |
+| `i` | 3.28 | 2.67 | 3.10 | 2.94 | 2.00 | -2.1 | 1.9 | -2.6 / -1.2 / -2.3 |
+| `g` | 3.60 | 2.94 | 3.23 | 3.08 | 1.34 | -1.5 | 2.1 | -1.0 / -0.7 / -2.3 |
+| `g` + 50 L-BFGS iterations | 1.12 | 0.89 | 1.02 | 0.99 | 0.92 | -1.5 | 1.4 | -1.4 / -0.8 / -1.3 |
+| `h` | 57 | 25 | 17 | 15 | 15 | -6.6 | 6.8 | -7.4 / -6.3 / -4.3 |
+| `h` + 50 L-BFGS iterations | 1.21 | 0.97 | 1.09 | 1.03 | 3.82 | -5.4 | 5.3 | -3.9 / -3.8 / -3.4 |
+
+- **Fix 1 works**: the finest level goes from 0.4 to 0.78 of r000's
+  detail variance (-4.2 to -2.1 cosmic sigma), the coarser levels are
+  within 0.5 cosmic sigma, the C_l within 2 sigma
+  (`figures/amortized_cv10_n64_g.png`).
+- **Fix 2 works on the variance**: the per-map `var` residual goes from
+  2.0 to 1.34 sigma, and after the polish to 0.92 (it stayed at 2.9 sigma
+  without the latent: the generator's maps all had the same variance).
+- **`g` + 50 L-BFGS iterations matches L-BFGS from white noise on every
+  test** within about 1 cosmic sigma, except the finest level (-1.5) and
+  the kurtosis of the details, 2 to 3 cosmic sigma low as for L-BFGS
+  itself (a known limit of the STL statistics, not of the generator):
+  every family at 0.9 to 1.1 sigma per map, C_l max 1.4 sigma, peaks
+  above 10 sigma -1.3.  Cost: 1.5 s per map against 17 s, after 23
+  minutes of training.
+- **The generator alone** stays at about 3 sigma per map in S1 to S4,
+  with 3 to 9 times the ergodic scatter between maps: its maps are more
+  different from each other than real skies are.  The scatter term of
+  the loss (X = 1) does not hold that scatter down within 3 000 steps.
+- **Fix 3 fails as implemented**: the scatter term of g explodes during
+  training (10^4), the kappa term never comes down, and the maps are 15
+  to 57 sigma off.  Its polished maps have the best kurtosis of all runs
+  (within 1 cosmic sigma at levels 8 to 32), so the idea is worth another
+  try, with a lower learning rate or a first phase on the g statistics
+  alone.
+
+Maps (`figures/amortized_maps_n64.png`, mollview and a 20-degree
+gnomview with `norm='hist'` and the target's scale): the generator's
+maps have filaments, voids and peaks like the target, a little less
+filamentary; after the polish they are close to the L-BFGS ones.
+
+**Status at nside 64.**  The amortized path that works today is
+"generator + short polish": 23 T4 minutes once, then 1.5 s per map
+for maps as good as L-BFGS from white noise (17 s per map).  Break-even
+~85 maps; 10 000 maps: 4.5 T4 hours instead of 47.  A generator good
+enough without the polish (about 1 sigma per map) is not reached yet;
+the gap is the excess scatter between maps.
+
+**Next steps:**
+
+1. Excess scatter of the generator alone: a larger scatter weight (X = 10)
+   or a longer schedule; check whether the per-map residual comes down
+   towards 1 sigma.
+2. Fix 3 again, with a phase on the g statistics alone before adding the
+   kappa term, for the kurtosis.
+3. nside 128 by progressive growing from `g` (stage 3), measuring the
+   steps the new level needs: that number sets the cost at nside 1024
+   and 2048.
+
+**Earlier list of fixes (section 6, tried in 6.1):**
 
 1. Finest level: no blur on the map path (smooth up for the features
    only, nearest + learned detail for the map), and a level-power term
