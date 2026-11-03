@@ -1,6 +1,8 @@
 //! ScatCov statistics of HEALPix maps (see `stl_cli::STATS_USAGE`).
 //!
-//!     stl-stats --out stats.json --norm r000.npy --gpu -- r00?_nside1024_nested.npy
+//! ```text
+//! stl-stats --out stats.json --norm r000.npy --gpu -- r00?_nside1024_nested.npy
+//! ```
 
 use std::path::PathBuf;
 use stl_cli::{statistics_of_maps, Args, STATS_USAGE};

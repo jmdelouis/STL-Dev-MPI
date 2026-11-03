@@ -43,14 +43,23 @@ pub const BLOCKS: [&str; 5] = ["gaussian_sc", "physical_sc", "power", "pdf", "mf
 /// forward and the reverse pass (4 GiB: nside 2048 recomputes them).
 const MF_STATE_BYTES: usize = 4 << 30;
 
+/// The five-block ensemble objective on this group's members (see the
+/// module header).
 pub struct EnsembleObjective<'o, 'a, C: Comm> {
     /// SC of g and of kappa: two objectives on the same partition (and device engine).
     pub g: &'o Objective<'a, C>,
+    /// SC of kappa.
     pub k: &'o Objective<'a, C>,
+    /// Comm across the groups, over which the features of all the members
+    /// are gathered (`None`: one group).
     pub cross: Option<&'o C>,
+    /// Calibration: LUT and targets of the five blocks.
     pub cal: &'o Calibration,
+    /// Plan of the SC statistics (that of the calibration).
     pub plan: &'o [Coefficient],
+    /// Number of members `B` over all the groups.
     pub members: usize,
+    /// Index of this group's first member.
     pub first_member: usize,
     coords: ScCoordinates,
     sht: Sht,
@@ -61,7 +70,9 @@ pub struct EnsembleObjective<'o, 'a, C: Comm> {
     /// Upper band centre of the C_l variance term.
     cutoff: f64,
     npix: usize,
+    /// Blocks of the last evaluation, in the order of [`BLOCKS`].
     pub last: RefCell<[Block; 5]>,
+    /// Accumulated seconds of the phases, by name.
     pub timers: RefCell<BTreeMap<&'static str, f64>>,
     #[cfg(feature = "gpu")]
     gpu_terms: Option<RefCell<GpuTerms>>,
@@ -75,6 +86,11 @@ struct HostPass {
 }
 
 impl<'o, 'a, C: Comm> EnsembleObjective<'o, 'a, C> {
+    /// Objective of `members` members, this group's from `first_member` on
+    /// (`g.batch` of them), against the calibration `cal` of `plan`, with the
+    /// C_l variance term up to the band centre `cutoff`.  Errors on another
+    /// plan or nside, fewer than two members, or a cutoff outside
+    /// `[20, 3 nside - 1]`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         g: &'o Objective<'a, C>,

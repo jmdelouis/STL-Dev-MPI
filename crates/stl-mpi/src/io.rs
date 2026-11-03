@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use stl_core::healpix::{order_of, ring2nest};
 
+/// Result of the I/O functions: the error is a message naming the path.
 pub type Result<T> = std::result::Result<T, String>;
 
 fn err<E: std::fmt::Display>(path: &Path) -> impl Fn(E) -> String + '_ {
@@ -430,6 +431,7 @@ fn npy_header(n: usize) -> Vec<u8> {
 /// A map file written by slices: [`create`](Self::create) by one rank,
 /// then [`write`](Self::write) of every rank's range, at its offset.
 pub struct SlicedMap {
+    /// Path of the file.
     pub path: std::path::PathBuf,
     offset: u64,
     fits: Option<bool>,

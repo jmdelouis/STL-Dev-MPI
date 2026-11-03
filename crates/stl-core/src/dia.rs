@@ -104,7 +104,9 @@ pub fn rel_offset(row: i64, cell: i64, nside: i64, order: u32) -> Option<(i64, i
 /// numbered row by row in `dy` then `dx`.
 #[derive(Clone, Debug)]
 pub struct Diagonals {
+    /// Half-width of the square window of offsets.
     pub w: i64,
+    /// Offset `(dx, dy)` of each diagonal, in diagonal order.
     pub offsets: Vec<(i64, i64)>,
     /// `index[(dy + w) * (2 w + 1) + dx + w]`: diagonal of an offset, or -1.
     pub index: Vec<i32>,
@@ -159,10 +161,12 @@ impl Diagonals {
         Self::new(w, |dx, dy| seen.contains(&(dx, dy)))
     }
 
+    /// Number of diagonals.
     pub fn len(&self) -> usize {
         self.offsets.len()
     }
 
+    /// True when there is no diagonal.
     pub fn is_empty(&self) -> bool {
         self.offsets.is_empty()
     }
@@ -185,11 +189,17 @@ impl Diagonals {
 /// row on a diagonal is found from the NESTED ids.
 #[derive(Clone, Debug)]
 pub struct DiaGeometry {
+    /// `nside` of the level.
     pub nside: i64,
+    /// Number of gauges `G`.
     pub g: usize,
+    /// Number of output channels `C_out`.
     pub c_out: usize,
+    /// Number of output rows `K`.
     pub k: usize,
+    /// The diagonals of the coefficients.
     pub diagonals: Diagonals,
+    /// Coefficients `[D, K, G, C_out]`, row-major (layout above).
     pub coef: Vec<f64>,
 }
 

@@ -30,16 +30,25 @@ impl<C: Comm> Reduce for CommReduce<'_, C> {
 
 /// Loss, statistics and map gradient on the processes of `comm`.
 pub struct Objective<'a, C: Comm> {
+    /// Geometry of the levels.
     pub geo: &'a LocalGeometry,
+    /// Engine configuration (`J`, `dg(j)`, S3/S4 definition).
     pub cfg: &'a EngineConfig,
+    /// Coefficients of the loss.
     pub plan: &'a [Coefficient],
+    /// Target statistics `[B, len(plan)]`.
     pub target: &'a [Complex64],
     /// Weight per coefficient (`len(plan)`), real and nonnegative.
     pub weights: Vec<f64>,
+    /// Number of maps in the batch `B`.
     pub batch: usize,
+    /// Number of channels `C`.
     pub channels: usize,
+    /// Ranks sharing the sky.
     pub comm: &'a C,
+    /// Level-0 ranges of all the ranks.
     pub dec: Decomposition,
+    /// Cells held by this rank at every level (owned and halo).
     pub part: Partition,
     halo: HaloExchange<'a, C>,
     /// Seconds per phase, summed over the evaluations.
@@ -49,6 +58,8 @@ pub struct Objective<'a, C: Comm> {
 }
 
 impl<'a, C: Comm> Objective<'a, C> {
+    /// Objective of `target` (`batch * len(plan)` statistics) with unit
+    /// weights, on the balanced decomposition of the ranks of `comm`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         geo: &'a LocalGeometry,
@@ -104,6 +115,7 @@ impl<'a, C: Comm> Objective<'a, C> {
         self.evaluator = Some(std::cell::RefCell::new(evaluator));
     }
 
+    /// Removes and returns the evaluator, if any: the CPU sweeps again.
     pub fn take_evaluator(&mut self) -> Option<Box<dyn Evaluator + 'a>> {
         self.evaluator.take().map(|e| e.into_inner())
     }
@@ -130,6 +142,7 @@ impl<'a, C: Comm> Objective<'a, C> {
         self.part.owned[0]
     }
 
+    /// Length of the owned slice `[B, C, end - start]` of level 0.
     pub fn owned_len(&self) -> usize {
         let (s, e) = self.owned();
         self.batch * self.channels * (e - s) as usize
@@ -361,10 +374,16 @@ pub fn run_lbfgs_preconditioned<C: Comm>(
 /// `lambda / n sum_i (D_i / sigma2_i - 1)^2`; member k gets the extra
 /// cotangent `4 lambda / n (D_i / sigma2_i - 1) / sigma2_i (S_{k,i} - mean_i) / (B - 1)`.
 pub struct Ensemble<'o, 'a, C: Comm> {
+    /// Objective of this group's members (its batch) on the group's ranks.
     pub obj: &'o Objective<'a, C>,
+    /// Comm of the ranks of the same position in every group (`None`: one
+    /// group).
     pub cross: Option<&'o C>,
+    /// Number of members `B` over all the groups.
     pub members: usize,
+    /// Target statistics `T` (`len(plan)`).
     pub target: &'o [Complex64],
+    /// `(lambda, sigma2)` of the scatter term (`None`: mean term only).
     pub scatter: Option<(f64, &'o [f64])>,
 }
 

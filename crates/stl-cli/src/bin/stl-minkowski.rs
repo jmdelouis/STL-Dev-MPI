@@ -2,8 +2,10 @@
 //! --minkowski-weight` (see `stl_cli::minkowski`), on whole maps in one
 //! process.  The thresholds are those of the reference map REF (the target).
 //!
-//!     stl-minkowski REF MAP... --sigma-out sigma.json      std over REF and the MAPs
-//!     stl-minkowski REF MAP... --sigma sigma.json          z of the MAPs against REF
+//! ```text
+//! stl-minkowski REF MAP... --sigma-out sigma.json      std over REF and the MAPs
+//! stl-minkowski REF MAP... --sigma sigma.json          z of the MAPs against REF
+//! ```
 //!
 //! Options: `--nside A-B` levels (default 64 to nside / 2), `--h X`,
 //! `--eps X` (defaults 0.2 and 0.01) and `--standardise` (level maps

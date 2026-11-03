@@ -34,25 +34,38 @@ use stl_core::planar::{PlanarEngine, Pyramid};
 
 type C64 = Complex64;
 
+/// Loss definition of the planar synthesis (module header).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
+    /// STL-Dev's `Synthesis.optimize_from_maps` loss on the mean features.
     StlDev,
+    /// Ensemble objective: SC, power-spectrum and Minkowski blocks on the
+    /// batch mean and variance.
     Ensemble,
 }
 
+/// Image size, scales and loss weights of a [`PlanarObjective`].
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Image height in pixels.
     pub h: usize,
+    /// Image width in pixels.
     pub w: usize,
+    /// Channels per image.
     pub channels: usize,
+    /// Number of scales `J`.
     pub j: usize,
+    /// `has_fewer_convolutions` definitions of S3/S4.
     pub fewer: bool,
+    /// Tile side in pixels of every level (clipped to the level).
     pub tile: usize,
     /// Bins of the power spectrum (0: no spectrum).
     pub n_bins: usize,
+    /// Loss definition.
     pub mode: Mode,
     /// Ad-hoc weights of S3 and S4 (STL-Dev: 3.5 and 3.5^2).
     pub s3_weight: f64,
+    /// Ad-hoc weight of S4 (STL-Dev: 3.5^2).
     pub s4_weight: f64,
     /// Ensemble block weights: SC, power spectrum, Minkowski.
     pub weights: [f64; 3],
@@ -109,7 +122,9 @@ struct Eval {
 /// The device of the running batch: ScatCov and Fourier terms.
 #[cfg(feature = "gpu")]
 pub struct Device {
+    /// ScatCov engine of the batch on the device.
     pub sc: stl_gpu::planar::GpuPlanar,
+    /// Fourier terms of the objective on the device.
     pub terms: stl_gpu::planar::GpuPlanarTerms,
 }
 
@@ -122,8 +137,13 @@ struct DeviceState {
 #[cfg(not(feature = "gpu"))]
 struct DeviceState;
 
+/// Planar synthesis objective: the normalised features of the `Bt` target
+/// images and the loss and gradient of a batch of `B` images for the
+/// [`Mode`] of its [`Config`].
 pub struct PlanarObjective {
+    /// Image size, scales and loss definition.
     pub cfg: Config,
+    /// ScatCov engine of one image (tiles on host threads).
     pub engine: PlanarEngine,
     rings: Option<GaussianRings>,
     fft: Fft2,
@@ -134,7 +154,9 @@ pub struct PlanarObjective {
     ps_div: Vec<f64>,
     /// Target features `[Bt, n]` (SC then spectra) and Minkowski `[Bt, C * 195]`.
     pub target: Vec<C64>,
+    /// Target Minkowski values `[Bt, C * 195]` ([`Mode::Ensemble`] only, else empty).
     pub target_mf: Vec<f64>,
+    /// Number `Bt` of target images.
     pub target_count: usize,
     /// Per-block values and timers of the last evaluation.
     pub last: Mutex<Vec<(&'static str, f64)>>,
@@ -181,6 +203,7 @@ impl PlanarObjective {
         Ok(obj)
     }
 
+    /// Coefficient plan of the ScatCov engine (order of the SC features).
     pub fn plan(&self) -> &[Coefficient] {
         self.engine.plan()
     }

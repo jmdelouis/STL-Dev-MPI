@@ -41,8 +41,11 @@ fn gather_rows(x: &[f64], n: usize, pos: &[usize]) -> Vec<f64> {
 /// Partial decimation of one domain: coarse ids and the forward matrix.
 #[derive(Clone, Debug)]
 pub struct Down {
+    /// Sorted coarse NESTED ids (parents of the domain, level `dg + 1`).
     pub out_ids: Vec<i64>,
+    /// Forward matrix `[N_out, N_in]`, columns indexing the domain.
     pub forward: Csr,
+    /// Transpose of `forward`.
     pub transposed: Csr,
 }
 
@@ -62,7 +65,10 @@ impl Down {
 pub struct Wave {
     /// `[R, L, |block|]`.
     pub z: Vec<Complex64>,
+    /// Grid read by the convolution: the block plus its convolution halo,
+    /// sorted NESTED ids.
     pub domain: Vec<i64>,
+    /// Convolution from `domain` to the block rows.
     pub conv: ConvPlan,
 }
 
@@ -71,13 +77,19 @@ pub struct Wave {
 pub struct LocalGeometry {
     /// `nside` of level 0.
     pub nside0: i64,
+    /// Stencil side in taps.
     pub kernel_sz: usize,
     /// Number of orientations `L` (convolution gauges).
     pub l: usize,
+    /// Orientation convention of the stencils.
     pub gauge: Gauge,
+    /// Wavelet kernel `[L, 1, 2, P]` (real, imaginary), the same at every level.
     pub kernel: Kernel,
+    /// Pixels per block.
     pub block_pixels: usize,
+    /// Convolution halo in rings, `(kernel_sz - 1) / 2 + 2`.
     pub conv_rings: u32,
+    /// Decimation parameters (radius, sigma, normalisation).
     pub down_params: DecimationParams,
     /// Rebuild the convolution geometry by sub-blocks of this many output
     /// rows at every application instead of holding it for the whole block.
@@ -85,6 +97,8 @@ pub struct LocalGeometry {
 }
 
 impl LocalGeometry {
+    /// Geometry of a pyramid with level 0 at `nside0`, wavelet stencil of
+    /// `kernel_sz` taps per side, `l` orientations, default decimation.
     pub fn new(nside0: i64, kernel_sz: usize, l: usize, gauge: Gauge, block_pixels: usize) -> Self {
         assert!(block_pixels > 0);
         let kernel = Kernel::shared(&wavelet_weights(kernel_sz), l, 1, 2, kernel_sz * kernel_sz);
@@ -101,10 +115,12 @@ impl LocalGeometry {
         }
     }
 
+    /// `nside` of level `dg`, `nside0 >> dg`.
     pub fn nside(&self, dg: usize) -> i64 {
         self.nside0 >> dg
     }
 
+    /// Number of pixels of level `dg`.
     pub fn pixels(&self, dg: usize) -> usize {
         npix(self.nside(dg)) as usize
     }
@@ -125,6 +141,8 @@ impl LocalGeometry {
     }
 
 
+    /// Partial decimation of the fine `domain` of level `dg` (sorted NESTED
+    /// ids) to its parents, with the transposed matrix.
     pub fn down(&self, dg: usize, domain: &[i64]) -> Down {
         let (out_ids, forward) = smooth_decimation(domain, self.nside(dg), &self.down_params);
         let transposed = forward.transpose();

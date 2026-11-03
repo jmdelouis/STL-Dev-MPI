@@ -18,8 +18,11 @@ use stl_core::neighbours::{dilate, dilate_fine, parents};
 /// rows of its convolution, `a1` = block + one convolution halo.
 #[derive(Clone, Debug)]
 pub struct BlockTopo {
+    /// First owned cell (NESTED id).
     pub start: i64,
+    /// Number of owned cells.
     pub len: usize,
+    /// NESTED ids of the convolution rows, sorted.
     pub a1: Vec<i64>,
     /// Positions of `a1` in the level's layout.
     pub a1pos: Vec<u32>,
@@ -27,26 +30,33 @@ pub struct BlockTopo {
     pub f0: usize,
 }
 
+/// The topology of one level of the rank: held cells, owned range and blocks.
 #[derive(Clone, Debug)]
 pub struct LevelTopo {
+    /// Resolution of the level.
     pub nside: i64,
     /// Held cells (the layout), sorted.
     pub ids: Vec<i64>,
+    /// Owned cells `[owned.0, owned.1)`.
     pub owned: (i64, i64),
     /// Position of the first owned cell in the layout.
     pub own_pos0: usize,
+    /// The device blocks of the owned range, in increasing order.
     pub blocks: Vec<BlockTopo>,
 }
 
 impl LevelTopo {
+    /// Number of held cells.
     pub fn len(&self) -> usize {
         self.ids.len()
     }
 
+    /// Whether no cell is held.
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
 
+    /// Number of owned cells.
     pub fn owned_len(&self) -> usize {
         (self.owned.1 - self.owned.0) as usize
     }
@@ -55,18 +65,25 @@ impl LevelTopo {
 /// Sparse rows with `u32` columns.
 #[derive(Clone, Debug, Default)]
 pub struct HostCsr {
+    /// Row starts in `cols` / `vals` (`n_rows + 1`).
     pub indptr: Vec<u32>,
+    /// Column of every nonzero.
     pub cols: Vec<u32>,
+    /// Value of every nonzero.
     pub vals: Vec<f64>,
 }
 
 impl HostCsr {
+    /// Number of rows.
     pub fn n_rows(&self) -> usize {
         self.indptr.len() - 1
     }
 }
 
+/// What a rank's device engine needs of the decomposition: the level
+/// topologies and the restricted decimation rows between consecutive levels.
 pub struct Topology {
+    /// `levels[n]`: level `n` (level 0 the finest).
     pub levels: Vec<LevelTopo>,
     /// `down[d]`: rows = owned cells of level `d + 1`, columns = layout positions of level `d`.
     pub down: Vec<HostCsr>,

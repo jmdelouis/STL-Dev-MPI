@@ -4,6 +4,8 @@
 //! except the orientations: L = 4 by default (pass `--L 2` to reproduce
 //! STL-Dev's runs).
 
+#![warn(missing_docs)]
+
 use num_complex::Complex64;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -32,6 +34,7 @@ use level_power::LevelPower;
 use marginal::Marginal;
 use minkowski::{Minkowski, SigmaFile};
 
+/// Help text of `stl-synth`: every option of [`Args`] with its default.
 pub const USAGE: &str = "\
 stl-synth --target MAP [options]
 
@@ -163,48 +166,111 @@ fn parse_family_weights(v: &str) -> Result<Vec<(Family, f64)>, String> {
         .collect()
 }
 
+/// Options of `stl-synth` (and the engine options of `stl-stats`), parsed
+/// by [`Args::parse`]; [`USAGE`] describes each one.
 #[derive(Clone, Debug)]
 pub struct Args {
+    /// `--target`: NESTED full-sky target map (`.npy` or HEALPix `.fits`).
     pub target: PathBuf,
+    /// `--init`: initial map (NESTED, nside <= target; `{m}` gives one per
+    /// ensemble member); `None`: white noise.
     pub init: Option<PathBuf>,
+    /// `--init-units standardized`: `--init` is already standardised
+    /// (`false`: in the units of the target).
     pub init_standardized: bool,
+    /// `--init-noise`: noise std added to `--init` (`None`: `auto`, the RMS
+    /// of the target's missing small scales).
     pub init_noise: Option<f64>,
+    /// `--seed`: white-noise seed (member `m` uses `seed + m`).
     pub seed: u64,
+    /// `--J`: number of scales (`None`: `log2(nside) - 1`).
     pub j: Option<usize>,
+    /// `--L`: number of orientations.
     pub l: usize,
+    /// `--kernel-size`: stencil size of the wavelet.
     pub kernel_size: usize,
+    /// `--fewer`: `has_fewer_convolutions` definitions of S3/S4.
     pub fewer: bool,
+    /// `--block-pixels`: cells per block and level.
     pub block_pixels: usize,
+    /// `--conv-chunk`: rebuild the convolution geometry by sub-blocks of this
+    /// many rows (`None`: whole block).
     pub conv_chunk: Option<usize>,
+    /// `--overlap`: levels below it evaluated on overlapping patches with
+    /// redundant halos, the others on rank 0 (`None`: halo exchange).
     pub overlap: Option<usize>,
+    /// `--weights ergodic`: reduced chi^2 with the ergodic weights of the
+    /// target (`false`: unit weights).
     pub ergodic_weights: bool,
+    /// `--family-weights`: extra factors on the weights of whole coefficient
+    /// families.
     pub family_weights: Vec<(Family, f64)>,
+    /// `--ensemble`: number `B` of ensemble members whose mean statistics
+    /// match the target.
     pub ensemble: usize,
+    /// `--groups`: groups of consecutive ranks, each holding `B / G` members.
     pub groups: usize,
+    /// `--scatter-weight`: factor of the term holding the members' scatter at
+    /// the ergodic variance.
     pub scatter_weight: f64,
+    /// `--freeze-nside`: hold the means over the pixels of this nside at
+    /// those of the initial map.
     pub freeze_nside: Option<usize>,
+    /// `--level-power-weight`: factor of the term holding the variance of
+    /// the details of every level.
     pub level_power_weight: f64,
+    /// `--kappa-table`: knots `(g, kappa)` of the monotone transform
+    /// `kappa = f(g)` (`None`: no kappa term).
     pub kappa_table: Option<PathBuf>,
+    /// `--kappa-weight`: factor of the statistics term of `f(g)`.
     pub kappa_weight: f64,
+    /// `--kappa-families`: coefficient families of that term.
     pub kappa_families: Vec<Family>,
+    /// `--kappa-s3-weight`: factor of the separate S3 term of `f(g)`.
     pub kappa_s3_weight: f64,
+    /// `--kappa-s3-nside`: nside range of the levels of `j3` in that term
+    /// (`None`: every level).
     pub kappa_s3_nside: Option<(usize, usize)>,
+    /// `--kurtosis-weight`: factor of the term holding the kurtosis of the
+    /// details of every level.
     pub kurtosis_weight: f64,
+    /// `--kurtosis-nside`: nside range of that term (`None`: the levels of
+    /// `--level-power-weight`).
     pub kurtosis_nside: Option<(usize, usize)>,
+    /// `--minkowski-weight`: factor of the soft Minkowski functional term.
     pub minkowski_weight: f64,
+    /// `--minkowski-nside`: nside range of that term (`None`: 64 to
+    /// nside / 2).
     pub minkowski_nside: Option<(usize, usize)>,
+    /// `--minkowski-sigma`: JSON of `stl-minkowski --sigma-out` with the std
+    /// of the functionals (`None`: 1 % of the target's maximum).
     pub minkowski_sigma: Option<PathBuf>,
+    /// `--minkowski-standardise`: standardise every level map by its own
+    /// mean and std before the functionals.
     pub minkowski_standardise: bool,
+    /// `--marginal-weight`: factor of the 1-D Wasserstein term on the pixel
+    /// histogram.
     pub marginal_weight: f64,
+    /// `--niter`: L-BFGS iterations.
     pub niter: usize,
+    /// `--history-size`: L-BFGS history.
     pub history_size: usize,
     /// `--precondition` (`None`: none).
     pub precondition: Option<String>,
+    /// `--out`: prefix of the output files (`None`:
+    /// `synthesis_rust_nside<N>`).
     pub out: Option<String>,
+    /// `--ranks`: thread ranks in this process (builds without MPI).
     pub ranks: usize,
+    /// `--quiet`: no line per evaluation.
     pub quiet: bool,
+    /// `--gpu`: one CUDA device per rank (feature `gpu`).
     pub gpu: bool,
+    /// `--gpu-block-rows`: owned cells per device block (0: from the device
+    /// memory).
     pub gpu_block_rows: usize,
+    /// `--gpu-cache`: convolution geometry kept on the device between
+    /// sweeps (`auto`, `full`, `transposition` or `none`).
     pub gpu_cache: String,
     /// `--geometry-cache` (`None`: `--gpu-cache` without host copies).
     pub geometry_cache: Option<String>,
@@ -217,6 +283,10 @@ pub struct Args {
 }
 
 impl Args {
+    /// Parses the command-line options `argv` (program name excluded) with
+    /// the defaults of [`USAGE`]; `Err` carries the message to print (the
+    /// usage itself for `-h`/`--help`, an unknown option or a missing
+    /// `--target`).
     pub fn parse(argv: &[String]) -> Result<Args, String> {
         let mut a = Args {
             target: PathBuf::new(),
@@ -1190,10 +1260,13 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     Ok(Some(report))
 }
 
+/// Whether the path `p` exists (thin wrapper of [`Path::exists`]).
 pub fn exists(p: &Path) -> bool {
     p.exists()
 }
 
+/// Help text of `stl-stats`: its options and the engine options it shares
+/// with `stl-synth`.
 pub const STATS_USAGE: &str = "\
 stl-stats --out STATS.json [--norm MAP] [engine options] -- MAP [MAP ...]
 

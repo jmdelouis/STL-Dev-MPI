@@ -30,12 +30,18 @@ pub const MAX_ROWS: usize = 1 << 21;
 /// the contiguous range `[own.0, own.1)` sit at positions `own.2 + (id -
 /// own.0)` (no search needed).
 pub struct Grid {
+    /// NESTED ids of the cells, sorted and unique.
     pub ids: CudaSlice<i64>,
+    /// Number of cells.
     pub n: usize,
+    /// The contiguous range `[own.0, own.1)` and the position `own.2` of its
+    /// first cell (`(0, 0, 0)` if none).
     pub own: (i64, i64, i64),
 }
 
 impl Grid {
+    /// Uploads the sorted, unique `ids`; `own`, if given, must be a range of
+    /// consecutive ids all present in `ids`.
     pub fn new(gpu: &Gpu, ids: &[i64], own: Option<(i64, i64)>) -> Self {
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "grid ids must be sorted and unique");
         assert!(ids.len() < u32::MAX as usize);
@@ -54,19 +60,28 @@ impl Grid {
 /// What a geometry is computed from.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec {
+    /// Resolution of the level.
     pub nside: i64,
+    /// Side of the stencil (`kernel_size`); `P = kernel_sz^2` taps.
     pub kernel_sz: usize,
+    /// Number of gauges `G`.
     pub g: usize,
+    /// Gauge of the stencil rotation.
     pub gauge: Gauge,
 }
 
+/// The convolution geometry of `K` output rows on a [`Grid`]: positions and
+/// weights by row, and their transposition by grid cell for the adjoint.
 pub struct DeviceGeometry {
-    /// Rows, gauges, taps.
+    /// Number of output rows `K`.
     pub k: usize,
+    /// Number of gauges `G`.
     pub g: usize,
+    /// Number of taps `P`.
     pub p: usize,
     /// Positions and weights by row (`None` once stripped).
     pub pos: Option<CudaSlice<u32>>,
+    /// Bilinear weights, same layout as `pos`.
     pub w: Option<CudaSlice<f64>>,
     /// `complete[k * G + g]` when requested.
     pub complete: Option<CudaSlice<u8>>,
@@ -74,9 +89,13 @@ pub struct DeviceGeometry {
     /// (`offsets`, `|dest| + 1`), the packed entries (`kgp`) and their
     /// weights (`wt`, `None` once stripped).
     pub dest: CudaSlice<u32>,
+    /// Entry ranges of the cells of `dest` (`|dest| + 1`).
     pub offsets: CudaSlice<u32>,
+    /// Packed entries `k << 11 | (g * 4 + n) << 6 | p`, grouped by cell.
     pub kgp: CudaSlice<u32>,
+    /// Weights of the packed entries (`None` once stripped).
     pub wt: Option<CudaSlice<f64>>,
+    /// Number of grid cells read (`|dest|`).
     pub n_dest: usize,
 }
 
@@ -206,6 +225,7 @@ impl DeviceGeometry {
         self.wt = None;
     }
 
+    /// Whether the weights were dropped by [`strip`](Self::strip).
     pub fn is_stripped(&self) -> bool {
         self.w.is_none()
     }
@@ -232,6 +252,7 @@ impl DeviceGeometry {
         self.wt = Some(wt);
     }
 
+    /// Device bytes held now (weights and positions if kept, plus the transposition).
     pub fn bytes(&self) -> usize {
         let n = self.kgp.len();
         let weights = if self.is_stripped() { 0 } else { n * 20 };
@@ -249,6 +270,7 @@ impl DeviceGeometry {
         4 * g * p * 24 + 8
     }
 
+    /// Bytes per output row of the transposition alone (`G` gauges, `P` taps).
     pub fn transposition_bytes_per_row(g: usize, p: usize) -> usize {
         4 * g * p * 4 + 8
     }

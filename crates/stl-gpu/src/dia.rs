@@ -45,13 +45,16 @@ pub fn lanes() -> usize {
 /// The diagonals on the device: offsets `(dx, dy)` and the index of the
 /// window `[-w, w]^2`.
 pub struct DeviceDiagonals {
+    /// Half-width `W` of the window `[-W, W]^2`.
     pub w: i64,
+    /// Number of diagonals `D`.
     pub d: usize,
     offsets: CudaSlice<i32>,
     index: CudaSlice<i32>,
 }
 
 impl DeviceDiagonals {
+    /// Uploads the offsets and the window index of `diag`.
     pub fn new(gpu: &Gpu, diag: &Diagonals) -> Self {
         let offsets: Vec<i32> = diag.offsets.iter().flat_map(|&(dx, dy)| [dx as i32, dy as i32]).collect();
         DeviceDiagonals { w: diag.w, d: diag.len(), offsets: gpu.upload(&offsets), index: gpu.upload(&diag.index) }
@@ -62,8 +65,11 @@ impl DeviceDiagonals {
 /// start + i` for `i < len`, found without a search.
 #[derive(Clone, Copy, Debug)]
 pub struct OwnRows {
+    /// First id of the run.
     pub start: i64,
+    /// Length of the run (0 if none).
     pub len: i64,
+    /// Position of `start` among the rows.
     pub f0: i64,
 }
 
@@ -85,9 +91,14 @@ impl OwnRows {
     }
 }
 
+/// The DIA coefficients of `K` output rows on a `Grid`, their masks of
+/// used diagonals and the grid cells they reach.
 pub struct DiaGeometry {
+    /// Number of output rows `K`.
     pub k: usize,
+    /// Number of gauges `G`.
     pub g: usize,
+    /// Number of diagonals `D`.
     pub d: usize,
     nside: i64,
     order: u32,
@@ -101,6 +112,7 @@ pub struct DiaGeometry {
     pub slots: usize,
     /// Grid positions reached by the rows' diagonals (increasing).
     pub dest: CudaSlice<u32>,
+    /// Number of grid cells reached (`|dest|`).
     pub n_dest: usize,
     own: OwnRows,
     /// Nonzero reads off the diagonals at the last build (must be 0).
@@ -262,6 +274,7 @@ impl DiaGeometry {
         self.coef = None;
     }
 
+    /// Whether the coefficients were dropped by [`strip`](Self::strip).
     pub fn is_stripped(&self) -> bool {
         self.coef.is_none()
     }
@@ -276,6 +289,7 @@ impl DiaGeometry {
         }
     }
 
+    /// Device bytes held now (coefficients if kept, plus masks and cells).
     pub fn bytes(&self) -> usize {
         self.coef.as_ref().map_or(0, |c| c.len() * 8) + self.stripped_bytes()
     }

@@ -3,11 +3,14 @@
 /// A group of ranks exchanging variable-size messages.  Every rank calls
 /// the same sequence of collective operations.
 pub trait Comm {
+    /// Rank of the caller, in `0..size()`.
     fn rank(&self) -> usize;
+    /// Number of ranks of the group.
     fn size(&self) -> usize;
     /// All-to-all with variable counts: `send[p]` goes to rank `p`; returns
     /// `recv[p]`, the message from rank `p` (the own slot is passed through).
     fn alltoallv_f64(&self, send: Vec<Vec<f64>>) -> Vec<Vec<f64>>;
+    /// [`alltoallv_f64`](Comm::alltoallv_f64) for `i64` messages.
     fn alltoallv_i64(&self, send: Vec<Vec<i64>>) -> Vec<Vec<i64>>;
 
     /// Sparse exchange with counts known on both sides: `send[p]` goes to

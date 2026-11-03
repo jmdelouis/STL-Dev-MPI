@@ -129,8 +129,12 @@ fn interval(x: f64, knots: &[f64]) -> usize {
     knots.partition_point(|&k| k <= x).saturating_sub(1).min(knots.len() - 2)
 }
 
+/// Monotone piecewise-linear transform between a physical map (kappa) and
+/// a Gaussian map g through knots at common probabilities:
+/// `kappa = f(g)` and its inverse `gaussianize`.
 #[derive(Clone, Debug)]
 pub struct Lut {
+    /// Cumulative probabilities of the knots.
     pub probabilities: Vec<f64>,
     /// Physical knots (values of `f32`).
     pub physical: Vec<f64>,
@@ -139,6 +143,9 @@ pub struct Lut {
 }
 
 impl Lut {
+    /// LUT from its knots; the Gaussian knots follow.  Errors unless the
+    /// vectors match, have two knots or more, and all three are finite and
+    /// strictly increasing.
     pub fn new(probabilities: Vec<f64>, physical: Vec<f64>) -> Result<Self, String> {
         let gaussian: Vec<f64> = probabilities.iter().map(|&p| source_ppf(p)).collect();
         if probabilities.len() < 2 || physical.len() != probabilities.len() {
