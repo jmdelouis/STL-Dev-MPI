@@ -1,0 +1,23 @@
+{
+ "target": "/scratch/jmdeloui/stl-planar2d/stl-dev/data/test/Turb_6.npy",
+ "shape": [
+  256,
+  256
+ ],
+ "ntarget": 10,
+ "nbatch": 10,
+ "power_spectrum": true,
+ "device": "cuda",
+ "threads": 16,
+ "torch": "2.11.0+cu128",
+ "seconds": [
+  0.41305424296297133,
+  0.1206947760656476,
+  0.11956317094154656
+ ],
+ "loss": 306805.3852230505,
+ "total_seconds": 4.49630811996758,
+ "peak_rss_bytes": 1380405248,
+ "peak_device_bytes": 2999974400,
+ "gpu": "NVIDIA A100-SXM4-80GB"
+}

@@ -13,10 +13,13 @@ STL-Dev on the same T4 (3.5x).  Memory is not the issue at that size; it
 becomes the issue quickly: STL-Dev's autograd keeps about 7-9 KB per
 pixel (CPU) and does not fit a 15 GB T4 at one 2048^2 image, while the
 block-wise engine stays near 0.2-0.4 KB per pixel: one 4096^2 image in
-29 s with 2.9 GB on the CPU, in 4.9 s with 1.9 GB on a T4.  The Rust
-results match STL-Dev to 1e-10, the device ones the CPU ones to 1e-12,
-and a full 100-iteration synthesis reproduces STL-Dev's loss history to
-3e-8.
+29 s with 2.9 GB on the CPU, in 4.9 s with 1.9 GB on a T4, in 0.6 s on
+an A100.  On an A100 (section 5c), where torch's float64 is fast, the Rust
+engine is still 2-5.5x faster than STL-Dev on the same device with 2.5-40x
+less device memory, and STL-Dev with its spectrum does not fit the 80 GB
+at 4096^2.  The Rust results match STL-Dev to 1e-10, the device ones the
+CPU ones to 1e-12, and a full 100-iteration synthesis reproduces STL-Dev's
+loss history to 3e-8.
 
 Code: `stl_core::planar` (`kernels`, `grid`, `engine`, `spectrum`),
 `stl_gpu::planar` and `planar.cu` (the device engine, section 5b),
@@ -285,6 +288,46 @@ to 1e-12).  Both fail rather than skip without a device (`STL_GPU_SKIP=1`
 skips them).  The T4 losses of the benchmark equal the CPU ones to 13-15
 digits.
 
+## 5c. On an A100 (hpc)
+
+The same cases on one A100-SXM4-80GB of hpc (`tools/hpc/planar_build.slurm`,
+`planar_a100.slurm`, job 2814653, 7 min; the device tests of both crates
+pass there first): STL-Dev with torch 2.11 (CUDA 12.8), Rust
+`stl-synth2d --gpu`.  Seconds per evaluation (median of the last two of
+three) and peak device memory: for torch the largest allocation
+(`max_memory_allocated`), for Rust everything in use on the device, CUDA
+context included (about 0.5 GB).
+
+STL-Dev's complete loss (ScatCov and spectrum):
+
+| images | STL-Dev A100 | Rust A100, tiles 256 | Rust A100, tiles 64 | Rust A100, whole levels | speed-up |
+|---|---|---|---|---|---|
+| 10 x 256^2 (the example) | 0.120 s, 2.8 GB | 0.036 s, 1.16 GB | **0.032 s, 0.59 GB** | 0.040 s, 1.16 GB | 3.7x |
+| 10 x 512^2 | 0.246 s, 11.9 GB | **0.094 s, 1.66 GB** | 0.107 s, 0.76 GB | 0.125 s, 3.2 GB | 2.6x |
+| 1 x 1024^2 | 0.219 s, 7.2 GB | **0.040 s, 0.69 GB** | 0.227 s, 0.55 GB | 0.050 s, 1.6 GB | 5.5x |
+| 1 x 2048^2 | 0.481 s, 40.7 GB | **0.154 s, 0.96 GB** | 0.98 s, 0.79 GB | 0.21 s, 4.95 GB | 3.1x |
+| 1 x 4096^2 | out of memory (80 GB: 32 GB of ring masks to allocate) | **0.60 s, 1.93 GB** | 4.21 s, 1.73 GB | 0.84 s, 18.3 GB | - |
+
+ScatCov only:
+
+| images | STL-Dev A100 | Rust A100, tiles 256 | speed-up |
+|---|---|---|---|
+| 10 x 256^2 | 0.119 s, 2.6 GB | 0.036 s, 1.15 GB (tiles 64: 0.031 s, 0.58 GB) | 3.3-3.8x |
+| 10 x 512^2 | 0.236 s, 10.3 GB | 0.092 s, 1.66 GB | 2.6x |
+| 1 x 1024^2 | 0.208 s, 4.1 GB | 0.040 s, 0.65 GB | 5.2x |
+| 1 x 2048^2 | 0.398 s, 16.6 GB | 0.134 s, 0.85 GB | 3.0x |
+| 1 x 4096^2 | 1.09 s, 66.3 GB | 0.53 s, 1.52 GB | 2.0x |
+
+What changes from the T4: torch's float64 is fast on an A100, so
+STL-Dev gains 5x (0.64 -> 0.12 s on the example) and becomes much faster
+than STL-Dev on the CPU; the Rust engine gains 5-8x (0.18 -> 0.033 s,
+4.9 -> 0.60 s at 4096^2) and keeps a 2-5.5x lead, while its memory stays
+bounded (1.9 GB at 4096^2 against 66 GB for STL-Dev without the
+spectrum).  Tiles of 64 are latency-bound on the A100 at large sizes
+(thousands of tiles of a few kernels each, and one synchronisation per
+tile for the partial sums): tiles of 256, or whole levels where they fit,
+are the right setting there.
+
 ## 6. Synthesis of the example
 
 Target: the first 10 images of `Turb_6.npy` (256^2, periodic), 10
@@ -339,9 +382,13 @@ targets'.
   image (~150 GB) fits nowhere.  The block-wise engine keeps only the
   maps, the stored moduli and their cotangents for the whole image (about
   50 bytes per pixel) plus a few tiles: 4096^2 in 2.9 GB and 29 s per
-  evaluation on 12 cores, 1.9 GB and 4.9 s on a T4, i.e. a 500-iteration
-  synthesis in about 45 minutes on one T4 (an FP64-weak device: an A100
-  should be several times faster).  The time is linear in the number of pixels (0.46 s per
+  evaluation on 12 cores, 1.9 GB and 4.9 s on a T4, 0.6 s on an A100,
+  i.e. a 500-iteration synthesis in about 45 minutes on a T4 and 6
+  minutes on an A100.
+- **On an A100**, STL-Dev itself is fast (0.12 s on the example) and the
+  Rust engine 2-5.5x faster still (0.033 s); STL-Dev's memory is then the
+  limit (40 GB at 2048^2 with the spectrum, 66 GB at 4096^2 without it,
+  out of memory with it), the Rust engine's 1-2 GB.  The time is linear in the number of pixels (0.46 s per
   0.65 Mpix, 29 s per 16.8 Mpix), which STL-Dev's CPU path is not
   (paging from 2048^2).
 - **Why it is simpler than on the sphere:** the planar operators need no
