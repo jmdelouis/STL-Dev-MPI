@@ -8,6 +8,7 @@ use std::time::Instant;
 use stl_cli::planar::{nyquist_filter, standardize, white_noise, Config, Mode, PlanarObjective};
 use stl_cli::proc_memory;
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
+use stl_core::planar::warp::{reproject, Flow, Warp, WarpState};
 use stl_mpi::io::{read_npy_shape, write_npy_shape};
 
 const USAGE: &str = "\
@@ -31,6 +32,16 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --init PATH         initial images (standardised units), .npy [B, (C,) H, W]
   --seed N            seed of the initial white noise (default 26)
   --bench K           only time K evaluations of the loss and gradient
+  --lagrangian F      optimise a displacement of the initial images instead of
+                      their pixels (docs/lagrangian_synthesis.md): F = stream
+                      (incompressible), potential (compressive) or both
+  --disp X            rms displacement in pixels of unit variables (default 1)
+  --disp-scale S      Gaussian cutoff of the displacement in pixels (default 4)
+  --disp-slope B      displacement spectrum ~ |k|^-B (default 1)
+  --residual S        plus an Eulerian residual S * rho (default 0: none)
+  --anchor K          re-anchor every K iterations: x0 <- x, variables <- 0,
+                      new L-BFGS history (default 0: never)
+  --reproject         rank-match x0 onto the targets' histogram at every anchor
   --trace K           every K evaluations, the batch-mean feature residuals
                       (mean_b f - mean_t f) and image 0: PREFIX_trace.npy
                       [S, n, 2], PREFIX_trace_maps.npy [S, C, H, W]
@@ -62,6 +73,11 @@ struct Args {
     seed: u64,
     bench: usize,
     trace: usize,
+    lagrangian: Option<Flow>,
+    disp: [f64; 3],
+    residual: f64,
+    anchor: usize,
+    reproject: bool,
     gpu: bool,
     out: Option<String>,
 }
@@ -85,6 +101,11 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         seed: 26,
         bench: 0,
         trace: 0,
+        lagrangian: None,
+        disp: [1.0, 4.0, 1.0],
+        residual: 0.0,
+        anchor: 0,
+        reproject: false,
         gpu: false,
         out: None,
     };
@@ -119,6 +140,20 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--seed" => a.seed = num(it.next(), k)?,
             "--bench" => a.bench = num(it.next(), k)?,
             "--trace" => a.trace = num(it.next(), k)?,
+            "--lagrangian" => {
+                a.lagrangian = Some(match it.next().map(String::as_str) {
+                    Some("stream") => Flow::Stream,
+                    Some("potential") => Flow::Potential,
+                    Some("both") => Flow::Both,
+                    _ => return Err("--lagrangian is stream, potential or both".into()),
+                })
+            }
+            "--disp" => a.disp[0] = num(it.next(), k)?,
+            "--disp-scale" => a.disp[1] = num(it.next(), k)?,
+            "--disp-slope" => a.disp[2] = num(it.next(), k)?,
+            "--residual" => a.residual = num(it.next(), k)?,
+            "--anchor" => a.anchor = num(it.next(), k)?,
+            "--reproject" => a.reproject = true,
             "--gpu" => a.gpu = true,
             "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
             "-h" | "--help" => return Err(USAGE.into()),
@@ -152,6 +187,47 @@ fn select(v: &[f64], (c, h, w): (usize, usize, usize), count: usize, s: usize) -
         }
     }
     out
+}
+
+/// The Lagrangian variable `z = [theta (planes x warp.len()), rho (planes x npix)]`
+/// of the images `x = x0 o (id + u(theta)) + residual * rho`, plane by plane.
+struct Lag<'a> {
+    warp: &'a Warp,
+    x0: Vec<f64>,
+    residual: f64,
+    planes: usize,
+}
+
+impl Lag<'_> {
+    fn len(&self) -> usize {
+        let np = self.warp.h * self.warp.w;
+        self.planes * (self.warp.len() + if self.residual > 0.0 { np } else { 0 })
+    }
+
+    fn apply(&self, z: &[f64]) -> (Vec<f64>, Vec<WarpState>) {
+        let (np, nv) = (self.warp.h * self.warp.w, self.warp.len());
+        let mut x = Vec::with_capacity(self.planes * np);
+        let mut st = Vec::with_capacity(self.planes);
+        for p in 0..self.planes {
+            let (xp, s) = self.warp.forward(&self.x0[p * np..][..np], &z[p * nv..][..nv]);
+            x.extend(xp);
+            st.push(s);
+        }
+        if self.residual > 0.0 {
+            let rho = &z[self.planes * nv..];
+            x.iter_mut().zip(rho).for_each(|(a, r)| *a += self.residual * r);
+        }
+        (x, st)
+    }
+
+    fn pull(&self, st: &[WarpState], g: &[f64]) -> Vec<f64> {
+        let np = self.warp.h * self.warp.w;
+        let mut gz: Vec<f64> = (0..self.planes).flat_map(|p| self.warp.vjp(&st[p], &g[p * np..][..np])).collect();
+        if self.residual > 0.0 {
+            gz.extend(g.iter().map(|v| self.residual * v));
+        }
+        gz
+    }
 }
 
 fn complex_rows(x: &[num_complex::Complex64]) -> Vec<f64> {
@@ -228,11 +304,22 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     let mut trace_maps: Vec<f64> = Vec::new();
     let mut trace_evals: Vec<usize> = Vec::new();
     let t1 = Instant::now();
-    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>, warm_offset: usize| {
+    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>, warm_offset: usize, lag: Option<&Lag>| {
         let opts = LbfgsOptions { lr: 1.0, max_iter: niter, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
-        let mut f = |x: &[f64]| {
+        let mut f = |z: &[f64]| {
             let t = Instant::now();
-            let r = obj.loss_and_grad(x);
+            let (xl, st) = match lag {
+                Some(l) => {
+                    let (x, st) = l.apply(z);
+                    (Some(x), st)
+                }
+                None => (None, Vec::new()),
+            };
+            let x = xl.as_deref().unwrap_or(z);
+            let mut r = obj.loss_and_grad(x);
+            if let Some(l) = lag {
+                r.1 = l.pull(&st, &r.1);
+            }
             times.push(t.elapsed().as_secs_f64());
             history.push(r.0);
             if a.trace > 0 && warm_offset != usize::MAX && (history.len() - 1) % a.trace == 0 {
@@ -258,10 +345,39 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         let mut wc = cfg.clone();
         wc.mode = Mode::StlDev;
         let warm = PlanarObjective::new(wc, &t)?;
-        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history, usize::MAX);
+        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history, usize::MAX, None);
         report["warm_loss_history"] = serde_json::json!(warm_history);
     }
-    evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals);
+    if let Some(flow) = a.lagrangian {
+        let [rms, scale, slope] = a.disp;
+        let warp = Warp::new(h, w, flow, scale, slope, rms);
+        // Sorted standardised target values per channel, for --reproject.
+        let pools: Vec<Vec<f64>> = (0..c)
+            .map(|ch| {
+                let mut v: Vec<f64> = (0..bt_use).flat_map(|k| t[(k * c + ch) * h * w..][..h * w].iter().copied()).collect();
+                v.sort_by(f64::total_cmp);
+                v
+            })
+            .collect();
+        let (mut done, mut cycles) = (0, 0);
+        while done < a.niter {
+            let k = if a.anchor > 0 { a.anchor.min(a.niter - done) } else { a.niter - done };
+            if a.reproject {
+                u.chunks_mut(h * w).enumerate().for_each(|(p, x)| reproject(x, &pools[p % c]));
+            }
+            let lag = Lag { warp: &warp, x0: u.clone(), residual: a.residual, planes: a.nbatch * c };
+            let mut z = vec![0.0; lag.len()];
+            let offset = evals - history.len();
+            evals += lbfgs(&obj, k, &mut z, &mut history, offset, Some(&lag));
+            u = lag.apply(&z).0;
+            done += k;
+            cycles += 1;
+        }
+        report["lagrangian"] = serde_json::json!({"flow": format!("{flow:?}"), "disp": rms, "disp_scale": scale, "disp_slope": slope,
+            "residual": a.residual, "anchor": a.anchor, "reproject": a.reproject, "cycles": cycles});
+    } else {
+        evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals, None);
+    }
     drop(lbfgs);
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
