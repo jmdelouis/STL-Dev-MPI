@@ -72,7 +72,7 @@ def main():
     raw = load_target(a.target, a.nside)
     mu, sd = raw.mean(), raw.std()
     target = (raw - mu) / sd
-    ck = torch.load(a.model, map_location=dev) if a.model else None
+    ck = torch.load(a.model, map_location=dev, weights_only=False) if a.model else None
     j = ck["j"] if ck else int(math.log2(a.nside)) - 1
     tstats, tvar, plan = target_statistics(target, a.nside, j, a.device)
     report_fn = EnsembleLoss(tstats, tvar, plan, a.nside, 1, 0.0)
@@ -80,7 +80,7 @@ def main():
 
     gen_seconds = None
     if ck:
-        gen = Generator(a.nside, ck["nside0"], ck["channels"]).to(dev).eval()
+        gen = Generator(a.nside, ck["nside0"], ck["channels"], up=ck.get("up", "nearest")).to(dev).eval()
         gen.load_state_dict(ck["state"])
         g = torch.Generator(device=dev).manual_seed(a.seed)
         maps = []

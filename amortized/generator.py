@@ -27,7 +27,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "diffusion"))
+# Appended, not prepended: diffusion/ has its own train.py.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "diffusion"))
 import healpix_faces as hf  # noqa: E402
 from model import Conv3, Padding  # noqa: E402
 
@@ -37,9 +38,9 @@ def default_channels(levels):
 
 
 class Generator(nn.Module):
-    def __init__(self, nside, nside0=4, channels=None, slope=0.2):
+    def __init__(self, nside, nside0=4, channels=None, slope=0.2, up="smooth"):
         super().__init__()
-        self.nside, self.nside0 = nside, nside0
+        self.nside, self.nside0, self.up_mode = nside, nside0, up
         self.levels = int(round(math.log2(nside // nside0))) + 1
         ch = list(channels or default_channels(self.levels))
         assert len(ch) == self.levels, "one channel count per level"
@@ -56,6 +57,19 @@ class Generator(nn.Module):
         fn = hf.face_nest(nside).ravel()
         self.register_buffer("face_of_nest", torch.as_tensor(np.argsort(fn)), persistent=False)
         self.register_buffer("nest_of_face", torch.as_tensor(fn), persistent=False)
+
+    def up(self, x):
+        """Children of every pixel.  'nearest' copies the parent; 'smooth' then
+        blurs with [1, 2, 1]^2 / 16 across face edges.  After 'nearest' the
+        convolutions see a field that depends on the child's position in its
+        parent, and the trained generator adds a z-independent pattern,
+        periodic on the pixel grid (7.7 % of the variance at nside 64)."""
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if self.up_mode == "nearest":
+            return x
+        k = torch.tensor([1.0, 2.0, 1.0], dtype=x.dtype, device=x.device)
+        k = (k[:, None] * k[None, :] / 16).expand(x.shape[1], 1, 3, 3)
+        return F.conv2d(self.pad(x), k, groups=x.shape[1])
 
     def noise(self, batch, generator=None, device=None):
         n = self.nside
@@ -79,7 +93,7 @@ class Generator(nn.Module):
             if k == 0:
                 h = self.blocks[0](zs[0])
             else:
-                h = self.blocks[k](torch.cat([F.interpolate(h, scale_factor=2, mode="nearest"), zs[k]], 1))
+                h = self.blocks[k](torch.cat([self.up(h), zs[k]], 1))
             y = self.heads[k](h)
-            x = y if x is None else F.interpolate(x, scale_factor=2, mode="nearest") + y
+            x = y if x is None else self.up(x) + y
         return self.to_nested(x)

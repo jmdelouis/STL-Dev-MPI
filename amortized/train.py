@@ -64,6 +64,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--init", default=None)
     p.add_argument("--freeze", type=int, default=0)
+    p.add_argument("--up", default="smooth", choices=["smooth", "nearest"])
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=500)
     a = p.parse_args()
@@ -83,9 +84,9 @@ def main():
     setup = time.time() - t0
 
     channels = [int(c) for c in a.channels.split(",")] if a.channels else None
-    gen = Generator(a.nside, a.nside0, channels).to(dev)
+    gen = Generator(a.nside, a.nside0, channels, up=a.up).to(dev)
     if a.init:
-        ck = torch.load(a.init, map_location=dev)
+        ck = torch.load(a.init, map_location=dev, weights_only=False)
         own = gen.state_dict()
         loaded = {k: v for k, v in ck["state"].items() if k in own and own[k].shape == v.shape}
         own.update(loaded)
@@ -106,8 +107,8 @@ def main():
     started = time.time()
 
     def save(tag="model.pt"):
-        torch.save({"state": gen.state_dict(), "nside": a.nside, "nside0": a.nside0, "channels": gen.channels,
-                    "target_mean": mu, "target_std": sd, "j": j}, os.path.join(a.out, tag))
+        torch.save({"state": gen.state_dict(), "nside": a.nside, "nside0": a.nside0, "channels": gen.channels, "up": gen.up_mode,
+                    "target_mean": float(mu), "target_std": float(sd), "j": j}, os.path.join(a.out, tag))
 
     for step in range(1, a.steps + 1):
         ts = time.time()
@@ -139,7 +140,7 @@ def main():
     save()
     report = {"args": vars(a), "j": j, "coefficients": len(plan), "parameters": nparams, "setup_seconds": setup,
               "seconds": time.time() - started, "timers_seconds": timers, "loss_history": hist,
-              "target_mean": mu, "target_std": sd}
+              "target_mean": float(mu), "target_std": float(sd)}
     with open(os.path.join(a.out, "train.json"), "w") as f:
         json.dump(report, f, indent=1)
 
