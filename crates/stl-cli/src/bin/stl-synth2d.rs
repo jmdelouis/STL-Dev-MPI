@@ -8,6 +8,7 @@ use std::time::Instant;
 use stl_cli::planar::{nyquist_filter, standardize, white_noise, Config, Mode, PlanarObjective};
 use stl_cli::proc_memory;
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
+use stl_core::planar::cascade::{resample, ConditionalDetail, SplitMix};
 use stl_core::planar::warp::{reproject, Flow, Warp, WarpState};
 use stl_mpi::io::{read_npy_shape, write_npy_shape};
 
@@ -42,6 +43,14 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --anchor K          re-anchor every K iterations: x0 <- x, variables <- 0,
                       new L-BFGS history (default 0: never)
   --reproject         rank-match x0 onto the targets' histogram at every anchor
+  --c2f LEVELS        coarse-to-fine start (docs/lagrangian_synthesis.md 6.4):
+                      square sides, e.g. 32,64,128 (the image side last is
+                      implied); pixel L-BFGS at each coarse level (--warm at
+                      the first one), then upsampling plus detail drawn
+                      conditionally on the coarse value and gradient bins
+  --c2f-iter LIST     L-BFGS iterations per coarse level (default 300,200,...)
+  --c2f-detail D      conditional (default) or white
+  --c2f-bins Q        quantile bins per feature (default 8)
   --trace K           every K evaluations, the batch-mean feature residuals
                       (mean_b f - mean_t f) and image 0: PREFIX_trace.npy
                       [S, n, 2], PREFIX_trace_maps.npy [S, C, H, W]
@@ -73,6 +82,10 @@ struct Args {
     seed: u64,
     bench: usize,
     trace: usize,
+    c2f: Vec<usize>,
+    c2f_iter: Vec<usize>,
+    c2f_white: bool,
+    c2f_bins: usize,
     lagrangian: Option<Flow>,
     disp: [f64; 3],
     residual: f64,
@@ -101,6 +114,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         seed: 26,
         bench: 0,
         trace: 0,
+        c2f: Vec::new(),
+        c2f_iter: Vec::new(),
+        c2f_white: false,
+        c2f_bins: 8,
         lagrangian: None,
         disp: [1.0, 4.0, 1.0],
         residual: 0.0,
@@ -112,6 +129,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     let mut it = argv.iter();
     fn num<T: std::str::FromStr>(v: Option<&String>, k: &str) -> Result<T, String> {
         v.ok_or(format!("{k} needs a value"))?.parse().map_err(|_| format!("{k}: bad value"))
+    }
+    fn list(v: Option<&String>, k: &str) -> Result<Vec<usize>, String> {
+        v.ok_or(format!("{k} needs a value"))?.split(',').map(|x| x.trim().parse().map_err(|_| format!("{k}: bad value"))).collect()
     }
     while let Some(k) = it.next() {
         match k.as_str() {
@@ -140,6 +160,16 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--seed" => a.seed = num(it.next(), k)?,
             "--bench" => a.bench = num(it.next(), k)?,
             "--trace" => a.trace = num(it.next(), k)?,
+            "--c2f" => a.c2f = list(it.next(), k)?,
+            "--c2f-iter" => a.c2f_iter = list(it.next(), k)?,
+            "--c2f-detail" => {
+                a.c2f_white = match it.next().map(String::as_str) {
+                    Some("conditional") => false,
+                    Some("white") => true,
+                    _ => return Err("--c2f-detail is conditional or white".into()),
+                }
+            }
+            "--c2f-bins" => a.c2f_bins = num(it.next(), k)?,
             "--lagrangian" => {
                 a.lagrangian = Some(match it.next().map(String::as_str) {
                     Some("stream") => Flow::Stream,
@@ -234,6 +264,99 @@ fn complex_rows(x: &[num_complex::Complex64]) -> Vec<f64> {
     x.iter().flat_map(|v| [v.re, v.im]).collect()
 }
 
+/// Planes `[P, n, n]` of `x` resampled to `m x m`.
+fn resample_planes(x: &[f64], n: usize, m: usize) -> Vec<f64> {
+    x.chunks(n * n).flat_map(|p| resample(p, n, m)).collect()
+}
+
+/// Planes of channel `ch` among the first `rows` images of `v` `[B, C, n, n]`.
+fn channel_planes(v: &[f64], rows: usize, c: usize, ch: usize, np: usize) -> Vec<f64> {
+    (0..rows).flat_map(|k| v[(k * c + ch) * np..][..np].to_vec()).collect()
+}
+
+/// `--c2f`: syntheses of the coarse levels and the initial images of the
+/// finest one, in its standardised units (`mean`, `std` of `run`).
+/// `target`: the Nyquist-filtered targets `[Bt, C, H, H]` in target units.
+fn c2f_init(a: &Args, cfg: &Config, target: &[f64], (bt, c, h): (usize, usize, usize), (mean, std): (&[f64], &[f64])) -> Result<(Vec<f64>, serde_json::Value), String> {
+    let mut levels = a.c2f.clone();
+    levels.push(h);
+    if levels.windows(2).any(|w| w[1] != 2 * w[0]) {
+        return Err("--c2f: every level must be twice the previous one, up to the image side".into());
+    }
+    let tl: Vec<Vec<f64>> = levels.iter().map(|&n| if n == h { target.to_vec() } else { resample_planes(target, h, n) }).collect();
+    let mut prev: Vec<f64> = Vec::new(); // synthesis of the previous level, target units
+    let mut per_level = Vec::new();
+    let mut equivalent = 0.0;
+    for (i, &n) in levels.iter().enumerate() {
+        let np = n * n;
+        // Standardisation of this level, as run() does for the image side.
+        let (tn, mn, sn) = if n == h { (Vec::new(), mean.to_vec(), std.to_vec()) } else { standardize(&nyquist_filter(&tl[i], n, n), c, np) };
+        let init = if i == 0 {
+            nyquist_filter(&white_noise(a.nbatch * c * np, a.seed), n, n)
+        } else {
+            let m = levels[i - 1];
+            let up = resample_planes(&prev, m, n);
+            let tu = resample_planes(&tl[i - 1], m, n);
+            let mut rng = SplitMix(a.seed ^ (0x5eed_0000 + n as u64));
+            let mut x = up.clone();
+            for ch in 0..c {
+                let cu = channel_planes(&tu, bt, c, ch, np);
+                let dt: Vec<f64> = channel_planes(&tl[i], bt, c, ch, np).iter().zip(&cu).map(|(a, b)| a - b).collect();
+                let s_up = channel_planes(&up, a.nbatch, c, ch, np);
+                let d: Vec<f64> = if a.c2f_white {
+                    let mu = dt.iter().sum::<f64>() / dt.len() as f64;
+                    let sd = (dt.iter().map(|v| (v - mu) * (v - mu)).sum::<f64>() / dt.len() as f64).sqrt();
+                    (0..s_up.len()).map(|_| sd * rng.normal()).collect()
+                } else {
+                    ConditionalDetail::new(&cu, &dt, n, a.c2f_bins).draw(&s_up, &mut rng)
+                };
+                for k in 0..a.nbatch {
+                    x[(k * c + ch) * np..][..np].iter_mut().zip(&d[k * np..][..np]).for_each(|(v, e)| *v += e);
+                }
+            }
+            x.chunks(np).enumerate().flat_map(|(k, p)| p.iter().map(|v| (v - mn[k % c]) / sn[k % c]).collect::<Vec<_>>()).collect()
+        };
+        if n == h {
+            let report = serde_json::json!({"levels": levels, "detail": if a.c2f_white { "white" } else { "conditional" }, "bins": a.c2f_bins,
+                "per_level": per_level, "equivalent_evaluations": equivalent});
+            return Ok((init, report));
+        }
+        let mut lc = Config::new(n, n, c, cfg.mode);
+        lc.fewer = cfg.fewer;
+        lc.tile = cfg.tile.min(n);
+        lc.weights = cfg.weights;
+        #[allow(unused_mut)]
+        let mut obj = PlanarObjective::new(lc.clone(), &tn)?;
+        if a.gpu {
+            attach_gpu(&mut obj, a.nbatch)?;
+        }
+        let t0 = Instant::now();
+        let mut u = init;
+        let mut evals = 0;
+        let mut hist = Vec::new();
+        let opts = |k: usize| LbfgsOptions { lr: 1.0, max_iter: k, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
+        if i == 0 && a.warm > 0 && cfg.mode != Mode::StlDev {
+            let mut wc = lc.clone();
+            wc.mode = Mode::StlDev;
+            let warm = PlanarObjective::new(wc, &tn)?;
+            evals += minimize(&mut u, &opts(a.warm), &Local, &mut |x: &[f64]| warm.loss_and_grad(x));
+        }
+        let iters = a.c2f_iter.get(i).copied().unwrap_or(if i == 0 { 300 } else { 200 });
+        evals += minimize(&mut u, &opts(iters), &Local, &mut |x: &[f64]| {
+            let r = obj.loss_and_grad(x);
+            hist.push(r.0);
+            r
+        });
+        let eq = evals as f64 * (n as f64 / h as f64).powi(2);
+        equivalent += eq;
+        eprintln!("c2f level {n}: {evals} evaluations, loss {:.4e} -> {:.4e}", hist[0], hist[hist.len() - 1]);
+        per_level.push(serde_json::json!({"n": n, "evaluations": evals, "seconds": t0.elapsed().as_secs_f64(),
+            "loss_first": hist[0], "loss_last": hist[hist.len() - 1], "equivalent_evaluations": eq}));
+        prev = u.chunks(np).enumerate().flat_map(|(k, p)| p.iter().map(|v| v * sn[k % c] + mn[k % c]).collect::<Vec<_>>()).collect();
+    }
+    unreachable!()
+}
+
 fn run(a: &Args) -> Result<serde_json::Value, String> {
     let (bt, c, h0, w0, data) = read_images(&a.target)?;
     let bt_use = a.ntarget.unwrap_or(bt).min(bt);
@@ -272,6 +395,17 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         }
         None => nyquist_filter(&white_noise(a.nbatch * n, a.seed), h, w),
     };
+    let mut c2f_report = serde_json::Value::Null;
+    let t_c2f = Instant::now();
+    if !a.c2f.is_empty() {
+        if h != w {
+            return Err("--c2f needs square images".into());
+        }
+        let (init, r) = c2f_init(a, &cfg, &target, (bt_use, c, h), (&mean, &std))?;
+        u = init;
+        c2f_report = r;
+        c2f_report["seconds"] = serde_json::json!(t_c2f.elapsed().as_secs_f64());
+    }
     let mut report = serde_json::json!({
         "target": a.target.display().to_string(), "ntarget": bt_use, "nbatch": a.nbatch,
         "shape": [c, h, w], "J": cfg.j, "L": 4, "tile": cfg.tile, "n_bins": cfg.n_bins, "fewer": cfg.fewer,
@@ -341,7 +475,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     };
     let mut warm_history = Vec::new();
     let mut evals = 0;
-    if a.warm > 0 && cfg.mode != Mode::StlDev {
+    if a.warm > 0 && cfg.mode != Mode::StlDev && a.c2f.is_empty() {
         let mut wc = cfg.clone();
         wc.mode = Mode::StlDev;
         let warm = PlanarObjective::new(wc, &t)?;
@@ -382,6 +516,10 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
     report["evaluations"] = serde_json::json!(evals);
+    if !c2f_report.is_null() {
+        c2f_report["total_equivalent_evaluations"] = serde_json::json!(c2f_report["equivalent_evaluations"].as_f64().unwrap() + evals as f64);
+        report["c2f"] = c2f_report;
+    }
     report["seconds"] = serde_json::json!(seconds);
     report["seconds_per_evaluation"] = serde_json::json!(seconds / evals as f64);
     report["loss_history"] = serde_json::json!(history);
