@@ -357,11 +357,11 @@ variance):
 training loop) works and is cheap.  The plain convolutional generator
 trained through the strict ergodic loss stalls around 3 sigma per map
 in 3 000 steps, and its failures are structural (finest scale, tail, map
-variance) rather than a matter of training time.  Polish from it costs
-1.5 s per map against 17 s from white noise (11 x), but inherits the
-defects that the statistics do not see.  Break-even of generator +
-polish against L-BFGS at nside 64: about 85 maps; for 10 000 maps,
-4.5 T4 hours against 47.
+variance) rather than a matter of training time.  The polish inherits
+the defects that the statistics do not see.  (Costs of the polish
+against L-BFGS: section 6.2; an earlier "11 x" compared 50 polish
+iterations with a full 500-iteration L-BFGS run, which ends at a 15
+times lower loss, and is withdrawn.)
 
 ### 6.1 The three fixes (runs `g`, `h`, `i`, 3 000 steps each)
 
@@ -404,8 +404,8 @@ sigma; "finest" is the detail variance of level 64):
   the kurtosis of the details, 2 to 3 cosmic sigma low as for L-BFGS
   itself (a known limit of the STL statistics, not of the generator):
   every family at 0.9 to 1.1 sigma per map, C_l max 1.4 sigma, peaks
-  above 10 sigma -1.3.  Cost: 1.5 s per map against 17 s, after 23
-  minutes of training.
+  above 10 sigma -1.3.  But at the same loss L-BFGS from white noise is
+  only 1.4 times slower (section 6.2).
 - **The generator alone** stays at about 3 sigma per map in S1 to S4,
   with 3 to 9 times the ergodic scatter between maps: its maps are more
   different from each other than real skies are.  The scatter term of
@@ -422,12 +422,31 @@ gnomview with `norm='hist'` and the target's scale): the generator's
 maps have filaments, voids and peaks like the target, a little less
 filamentary; after the polish they are close to the L-BFGS ones.
 
-**Status at nside 64.**  The amortized path that works today is
-"generator + short polish": 23 T4 minutes once, then 1.5 s per map
-for maps as good as L-BFGS from white noise (17 s per map).  Break-even
-~85 maps; 10 000 maps: 4.5 T4 hours instead of 47.  A generator good
-enough without the polish (about 1 sigma per map) is not reached yet;
-the gap is the excess scatter between maps.
+### 6.2 Loss reached: generator + polish against L-BFGS from white noise
+
+Same loss (ensemble of 8, ergodic weights, scatter weight 1), same
+target, nside 64, one T4 (`stl-synth --gpu`, `synth.log` of each run):
+
+| start | evaluations | loss |
+|---|---|---|
+| white noise (L-BFGS) | 1 / 50 / 81 / 100 / 300 / 543 (end) | 2072 / 1.80 / 0.562 / 0.391 / 0.083 / 0.039 |
+| generator `c` + polish | 1 / 50 | 63.4 / 0.73 |
+| generator `i` + polish | 1 / 50 | 58.2 / 0.77 |
+| generator `g` + polish | 1 / 50 / 59 (end) | 64.0 / 0.90 / 0.566 |
+
+The generator starts 30 times lower (64 against 2072), but L-BFGS from
+white noise reaches the polished loss (0.566) in 81 evaluations against
+59: **27 % fewer evaluations at the same loss**, not an order of
+magnitude.  L-BFGS needs ~460 more evaluations to go from 0.56 to 0.04;
+whether the polished maps need them (their per-map residuals and cv10
+are already at the L-BFGS level, section 6.1) is the open question.
+
+**Status at nside 64.**  The generator alone (5 ms per map) reaches about
+3 sigma per map; with 50 iterations of polish the maps pass the same
+tests as the L-BFGS ones, at a loss of 0.57 against 0.04 for a full
+L-BFGS run, which reaches 0.57 in 81 evaluations.  At this nside the
+amortized gain is therefore small unless the generator alone, without
+polish, gets to about 1 sigma per map.
 
 **Next steps:**
 
