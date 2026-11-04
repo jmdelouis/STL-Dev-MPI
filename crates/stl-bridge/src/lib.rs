@@ -4,27 +4,35 @@
 //! One handle owns one engine (CPU [`stl_core::engine::LocalEngine`] or
 //! `stl_gpu::GpuEngine`) whose batch, geometry and plan are fixed at
 //! creation: the complete plan (`Family::ALL`, one channel,
-//! `fewer = false`, `dg(j) = j`, gauge cosmo).
-//! Maps are `f64` NESTED `[batch, 12 nside^2]`; complex values and cotangents
+//! `fewer = false`, `dg(j) = j`, gauge cosmo), or with `cross` the cross
+//! terms of two channels (`c1 != c2`: S1, S2, S3, S4).
+//! Maps are `f64` NESTED `[batch, 12 nside^2]` (`[batch, 2, 12 nside^2]`
+//! with `cross`); complex values and cotangents
 //! are interleaved `(re, im)` pairs, and the gradient is that of
 //! `Re sum(conj(cotangent) * values)`.  Every forward state carries an
 //! identity (handle, trial generation, member, objective); `stlp_vjp` and
 //! `stlp_restore` refuse a stale or foreign one.  One caller thread per
 //! handle.  Panics are caught at the boundary: the call returns its failure
 //! value and `stlp_last_error` the message.
+//!
+//! A patch handle (`stlp_patch_*`) evaluates the same statistics on disc
+//! patches ([`stl_core::disc`]): a batch of discs with their own centres,
+//! each map holding only its disc's pixels.
 
 #![warn(missing_docs)]
 
 use num_complex::Complex64;
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use stl_core::engine::{EngineConfig, LocalEngine};
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
 use stl_core::local::LocalGeometry;
+use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState};
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::stencil::Gauge;
 #[cfg(feature = "gpu")]
@@ -33,7 +41,7 @@ use stl_core::engine::{Partition, Serial};
 use stl_gpu::{ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-10-30-v2";
+pub const VERSION: &str = "2026-11-04-v3";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -91,6 +99,7 @@ pub struct Handle {
     id: u64,
     nside: usize,
     batch: usize,
+    channels: usize,
     npix: usize,
     current: Option<Identity>,
 }
@@ -111,6 +120,25 @@ impl Handle {
     fn identity(&self, generation: u64, member: u64, objective: u64) -> Identity {
         Identity { owner: self.id, generation, member, objective }
     }
+}
+
+/// The complete one-channel plan, or the cross terms of two channels.
+fn plan_of(j: usize, l: usize, j_to_dg: &[usize], cross: bool) -> Vec<Coefficient> {
+    if cross {
+        build_plan(j, l, j_to_dg, 2, None, &Family::ALL).into_iter().filter(|c| c.c1 != c.c2).collect()
+    } else {
+        build_plan(j, l, j_to_dg, 1, None, &Family::ALL)
+    }
+}
+
+fn plan_json(plan: &[Coefficient]) -> Vec<Value> {
+    plan.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            json!({"index": i, "family": c.family.name(), "native_dg": c.native_dg, "c1": c.c1, "c2": c.c2,
+                   "j1": c.j1, "j2": c.j2, "j3": c.j3, "l1": c.l1, "l2": c.l2, "l3": c.l3})
+        })
+        .collect()
 }
 
 /// Message of the last failure caught on the calling thread (empty if
@@ -134,7 +162,8 @@ pub unsafe extern "C" fn stlp_string_free(p: *mut c_char) {
 /// (`cpu` | `gpu`); GPU only: `device` (0), `cache` (`transposition`),
 /// `cache_bytes` (1 GiB), `threads` (1), `conv` (`dia` | `stencils`) and
 /// `fields` (`auto` | `keep` | `recompute`), else `STL_GPU_CONV`,
-/// `STL_GPU_FIELDS` or their defaults.  Null on failure.
+/// `STL_GPU_FIELDS` or their defaults; `cross` (false): two channels and
+/// the plan of their cross terms.  Null on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
     guard(std::ptr::null_mut(), || {
@@ -154,13 +183,15 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
             block_pixels,
         ));
         let cfg = Box::new(EngineConfig::new(j, false));
-        let plan = build_plan(j, geo.l, &cfg.j_to_dg, 1, None, &Family::ALL);
+        let cross = v["cross"].as_bool().unwrap_or(false);
+        let channels = if cross { 2 } else { 1 };
+        let plan = plan_of(j, geo.l, &cfg.j_to_dg, cross);
         let npix = 12 * nside * nside;
         // Safety: the boxes outlive the engine (see `Handle`).
         let g: &'static LocalGeometry = &*(&*geo as *const LocalGeometry);
         let c: &'static EngineConfig = &*(&*cfg as *const EngineConfig);
         let backend = match v["backend"].as_str().unwrap_or("cpu") {
-            "cpu" => Backend::Cpu(LocalEngine::new(g, c, vec![0.0; batch * npix], batch, 1)),
+            "cpu" => Backend::Cpu(LocalEngine::new(g, c, vec![0.0; batch * channels * npix], batch, channels)),
             #[cfg(feature = "gpu")]
             "gpu" => {
                 let gpu = std::sync::Arc::new(Gpu::new(integer(&v, "device", 0)).expect("CUDA initialisation"));
@@ -177,13 +208,13 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                Backend::Gpu(GpuEngine::new(gpu, g, c, Partition::serial(g, c.levels()), batch, 1, &opts))
+                Backend::Gpu(GpuEngine::new(gpu, g, c, Partition::serial(g, c.levels()), batch, channels, &opts))
             }
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
             other => panic!("backend must be cpu or gpu, not {other:?}"),
         };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, npix, current: None }))
+        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, channels, npix, current: None }))
     })
 }
 
@@ -202,18 +233,10 @@ pub unsafe extern "C" fn stlp_free(p: *mut Handle) {
 pub unsafe extern "C" fn stlp_info(p: *mut Handle) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let h = &*p;
-        let plan: Vec<Value> = h
-            .plan
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                json!({"index": i, "family": c.family.name(), "native_dg": c.native_dg, "c1": c.c1, "c2": c.c2,
-                       "j1": c.j1, "j2": c.j2, "j3": c.j3, "l1": c.l1, "l2": c.l2, "l3": c.l3})
-            })
-            .collect();
         #[allow(unused_mut)]
         let mut info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"),
-            "nside": h.nside, "batch": h.batch, "channels": 1, "dtype": "float64/complex128", "fewer": false, "plan": plan});
+            "nside": h.nside, "batch": h.batch, "channels": h.channels, "cross": h.channels == 2,
+            "dtype": "float64/complex128", "fewer": false, "plan": plan_json(&h.plan)});
         #[cfg(feature = "gpu")]
         if let Backend::Gpu(e) = &h.backend {
             let (peak, total) = e.device_memory();
@@ -229,7 +252,7 @@ pub unsafe extern "C" fn stlp_info(p: *mut Handle) -> *mut c_char {
     })
 }
 
-/// Forward sweep of the maps `x` (`n = batch * 12 nside^2`): values to `out`
+/// Forward sweep of the maps `x` (`n = batch * channels * 12 nside^2`): values to `out`
 /// (`2 batch len(plan)`), and with `moments` the spatial variances of the
 /// terms to `var` (`batch len(plan)`).  0, or -1 on failure.
 #[no_mangle]
@@ -246,7 +269,7 @@ pub unsafe extern "C" fn stlp_forward(
 ) -> i32 {
     guard(-1, || {
         let h = &mut *p;
-        assert_eq!(n, h.batch * h.npix, "input shape mismatch");
+        assert_eq!(n, h.batch * h.channels * h.npix, "input shape mismatch");
         h.current = None;
         let x = std::slice::from_raw_parts(x, n);
         let (values, variance) = match &mut h.backend {
@@ -277,7 +300,7 @@ pub unsafe extern "C" fn stlp_forward(
     })
 }
 
-/// Map cotangent `out` (`batch * 12 nside^2`) of the cotangents `cot`
+/// Map cotangent `out` (`batch * channels * 12 nside^2`) of the cotangents `cot`
 /// (`2 n`, `n = batch len(plan)`) after the forward sweep of the same
 /// identity.  0, or -1 on failure.
 #[no_mangle]
@@ -307,7 +330,7 @@ pub unsafe extern "C" fn stlp_vjp(
                 e.gpu.download(&g)
             }
         };
-        std::slice::from_raw_parts_mut(out, h.batch * h.npix).copy_from_slice(&grad);
+        std::slice::from_raw_parts_mut(out, h.batch * h.channels * h.npix).copy_from_slice(&grad);
         0
     })
 }
@@ -407,5 +430,291 @@ pub unsafe extern "C" fn stlp_lbfgs(x: *mut f64, n: usize, options: *const c_cha
             (loss, g)
         };
         minimize(std::slice::from_raw_parts_mut(x, n), &opts, &Local, &mut f) as i64
+    })
+}
+
+// -- disc patches -----------------------------------------------------------------
+
+type DiscKey = [u64; 5];
+
+/// Disc-patch statistics ([`stl_core::disc`]): the plan of `stlp_new`
+/// (one channel, or the cross terms of two), CPU, the patches of a batch
+/// evaluated on `threads` host threads, the geometry of the last `cache`
+/// discs kept (key: centre, radius, core).
+pub struct PatchHandle {
+    geo: LocalGeometry,
+    cfg: EngineConfig,
+    plan: Vec<Coefficient>,
+    channels: usize,
+    threads: usize,
+    capacity: usize,
+    cache: HashMap<DiscKey, Arc<DiscGeometry>>,
+    order: VecDeque<DiscKey>,
+    hits: u64,
+    misses: u64,
+    selected: Vec<Arc<DiscGeometry>>,
+    states: Vec<DiscState>,
+    current: Option<u64>,
+}
+
+/// `f(item)` for every item on `threads` scoped threads (contiguous
+/// chunks), results in item order.
+fn parallel<T: Send, R: Send>(items: Vec<T>, threads: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let n = items.len();
+    let t = threads.clamp(1, n.max(1));
+    if t == 1 {
+        return items.into_iter().map(f).collect();
+    }
+    let chunk = n.div_ceil(t);
+    let mut parts: Vec<Vec<T>> = Vec::new();
+    let mut it = items.into_iter().peekable();
+    while it.peek().is_some() {
+        parts.push(it.by_ref().take(chunk).collect());
+    }
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = parts.into_iter().map(|p| s.spawn(move || p.into_iter().map(f).collect::<Vec<R>>())).collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    })
+}
+
+impl PatchHandle {
+    fn model(&self) -> DiscModel<'_> {
+        DiscModel { geo: &self.geo, cfg: &self.cfg, channels: self.channels }
+    }
+
+    fn sizes(&self) -> Vec<usize> {
+        self.selected.iter().map(|g| g.ids[0].len()).collect()
+    }
+}
+
+/// New patch handle from a JSON configuration: `nside`, `j`, `kernel` (5),
+/// `orientations` (4), `cross` (false), `threads` (0: `STL_THREADS`, else
+/// every CPU), `cache` (256 disc geometries).  Null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHandle {
+    guard(std::ptr::null_mut(), || {
+        let v = parse(config);
+        let nside = integer(&v, "nside", 128);
+        assert!(nside.is_power_of_two(), "nside must be a power of two");
+        let j = integer(&v, "j", 7);
+        assert!(j > 0 && j <= nside.ilog2() as usize + 1, "invalid number of scales");
+        let geo = LocalGeometry::new(nside as i64, integer(&v, "kernel", 5), integer(&v, "orientations", 4), Gauge::Cosmo, 4096);
+        let cfg = EngineConfig::new(j, false);
+        let cross = v["cross"].as_bool().unwrap_or(false);
+        let plan = plan_of(j, geo.l, &cfg.j_to_dg, cross);
+        let threads = match integer(&v, "threads", 0) {
+            0 => std::env::var("STL_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
+            t => t,
+        };
+        Box::into_raw(Box::new(PatchHandle {
+            geo,
+            cfg,
+            plan,
+            channels: if cross { 2 } else { 1 },
+            threads,
+            capacity: integer(&v, "cache", 256),
+            cache: HashMap::new(),
+            order: VecDeque::new(),
+            hits: 0,
+            misses: 0,
+            selected: Vec::new(),
+            states: Vec::new(),
+            current: None,
+        }))
+    })
+}
+
+/// Frees a patch handle (null is ignored).
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_free(p: *mut PatchHandle) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
+    }
+}
+
+/// JSON: version, sizes, plan, threads, geometry cache and the sizes of
+/// the selected discs.  Free with `stlp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_info(p: *mut PatchHandle) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let h = &*p;
+        let info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"),
+            "nside": h.geo.nside0, "j": h.cfg.j_count, "levels": h.cfg.levels(), "channels": h.channels, "cross": h.channels == 2,
+            "dtype": "float64/complex128", "fewer": false, "threads": h.threads, "plan": plan_json(&h.plan),
+            "cache": {"capacity": h.capacity, "entries": h.cache.len(), "hits": h.hits, "misses": h.misses},
+            "selected": h.sizes()});
+        CString::new(info.to_string()).unwrap().into_raw()
+    })
+}
+
+/// Unit vectors `out` (`3 n`) of the NESTED pixel centres `ids` (`n`) at
+/// `nside`.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_pixel_vectors(nside: usize, ids: *const i64, n: usize, out: *mut f64) -> i32 {
+    guard(-1, || {
+        assert!(nside.is_power_of_two(), "nside must be a power of two");
+        let ids = std::slice::from_raw_parts(ids, n);
+        let out = std::slice::from_raw_parts_mut(out, 3 * n);
+        for (o, &id) in out.chunks_mut(3).zip(ids) {
+            assert!(id >= 0 && (id as usize) < 12 * nside * nside, "pixel index out of range");
+            o.copy_from_slice(&pixel_vector(id, nside as i64));
+        }
+        0
+    })
+}
+
+/// Selects a batch of `b` discs: centres `centres` (`3 b`, any nonzero
+/// vectors), angular radius `radius` (radians; `>= pi`: the full sky),
+/// statistics averaged on the core of radius `core` when `0 < core <
+/// radius`, else on the whole disc.  Writes the number of level-0 pixels
+/// of every disc to `counts` (`b`) and drops the forward state.  0, or -1
+/// on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_select(p: *mut PatchHandle, centres: *const f64, b: usize, radius: f64, core: f64, counts: *mut usize) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        h.states.clear();
+        h.selected.clear();
+        assert!(b > 0, "empty batch");
+        assert!(radius.is_finite() && radius > 0.0, "disc radius must be positive");
+        let core = (core.is_finite() && core > 0.0 && core < radius).then_some(core);
+        let centres: Vec<[f64; 3]> = std::slice::from_raw_parts(centres, 3 * b).chunks(3).map(|c| unit([c[0], c[1], c[2]])).collect();
+        let keys: Vec<DiscKey> = centres
+            .iter()
+            .map(|c| [c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), radius.to_bits(), core.unwrap_or(-1.0).to_bits()])
+            .collect();
+        let mut missing: Vec<(DiscKey, [f64; 3])> = Vec::new();
+        for (k, c) in keys.iter().zip(&centres) {
+            if h.cache.contains_key(k) || missing.iter().any(|(m, _)| m == k) {
+                h.hits += 1;
+            } else {
+                h.misses += 1;
+                missing.push((*k, *c));
+            }
+        }
+        let levels = h.cfg.levels();
+        let geo = &h.geo;
+        let built = parallel(missing, h.threads, |(k, c)| (k, Arc::new(DiscGeometry::new(geo, levels, c, radius, core))));
+        let fresh: HashMap<DiscKey, Arc<DiscGeometry>> = built.into_iter().collect();
+        h.selected = keys.iter().map(|k| fresh.get(k).or_else(|| h.cache.get(k)).unwrap().clone()).collect();
+        for (k, g) in fresh {
+            if h.capacity > 0 {
+                h.cache.insert(k, g);
+                h.order.push_back(k);
+            }
+        }
+        while h.cache.len() > h.capacity {
+            let old = h.order.pop_front().unwrap();
+            h.cache.remove(&old);
+        }
+        std::slice::from_raw_parts_mut(counts, b).copy_from_slice(&h.sizes());
+        0
+    })
+}
+
+/// Sorted NESTED pixels (level 0) of the selected disc `i` to `out`
+/// (`counts[i]` entries).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_ids(p: *mut PatchHandle, i: usize, out: *mut i64) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        let ids = &h.selected.get(i).expect("disc index out of range").ids[0];
+        std::slice::from_raw_parts_mut(out, ids.len()).copy_from_slice(ids);
+        0
+    })
+}
+
+/// Number of pixels averaged at every level of every selected disc to
+/// `out` (`b levels`: a coefficient of native level `n` of disc `i` is a
+/// mean over `out[i levels + n]` pixels).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_core_pixels(p: *mut PatchHandle, out: *mut usize) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        let levels = h.cfg.levels();
+        let out = std::slice::from_raw_parts_mut(out, h.selected.len() * levels);
+        for (o, g) in out.chunks_mut(levels).zip(&h.selected) {
+            for (n, v) in o.iter_mut().enumerate() {
+                *v = g.core_pixels(n);
+            }
+        }
+        0
+    })
+}
+
+/// Statistics of the selected discs: `x` holds, disc after disc, the
+/// patch `[channels, counts[i]]` (`n` values in all); values to `out`
+/// (`2 b len(plan)`), with `moments` the spatial variances over the
+/// averaging pixels to `var` (`b len(plan)`).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_forward(p: *mut PatchHandle, x: *const f64, n: usize, generation: u64, moments: bool, out: *mut f64, var: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        h.states.clear();
+        assert!(!h.selected.is_empty(), "no disc selected");
+        let sizes: Vec<usize> = h.sizes().iter().map(|s| s * h.channels).collect();
+        assert_eq!(n, sizes.iter().sum::<usize>(), "input shape mismatch");
+        let x = std::slice::from_raw_parts(x, n);
+        let mut offset = 0;
+        let jobs: Vec<(Arc<DiscGeometry>, &[f64])> = h
+            .selected
+            .iter()
+            .zip(&sizes)
+            .map(|(g, &s)| {
+                let part = &x[offset..offset + s];
+                offset += s;
+                (g.clone(), part)
+            })
+            .collect();
+        let (model, plan) = (h.model(), &h.plan);
+        let results = parallel(jobs, h.threads, |(g, xi)| model.forward(&g, xi, plan, moments));
+        let nc = plan.len();
+        let o = std::slice::from_raw_parts_mut(out, 2 * nc * results.len());
+        let mut states = Vec::with_capacity(results.len());
+        for (i, (values, variance, state)) in results.into_iter().enumerate() {
+            for (k, z) in values.iter().enumerate() {
+                o[2 * (i * nc + k)] = z.re;
+                o[2 * (i * nc + k) + 1] = z.im;
+            }
+            if moments {
+                std::slice::from_raw_parts_mut(var.add(i * nc), nc).copy_from_slice(&variance);
+            }
+            states.push(state);
+        }
+        h.states = states;
+        h.current = Some(generation);
+        0
+    })
+}
+
+/// Patch cotangents `out` (the layout of the input of the forward) of the
+/// cotangents `cot` (`2 n`, `n = b len(plan)`) after the forward of the
+/// same generation.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_vjp(p: *mut PatchHandle, cot: *const f64, n: usize, generation: u64, out: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        assert_eq!(h.current, Some(generation), "stale forward state");
+        let nc = h.plan.len();
+        assert_eq!(n, h.selected.len() * nc, "cotangent shape mismatch");
+        let c: Vec<Complex64> = std::slice::from_raw_parts(cot, 2 * n).chunks(2).map(|v| Complex64::new(v[0], v[1])).collect();
+        let (model, plan) = (h.model(), &h.plan);
+        let grads = parallel((0..h.selected.len()).collect(), h.threads, |i: usize| {
+            model.reverse(&h.selected[i], &h.states[i], plan, &c[i * nc..(i + 1) * nc])
+        });
+        let total: usize = grads.iter().map(Vec::len).sum();
+        let o = std::slice::from_raw_parts_mut(out, total);
+        let mut offset = 0;
+        for g in grads {
+            o[offset..offset + g.len()].copy_from_slice(&g);
+            offset += g.len();
+        }
+        0
     })
 }

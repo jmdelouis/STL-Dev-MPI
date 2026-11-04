@@ -11,6 +11,7 @@
 pub mod conv;
 pub mod decimation;
 pub mod dia;
+pub mod disc;
 pub mod engine;
 pub mod healpix;
 pub mod lbfgs;

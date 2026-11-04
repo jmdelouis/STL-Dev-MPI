@@ -68,9 +68,11 @@ impl H {
         }
     }
 
+    /// Values of one member: channels times pixels.
     fn npix(&self) -> usize {
-        let nside = self.info()["nside"].as_u64().unwrap() as usize;
-        12 * nside * nside
+        let info = self.info();
+        let nside = info["nside"].as_u64().unwrap() as usize;
+        info["channels"].as_u64().unwrap() as usize * 12 * nside * nside
     }
 }
 
@@ -256,6 +258,51 @@ fn bad_configuration_is_an_error() {
     assert!(H::new(r#"{"nside": 8, "j": 3, "backend": "tpu"}"#).is_none());
 }
 
+/// Patch handle on discs of radius 180 degrees (two centres, one batch)
+/// against the full-sky handle: values, variances, gradients; the cross
+/// handle on `(a, a)` against the auto terms; the geometry cache.
+#[test]
+fn patch_full_disc_matches_the_full_sky_handle() {
+    let nside = 8usize;
+    let npix = 12 * nside * nside;
+    for cross in [false, true] {
+        let channels = if cross { 2 } else { 1 };
+        let full = H::new(&format!(r#"{{"nside": {nside}, "j": 3, "batch": 2, "block_pixels": 256, "cross": {cross}}}"#)).unwrap();
+        let x = noise(2 * channels * npix, 11);
+        let (v_ref, var_ref) = full.forward(&x, 1, 0, 0);
+        let cot = noise(v_ref.len(), 12);
+        let g_ref = full.vjp(&cot, 1, 0, 0).unwrap();
+        let config = CString::new(format!(r#"{{"nside": {nside}, "j": 3, "cross": {cross}, "threads": 2, "cache": 1}}"#)).unwrap();
+        let p = unsafe { stlp_patch_new(config.as_ptr()) };
+        assert!(!p.is_null(), "{}", error());
+        let centres = [0.0, 0.0, 1.0, 1.0, 2.0, -0.5];
+        let mut counts = [0usize; 2];
+        for _ in 0..2 {
+            assert_eq!(unsafe { stlp_patch_select(p, centres.as_ptr(), 2, std::f64::consts::PI, 0.0, counts.as_mut_ptr()) }, 0, "{}", error());
+            assert_eq!(counts, [npix, npix]);
+        }
+        let mut ids = vec![0i64; npix];
+        assert_eq!(unsafe { stlp_patch_ids(p, 1, ids.as_mut_ptr()) }, 0);
+        assert!(ids.iter().enumerate().all(|(i, &v)| v == i as i64));
+        let (mut v, mut var) = (vec![0.0; v_ref.len()], vec![0.0; var_ref.len()]);
+        assert_eq!(unsafe { stlp_patch_forward(p, x.as_ptr(), x.len(), 5, true, v.as_mut_ptr(), var.as_mut_ptr()) }, 0, "{}", error());
+        assert!(max_rel(&v, &v_ref) < 1e-10 && max_rel(&var, &var_ref) < 1e-10);
+        let mut g = vec![0.0; x.len()];
+        assert_ne!(unsafe { stlp_patch_vjp(p, cot.as_ptr(), cot.len() / 2, 4, g.as_mut_ptr()) }, 0, "stale generation accepted");
+        assert_eq!(unsafe { stlp_patch_vjp(p, cot.as_ptr(), cot.len() / 2, 5, g.as_mut_ptr()) }, 0, "{}", error());
+        assert!(max_rel(&g, &g_ref) < 1e-10);
+        let info = unsafe {
+            let s = stlp_patch_info(p);
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(s).to_str().unwrap()).unwrap();
+            stlp_string_free(s);
+            v
+        };
+        assert_eq!(info["plan"], full.info()["plan"]);
+        assert_eq!((info["cache"]["entries"].as_u64(), info["cache"]["hits"].as_u64(), info["cache"]["misses"].as_u64()), (Some(1), Some(1), Some(3)));
+        unsafe { stlp_patch_free(p) };
+    }
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
@@ -282,6 +329,25 @@ mod gpu {
             let g = h.vjp(&cot, 1, 0, 0).unwrap();
             let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
             eprintln!("{conv}/{fields}: values {ev:e}, variances {es:e}, gradient {eg:e}");
+            assert!(ev <= 1e-13 && es <= 1e-12 && eg <= 1e-12);
+        }
+    }
+
+    /// Cross handle (two channels, cross terms only): device against CPU.
+    #[test]
+    fn device_cross_matches_cpu() {
+        let cpu = H::new(r#"{"nside": 32, "j": 4, "batch": 2, "block_pixels": 256, "cross": true}"#).unwrap();
+        let x = noise(2 * cpu.npix(), 31);
+        let cot = noise(4 * cpu.ncoeff(), 32);
+        let (vc, sc) = cpu.forward(&x, 1, 0, 0);
+        let gc = cpu.vjp(&cot, 1, 0, 0).unwrap();
+        for (conv, fields) in FORMS {
+            let cfg = config(2, conv, fields).replace("\"backend\"", "\"cross\": true, \"backend\"");
+            let Some(h) = H::new(&cfg) else { return };
+            let (v, s) = h.forward(&x, 1, 0, 0);
+            let g = h.vjp(&cot, 1, 0, 0).unwrap();
+            let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
+            eprintln!("cross {conv}/{fields}: values {ev:e}, variances {es:e}, gradient {eg:e}");
             assert!(ev <= 1e-13 && es <= 1e-12 && eg <= 1e-12);
         }
     }

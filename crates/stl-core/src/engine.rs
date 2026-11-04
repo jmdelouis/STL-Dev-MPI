@@ -886,55 +886,13 @@ impl Block {
 
     /// Partial sum `[B]` of the coefficient over the block.
     fn partial(&self, engine: &LocalEngine, c: &Coefficient, a: &[Complex64], b: &[Complex64]) -> Vec<Complex64> {
-        let n_total = engine.geo.pixels(self.n) as f64;
-        let nf = self.nf();
-        (0..engine.batch)
-            .map(|bi| {
-                let a = &a[bi * nf..][..nf];
-                let sum: Complex64 = match c.family {
-                    Family::Mean => a.iter().sum(),
-                    Family::Var => a.iter().map(|v| Complex64::new(v.norm_sqr_exact(), 0.0)).sum(),
-                    Family::S2 if c.c1 == c.c2 => a.iter().map(|v| Complex64::new(v.norm_sqr_exact(), 0.0)).sum(),
-                    Family::S1 if c.c1 == c.c2 => a.iter().map(|v| Complex64::new(v.norm(), 0.0)).sum(),
-                    Family::S1 => {
-                        let b = &b[bi * nf..][..nf];
-                        a.iter().zip(b).map(|(&x, &y)| root_normalise(x) * root_normalise(y).conj()).sum()
-                    }
-                    _ => {
-                        let b = &b[bi * nf..][..nf];
-                        a.iter().zip(b).map(|(&x, &y)| x * y.conj()).sum()
-                    }
-                };
-                sum / n_total
-            })
-            .collect()
+        term_sums(c, a, b, engine.batch, self.nf(), engine.geo.pixels(self.n) as f64)
     }
 
     /// Partial sum `[B]` of `|f_p|^2 / N` over the block, `f_p` the terms
     /// whose mean is the coefficient (see [`partial`](Self::partial)).
     fn partial_second(&self, engine: &LocalEngine, c: &Coefficient, a: &[Complex64], b: &[Complex64]) -> Vec<f64> {
-        let n_total = engine.geo.pixels(self.n) as f64;
-        let nf = self.nf();
-        (0..engine.batch)
-            .map(|bi| {
-                let a = &a[bi * nf..][..nf];
-                let sum: f64 = match c.family {
-                    Family::Mean => a.iter().map(|v| v.norm_sqr()).sum(),
-                    Family::Var => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
-                    Family::S2 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
-                    Family::S1 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr()).sum(),
-                    Family::S1 => {
-                        let b = &b[bi * nf..][..nf];
-                        a.iter().zip(b).map(|(&x, &y)| (root_normalise(x) * root_normalise(y).conj()).norm_sqr()).sum()
-                    }
-                    _ => {
-                        let b = &b[bi * nf..][..nf];
-                        a.iter().zip(b).map(|(&x, &y)| (x * y.conj()).norm_sqr()).sum()
-                    }
-                };
-                sum / n_total
-            })
-            .collect()
+        term_second_sums(c, a, b, engine.batch, self.nf(), engine.geo.pixels(self.n) as f64)
     }
 
     // -- reverse ----------------------------------------------------------------
@@ -1011,47 +969,21 @@ impl Block {
         g: &[Complex64],
         maps_gradient: &mut [Vec<f64>],
     ) {
-        let n_total = engine.geo.pixels(self.n) as f64;
-        let nf = self.nf();
         let dg = &engine.cfg.j_to_dg;
-        // Per-pixel scaling of a cotangent: ga[b, i] = f(g[b], i).
-        let per = |f: &dyn Fn(Complex64, usize) -> Complex64| -> Vec<Complex64> {
-            (0..engine.batch * nf).map(|k| f(g[k / nf], k)).collect()
-        };
+        let (ga, gb) = operand_cotangents(c, a, b, g, engine.batch, self.nf(), engine.geo.pixels(self.n) as f64);
         match c.family {
-            Family::Mean => {
-                let ga: Vec<f64> = (0..engine.batch * nf).map(|k| g[k / nf].re / n_total).collect();
-                self.add_map(engine, &mut maps_gradient[0], 0, c.c1, &ga);
-            }
-            Family::Var => {
-                let ga: Vec<f64> = (0..engine.batch * nf).map(|k| 2.0 * g[k / nf].re * a[k].re / n_total).collect();
-                self.add_map(engine, &mut maps_gradient[0], 0, c.c1, &ga);
+            Family::Mean | Family::Var => {
+                let re: Vec<f64> = ga.iter().map(|v| v.re).collect();
+                self.add_map(engine, &mut maps_gradient[0], 0, c.c1, &re);
             }
             Family::S1 | Family::S2 => {
                 let l1 = c.l1.unwrap();
-                if c.c1 == c.c2 {
-                    let ga = if c.family == Family::S1 {
-                        let scale: Vec<f64> = (0..engine.batch * nf).map(|k| g[k / nf].re / n_total).collect();
-                        modulus_vjp(a, &scale)
-                    } else {
-                        per(&|gi, k| 2.0 * gi.re * a[k] / n_total)
-                    };
-                    self.add_z(engine, c.c1, l1, &ga);
-                } else {
-                    let (ga, gb) = if c.family == Family::S1 {
-                        let ga = per(&|gi, k| gi * root_normalise(b[k]) / n_total);
-                        let gb = per(&|gi, k| gi.conj() * root_normalise(a[k]) / n_total);
-                        (root_modulus_vjp(a, &ga), root_modulus_vjp(b, &gb))
-                    } else {
-                        (per(&|gi, k| gi * b[k] / n_total), per(&|gi, k| gi.conj() * a[k] / n_total))
-                    };
-                    self.add_z(engine, c.c1, l1, &ga);
+                self.add_z(engine, c.c1, l1, &ga);
+                if c.c1 != c.c2 {
                     self.add_z(engine, c.c2, l1, &gb);
                 }
             }
             Family::S3 | Family::S4 => {
-                let ga = per(&|gi, k| gi * b[k] / n_total);
-                let gb = per(&|gi, k| gi.conj() * a[k] / n_total);
                 let d1 = dg[c.j1.unwrap()];
                 let (l1, l3) = (c.l1.unwrap(), c.l3.unwrap());
                 if c.family == Family::S3 {
@@ -1137,9 +1069,97 @@ impl Block {
     }
 }
 
+/// Sums `[B]` of the terms of the coefficient `c` over `nf` pixels,
+/// divided by `n_total`: the operands `a`, `b` are `[B, nf]`
+/// ([`Block::partial`], [`crate::disc`]).
+pub(crate) fn term_sums(c: &Coefficient, a: &[Complex64], b: &[Complex64], batch: usize, nf: usize, n_total: f64) -> Vec<Complex64> {
+    (0..batch)
+        .map(|bi| {
+            let a = &a[bi * nf..][..nf];
+            let sum: Complex64 = match c.family {
+                Family::Mean => a.iter().sum(),
+                Family::Var => a.iter().map(|v| Complex64::new(v.norm_sqr_exact(), 0.0)).sum(),
+                Family::S2 if c.c1 == c.c2 => a.iter().map(|v| Complex64::new(v.norm_sqr_exact(), 0.0)).sum(),
+                Family::S1 if c.c1 == c.c2 => a.iter().map(|v| Complex64::new(v.norm(), 0.0)).sum(),
+                Family::S1 => {
+                    let b = &b[bi * nf..][..nf];
+                    a.iter().zip(b).map(|(&x, &y)| root_normalise(x) * root_normalise(y).conj()).sum()
+                }
+                _ => {
+                    let b = &b[bi * nf..][..nf];
+                    a.iter().zip(b).map(|(&x, &y)| x * y.conj()).sum()
+                }
+            };
+            sum / n_total
+        })
+        .collect()
+}
+
+/// Sums `[B]` of `|f_p|^2 / n_total`, `f_p` the terms whose mean is the
+/// coefficient (see [`term_sums`]).
+pub(crate) fn term_second_sums(c: &Coefficient, a: &[Complex64], b: &[Complex64], batch: usize, nf: usize, n_total: f64) -> Vec<f64> {
+    (0..batch)
+        .map(|bi| {
+            let a = &a[bi * nf..][..nf];
+            let sum: f64 = match c.family {
+                Family::Mean => a.iter().map(|v| v.norm_sqr()).sum(),
+                Family::Var => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                Family::S2 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr_exact().powi(2)).sum(),
+                Family::S1 if c.c1 == c.c2 => a.iter().map(|v| v.norm_sqr()).sum(),
+                Family::S1 => {
+                    let b = &b[bi * nf..][..nf];
+                    a.iter().zip(b).map(|(&x, &y)| (root_normalise(x) * root_normalise(y).conj()).norm_sqr()).sum()
+                }
+                _ => {
+                    let b = &b[bi * nf..][..nf];
+                    a.iter().zip(b).map(|(&x, &y)| (x * y.conj()).norm_sqr()).sum()
+                }
+            };
+            sum / n_total
+        })
+        .collect()
+}
+
+/// Cotangents `(ga, gb)` `[B, nf]` of the operands `a`, `b` of the
+/// coefficient `c` for its cotangent `g` `[B]` (see [`term_sums`]).  `ga`
+/// is the cotangent of the map (mean, var: real parts), of `z` (S1, S2;
+/// through the modulus for an auto S1) or of the first operand (S3, S4);
+/// `gb` that of `b` (empty for mean, var and the auto S1, S2).
+pub(crate) fn operand_cotangents(
+    c: &Coefficient,
+    a: &[Complex64],
+    b: &[Complex64],
+    g: &[Complex64],
+    batch: usize,
+    nf: usize,
+    n_total: f64,
+) -> (Vec<Complex64>, Vec<Complex64>) {
+    // Per-pixel scaling of a cotangent: ga[b, i] = f(g[b], i).
+    let per = |f: &dyn Fn(Complex64, usize) -> Complex64| -> Vec<Complex64> { (0..batch * nf).map(|k| f(g[k / nf], k)).collect() };
+    match c.family {
+        Family::Mean => (per(&|gi, _| Complex64::new(gi.re / n_total, 0.0)), Vec::new()),
+        Family::Var => (per(&|gi, k| Complex64::new(2.0 * gi.re * a[k].re / n_total, 0.0)), Vec::new()),
+        Family::S1 | Family::S2 if c.c1 == c.c2 => {
+            let ga = if c.family == Family::S1 {
+                let scale: Vec<f64> = (0..batch * nf).map(|k| g[k / nf].re / n_total).collect();
+                modulus_vjp(a, &scale)
+            } else {
+                per(&|gi, k| 2.0 * gi.re * a[k] / n_total)
+            };
+            (ga, Vec::new())
+        }
+        Family::S1 => {
+            let ga = per(&|gi, k| gi * root_normalise(b[k]) / n_total);
+            let gb = per(&|gi, k| gi.conj() * root_normalise(a[k]) / n_total);
+            (root_modulus_vjp(a, &ga), root_modulus_vjp(b, &gb))
+        }
+        _ => (per(&|gi, k| gi * b[k] / n_total), per(&|gi, k| gi.conj() * a[k] / n_total)),
+    }
+}
+
 /// Convolution output `[R, 2L, k]` -> complex `[R, L, |pick|]` at the
 /// output rows `pick` (all by default) (`S3Multiscale._join`).
-fn join(y: &[f64], rows: usize, l: usize, k: usize, pick: Option<&[usize]>) -> Vec<Complex64> {
+pub(crate) fn join(y: &[f64], rows: usize, l: usize, k: usize, pick: Option<&[usize]>) -> Vec<Complex64> {
     let all: Vec<usize>;
     let pick = match pick {
         Some(p) => p,
@@ -1161,7 +1181,7 @@ fn join(y: &[f64], rows: usize, l: usize, k: usize, pick: Option<&[usize]>) -> V
 
 /// Inverse of [`join`]: complex `[R, L, m]` -> `[R, 2L, k]` with the values
 /// at rows `at` (`0..m` by default, then `k = m`), zero elsewhere.
-fn split(g: &[Complex64], rows: usize, l: usize, m: usize, at: Option<(&[usize], usize)>) -> Vec<f64> {
+pub(crate) fn split(g: &[Complex64], rows: usize, l: usize, m: usize, at: Option<(&[usize], usize)>) -> Vec<f64> {
     let k = at.map_or(m, |(_, k)| k);
     let mut out = vec![0.0; rows * 2 * l * k];
     for r in 0..rows {

@@ -27,6 +27,7 @@ its setup (machine, commit, job) so that it can be reproduced.
 | [P. Campeti's ensemble method](campeti_merge.md) | the merge of his package: `stl-bridge`, `stl-ensemble`, validation against his Python, harmonic terms on the GPU |
 | [Production at nside 1024](campeti_production_1024.md) | step by step: calibration, Slurm job on one A100, monitoring and restart, results against the ten Takahashi realisations |
 | [Kappa power spectrum](kappa_power_spectrum.md) | the C_ℓ deficit of Gaussianised syntheses and its correction (`--kappa-table`, level power) |
+| [Disc patches and cross statistics](disc_cross_statistics.md) | `stl-bridge` / `stl_port.native`: statistics on random disc patches (`PatchEngine`) and cross statistics `S(a, b)` (`cross=True`), exact VJPs, for networks trained with STL losses |
 
 ## Research notes
 
@@ -48,5 +49,6 @@ harmonic_speed
 campeti_merge
 campeti_production_1024
 kappa_power_spectrum
+disc_cross_statistics
 diffusion_design
 ```
