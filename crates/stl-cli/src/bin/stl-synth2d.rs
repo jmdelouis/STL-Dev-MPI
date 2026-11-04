@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use stl_cli::planar::{nyquist_filter, standardize, white_noise, Config, Mode, PlanarObjective};
 use stl_cli::proc_memory;
-use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
+use stl_core::lbfgs::{minimize_preconditioned, LbfgsOptions, Local, Preconditioner};
 use stl_core::planar::cascade::{resample, ConditionalDetail, SplitMix};
+use stl_core::planar::transport::{bicubic, gradient, Smoother};
 use stl_core::planar::warp::{reproject, Flow, Warp, WarpState};
 use stl_mpi::io::{read_npy_shape, write_npy_shape};
 
@@ -45,6 +46,16 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
   --anchor K          re-anchor every K iterations: x0 <- x, variables <- 0,
                       new L-BFGS history (default 0: never)
   --reproject         rank-match x0 onto the targets' histogram at every anchor
+  --transport         the --niter iterations are transport steps on the current images
+                      (scheme P): x <- x(p + tau u), u = -K(g grad x), bicubic (Keys),
+                      Armijo backtracking on tau; after --c2f, at the last level only
+  --transport-precond S2
+                      pixel L-BFGS with H0 = S2 I + grad x K grad x^T, frozen and
+                      refreshed every --transport-refresh iterations (default 20)
+  --transport-levels N, --transport-slope B
+                      K = sum_l 2^(B l) 4^l (D^T)^l D^l over N pyramid levels (defaults 6, 0)
+  --transport-step PX first tau: largest displacement of PX pixels (default 0.5);
+                      tau is capped at 2 pixels of displacement
   --c2f LEVELS        coarse-to-fine start (docs/lagrangian_synthesis.md 6.4):
                       square sides, e.g. 32,64,128 (the image side last is
                       implied); pixel L-BFGS at each coarse level (--warm at
@@ -94,6 +105,12 @@ struct Args {
     residual: f64,
     anchor: usize,
     reproject: bool,
+    transport: bool,
+    transport_precond: Option<f64>,
+    transport_refresh: usize,
+    transport_levels: usize,
+    transport_slope: f64,
+    transport_step: f64,
     gpu: bool,
     out: Option<String>,
 }
@@ -126,6 +143,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         residual: 0.0,
         anchor: 0,
         reproject: false,
+        transport: false,
+        transport_precond: None,
+        transport_refresh: 20,
+        transport_levels: 6,
+        transport_slope: 0.0,
+        transport_step: 0.5,
         gpu: false,
         out: None,
     };
@@ -187,6 +210,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--residual" => a.residual = num(it.next(), k)?,
             "--anchor" => a.anchor = num(it.next(), k)?,
             "--reproject" => a.reproject = true,
+            "--transport" => a.transport = true,
+            "--transport-precond" => a.transport_precond = Some(num::<f64>(it.next(), k)?),
+            "--transport-refresh" => a.transport_refresh = num(it.next(), k)?,
+            "--transport-levels" => a.transport_levels = num(it.next(), k)?,
+            "--transport-slope" => a.transport_slope = num::<f64>(it.next(), k)?,
+            "--transport-step" => a.transport_step = num::<f64>(it.next(), k)?,
             "--gpu" => a.gpu = true,
             "--out" => a.out = Some(it.next().ok_or("--out needs a prefix")?.clone()),
             "-h" | "--help" => return Err(USAGE.into()),
@@ -444,7 +473,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     let mut trace_maps: Vec<f64> = Vec::new();
     let mut trace_evals: Vec<usize> = Vec::new();
     let t1 = Instant::now();
-    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>, warm_offset: usize, lag: Option<&Lag>| {
+    let mut lbfgs = |obj: &PlanarObjective, niter: usize, u: &mut Vec<f64>, history: &mut Vec<f64>, warm_offset: usize, lag: Option<&Lag>, pre: Option<&mut dyn Preconditioner>| {
         let opts = LbfgsOptions { lr: 1.0, max_iter: niter, max_eval: None, tolerance_grad: 1e-12, tolerance_change: 1e-15, history_size: a.history };
         let mut f = |z: &[f64]| {
             let t = Instant::now();
@@ -477,7 +506,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
             }
             r
         };
-        minimize(u, &opts, &Local, &mut f)
+        minimize_preconditioned(u, &opts, &Local, &mut f, pre)
     };
     let mut warm_history = Vec::new();
     let mut evals = 0;
@@ -485,7 +514,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         let mut wc = cfg.clone();
         wc.mode = Mode::StlDev;
         let warm = PlanarObjective::new(wc, &t)?;
-        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history, usize::MAX, None);
+        evals += lbfgs(&warm, a.warm, &mut u, &mut warm_history, usize::MAX, None, None);
         report["warm_loss_history"] = serde_json::json!(warm_history);
     }
     if let Some(flow) = a.lagrangian {
@@ -508,16 +537,35 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
             let lag = Lag { warp: &warp, x0: u.clone(), residual: a.residual, planes: a.nbatch * c };
             let mut z = vec![0.0; lag.len()];
             let offset = evals - history.len();
-            evals += lbfgs(&obj, k, &mut z, &mut history, offset, Some(&lag));
+            evals += lbfgs(&obj, k, &mut z, &mut history, offset, Some(&lag), None);
             u = lag.apply(&z).0;
             done += k;
             cycles += 1;
         }
         report["lagrangian"] = serde_json::json!({"flow": format!("{flow:?}"), "disp": rms, "disp_scale": scale, "disp_slope": slope,
             "residual": a.residual, "anchor": a.anchor, "reproject": a.reproject, "cycles": cycles});
+    } else if let Some(s2) = a.transport_precond {
+        let k = Smoother::new(h, w, a.transport_levels, a.transport_slope);
+        let (mut done, mut refreshes) = (0, 0);
+        while done < a.niter {
+            let it = a.transport_refresh.min(a.niter - done);
+            let mut pre = TransportMetric::new(&k, &u, s2);
+            let offset = evals - history.len();
+            evals += lbfgs(&obj, it, &mut u, &mut history, offset, None, Some(&mut pre));
+            done += it;
+            refreshes += 1;
+        }
+        report["transport_precond"] = serde_json::json!({"sigma2": s2, "refresh": a.transport_refresh, "refreshes": refreshes, "weights": k.weights});
+    } else if a.transport {
+        drop(lbfgs);
+        let k = Smoother::new(h, w, a.transport_levels, a.transport_slope);
+        let r = transport(&obj, &k, &mut u, a.niter, a.transport_step, &mut history, &mut times);
+        evals += history.len();
+        report["transport"] = serde_json::json!({"weights": k.weights, "first_step_pixels": a.transport_step, "steps": r.0, "taus": r.1, "max_displacements": r.2});
     } else {
-        evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals, None);
+        evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals, None, None);
     }
+    #[allow(dropping_references)]
     drop(lbfgs);
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
@@ -561,6 +609,110 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         std::fs::write(format!("{p}.json"), serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;
     }
     Ok(report)
+}
+
+/// `P = s2 I + grad x K grad x^T` per plane, `grad x` frozen at the images
+/// it was built from: the metric of the transport step, linearised.
+struct TransportMetric<'a> {
+    k: &'a Smoother,
+    grads: Vec<(Vec<f64>, Vec<f64>)>,
+    s2: f64,
+}
+
+impl<'a> TransportMetric<'a> {
+    fn new(k: &'a Smoother, u: &[f64], s2: f64) -> Self {
+        TransportMetric { k, grads: u.chunks(k.h * k.w).map(|x| gradient(x, k.h, k.w)).collect(), s2 }
+    }
+}
+
+impl Preconditioner for TransportMetric<'_> {
+    fn apply(&self, g: &[f64]) -> Vec<f64> {
+        let n = self.k.h * self.k.w;
+        let mut out = Vec::with_capacity(g.len());
+        for (gp, (gr, gc)) in g.chunks(n).zip(&self.grads) {
+            let kr = self.k.apply(&gp.iter().zip(gr).map(|(a, b)| a * b).collect::<Vec<_>>());
+            let kc = self.k.apply(&gp.iter().zip(gc).map(|(a, b)| a * b).collect::<Vec<_>>());
+            out.extend((0..n).map(|p| self.s2 * gp[p] + gr[p] * kr[p] + gc[p] * kc[p]));
+        }
+        out
+    }
+}
+
+/// Velocity `-K(g grad x)` of every plane, and the slope `<g, grad x . v>`.
+fn velocity(k: &Smoother, u: &[f64], g: &[f64]) -> (Vec<(Vec<f64>, Vec<f64>)>, f64) {
+    let n = k.h * k.w;
+    let mut slope = 0.0;
+    let v = u
+        .chunks(n)
+        .zip(g.chunks(n))
+        .map(|(x, gp)| {
+            let (gr, gc) = gradient(x, k.h, k.w);
+            let vr: Vec<f64> = k.apply(&gp.iter().zip(&gr).map(|(a, b)| a * b).collect::<Vec<_>>()).into_iter().map(|v| -v).collect();
+            let vc: Vec<f64> = k.apply(&gp.iter().zip(&gc).map(|(a, b)| a * b).collect::<Vec<_>>()).into_iter().map(|v| -v).collect();
+            slope += (0..n).map(|p| gp[p] * (gr[p] * vr[p] + gc[p] * vc[p])).sum::<f64>();
+            (vr, vc)
+        })
+        .collect();
+    (v, slope)
+}
+
+/// Scheme P: `niter` transport steps `x <- x(p + tau v)`, `v = -K(g grad x)`,
+/// Armijo backtracking on `tau` (doubled after an accepted step, capped at a
+/// displacement of 2 pixels).  Every loss evaluation is pushed on
+/// `history`.  Returns the accepted steps, their `tau` and largest
+/// displacements.
+fn transport(obj: &PlanarObjective, k: &Smoother, u: &mut Vec<f64>, niter: usize, first_px: f64, history: &mut Vec<f64>, times: &mut Vec<f64>) -> (usize, Vec<f64>, Vec<f64>) {
+    let n = k.h * k.w;
+    let mut eval = |x: &[f64], history: &mut Vec<f64>| {
+        let t = Instant::now();
+        let r = obj.loss_and_grad(x);
+        times.push(t.elapsed().as_secs_f64());
+        history.push(r.0);
+        if history.len() % 10 == 1 {
+            eprintln!("eval {:4}  loss {:.6e}  {:.3} s", history.len(), r.0, times.last().unwrap());
+        }
+        r
+    };
+    let (mut loss, mut g) = eval(u, history);
+    let (mut taus, mut disps) = (Vec::new(), Vec::new());
+    let mut tau = f64::NAN;
+    let mut steps = 0;
+    while history.len() < niter {
+        let (v, slope) = velocity(k, u, &g);
+        if slope >= 0.0 {
+            break;
+        }
+        let vmax = v.iter().flat_map(|(r, c)| r.iter().chain(c)).fold(0.0f64, |m, x| m.max(x.abs()));
+        if vmax == 0.0 {
+            break;
+        }
+        tau = if tau.is_nan() { first_px / vmax } else { (2.0 * tau).min(2.0 / vmax) };
+        let mut accepted = false;
+        while history.len() < niter {
+            let x: Vec<f64> = u
+                .chunks(n)
+                .zip(&v)
+                .flat_map(|(x, (vr, vc))| {
+                    let (sr, sc): (Vec<f64>, Vec<f64>) = (vr.iter().map(|a| tau * a).collect(), vc.iter().map(|a| tau * a).collect());
+                    bicubic(x, k.h, k.w, &sr, &sc)
+                })
+                .collect();
+            let (l, gn) = eval(&x, history);
+            if l <= loss + 1e-4 * tau * slope {
+                (*u, loss, g) = (x, l, gn);
+                accepted = true;
+                break;
+            }
+            tau *= 0.5;
+        }
+        if !accepted {
+            break;
+        }
+        taus.push(tau);
+        disps.push(tau * vmax);
+        steps += 1;
+    }
+    (steps, taus, disps)
 }
 
 #[cfg(feature = "gpu")]

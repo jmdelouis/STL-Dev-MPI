@@ -8,6 +8,7 @@ pub mod engine;
 pub mod grid;
 pub mod kernels;
 pub mod spectrum;
+pub mod transport;
 pub mod warp;
 
 pub use engine::{PlanarEngine, Pyramid};
