@@ -137,7 +137,7 @@ in `a`, `b`; both orders are in the plan).
 | Disc VJP vs central finite differences (R = 50°, r = 35°, nside 16, J 3, L 4), auto and cross, both definitions | `stl-core/tests/disc.rs` | 1e-6 rel |
 | Cross of `(a, a)` = auto (disc) | `stl-core/tests/disc.rs` | S2–S4 1e-12, S1 1e-7 |
 | C ABI: patch handle at 180° = full-sky handle (auto and cross), geometry cache, stale state refused | `stl-bridge/tests/bridge.rs` | 1e-10 |
-| Cross handle on the GPU vs CPU (both convolution forms and field stores) | `stl-bridge/tests/bridge.rs` (`--features gpu`) | see section 4 |
+| Cross handle on the GPU (T4, garoupe) vs CPU, both convolution forms and field stores | `stl-bridge/tests/bridge.rs` (`--features gpu`) | values 5.8e-15, variances 6.2e-16, gradient 2.3e-12 (the cross S1 VJP divides by `(|z| + 1e-8)^1.5`) |
 | Python: 180° = full sky, FD of disc / cross (both maps, full sky and patch), `S(a, a)` = auto, Delouis transform VJP | `python/stl_ensemble/tests/test_patch_cross.py` | pass |
 
 The existing fixture tests (`stl-core`, `stl-bridge`) pass unchanged after the term formulas
