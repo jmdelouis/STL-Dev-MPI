@@ -2,7 +2,7 @@
 \section{Coarse-to-fine starts with conditional details (preliminary)}
 \label{app:c2f}
 
-This appendix describes a start for the syntheses that cuts the number of L-BFGS iterations several-fold on planar turbulence. It is written so that it can be reimplemented without the code. It has been tested only on the planar engine of STL-Dev-MPI so far; the HEALPix version is in progress. The details, the scripts and all the raw numbers are in \texttt{docs/lagrangian\_synthesis.md} of the repository.
+This appendix describes a start for the syntheses that cuts the number of L-BFGS iterations several-fold on planar turbulence. It is written so that it can be reimplemented without the code. It was tested on the planar engine of STL-Dev-MPI and, more briefly, on the sphere (Sect.~\ref{app:c2f_healpix}). The details, the scripts and all the raw numbers are in \texttt{docs/lagrangian\_synthesis.md} of the repository.
 
 \subsection{Why the syntheses are slow}
 
@@ -81,3 +81,21 @@ stl-synth2d --target Turb_6.npy --mode ensemble --gpu \
   --warm 100 --niter 400 --out run
 \end{verbatim}
 \texttt{--c2f} lists the coarse levels (the image side is implied), \texttt{--c2f-iter} their iteration counts, \texttt{--warm} applies to the coarsest level, \texttt{--c2f-detail white} replaces the conditional draw, and \texttt{--c2f-bins} sets $q$. The draws are reproducible from \texttt{--seed}, and the maps of every level are written next to the final ones. The tests check that every drawn detail comes from the pool of its own bin, with the target's conditional mean, and that the draws are deterministic.
+
+\subsection{On the sphere}
+\label{app:c2f_healpix}
+
+On HEALPix the chain is driven by successive runs of \texttt{stl-synth}, each started from the synthesis of the nside below (\texttt{--init}), whose values are copied on the four children of every pixel, with \texttt{--init-noise conditional}.
+\begin{itemize}
+\item \emph{The bins.} The detail of a child is drawn from the target's details (a pixel minus the mean of its parent) in the same joint bin of two features of the parent: its value and its local variation $\big(\frac{1}{8}\sum_{q}(x_q-x_p)^2\big)^{1/2}$ over its eight neighbours, the sphere's form of the gradient modulus.
+\item \emph{Independence from the ranks.} The bin edges and the histograms of the details per bin (4096 cells each) are reduced over all the ranks, and the draw of a pixel depends only on the seed and its NESTED index, so the result does not depend on the number of ranks.
+\end{itemize}
+
+On the convergence map r000 of \citet{takahashi2017} at $\nside=128$ (single-map loss of \texttt{stl-synth}, $L=4$, one T4), the chain $32\to64\to128$ (300, 200 and 1000 iterations) starts the last level at a loss of $9.4\times10^{-4}$, against $1.9\times10^{-2}$ with white details. At the same cost it is ahead of pixel L-BFGS from white noise, with losses 2.6 and 2 times lower after 200 and 400 equivalent evaluations. All the runs end on the same floor ($6$--$8\times10^{-8}$), because this single-map loss has no slow phase from white noise. The syntheses from white noise, directly or with white details, keep a pixel-scale checkerboard that the target does not have, and the conditional one does not (Fig.~\ref{fig:c2f_kappa}). The ensemble objective with several references (Sect.~\ref{sec:ensembles}), whose slow convergence motivated the method, has not been tested yet.
+
+\begin{figure*}
+\centering
+\figfile{figures/c2f_kappa128.png}{\textwidth}
+\caption{Gnomonic views (centre $(30^\circ, 30^\circ)$, histogram-equalised colours on one scale) of the convergence map r000 at $\nside=128$ and of three syntheses after 1000 iterations at that nside: pixel L-BFGS from white noise, and the coarse-to-fine chain with white and with conditional details.}
+\label{fig:c2f_kappa}
+\end{figure*}

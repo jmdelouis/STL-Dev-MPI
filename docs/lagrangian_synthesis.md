@@ -680,3 +680,20 @@ indistinguishable from the conditional draw alone. Both reach every
 loss level about 2 times sooner than pixel L-BFGS from noise. Within the
 300-evaluation budget, neither reaches pixel L-BFGS's final 1e-7
 (1055 evaluations).
+
+### 6.6 HEALPix: `stl-synth --init-noise conditional` (single κ map, nside 128)
+
+`stl_cli::conditional`. The chain is driven by successive `stl-synth` runs (`--init` from the previous nside, copied on the children). The detail of each child is drawn from the target's details (pixel minus parent mean) in the same bin of the parent's value and local variation over its 8 neighbours. The bin edges and the per-bin histograms (4096 cells) are global, and every draw depends only on the seed and the NESTED index, so the result is identical on any number of ranks (tests in `crates/stl-cli/tests/conditional.rs`). The bench is Takahashi κ r000 at nside 128, single-map loss of `stl-synth`, one T4 per chain: 32 (300 iterations) → 64 (200) → 128 (1000), against pixel L-BFGS from white noise (1000 iterations). Data are in `benchmarks/lagrangian/healpix128/`.
+
+| equivalent nside-128 evals | 100 | 200 | 400 | 600 | 1000 |
+|---|---|---|---|---|---|
+| pixel from white noise | 7.7e-6 | 6.8e-7 | 1.7e-7 | 9.1e-8 | 6.1e-8 |
+| c2f, white details (`auto`) | 3.1e-4 | 1.1e-6 | 1.6e-7 | 8.3e-8 | 7.7e-8 |
+| c2f, conditional details | 4.4e-5 | 2.6e-7 | 8.7e-8 | 8.0e-8 | 7.8e-8 |
+
+Results:
+
+- The conditional draw starts the nside-128 level at 9.4e-4, against 1.9e-2 with white details. It is ahead of pixel L-BFGS from 200 to 600 equivalent evaluations (2.6 and 2 times lower at 200 and 400).
+- All three end on the same floor (6–8e-8). This single-map loss has no slow phase from white noise (4.5e-2 to 7.7e-6 in 100 evaluations), unlike the planar ensemble loss.
+- Visually (`hpcmp_maps.png`, gnomonic views with `norm='hist'`, one scale), the pixel and white-detail syntheses keep a pixel-scale checkerboard that the target does not have; the conditional one does not.
+- The case that motivated the method, the ensemble objective of `stl-ensemble` (2500 iterations at nside 1024), has not been tested yet: its `--init` works on the Gaussianised field `g`.
