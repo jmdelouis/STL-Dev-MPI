@@ -32,16 +32,16 @@ use std::sync::Arc;
 use stl_core::engine::{EngineConfig, LocalEngine};
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
 use stl_core::local::LocalGeometry;
-use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState};
+use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState, DiscSupport};
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::stencil::Gauge;
 #[cfg(feature = "gpu")]
 use stl_core::engine::{Partition, Serial};
 #[cfg(feature = "gpu")]
-use stl_gpu::{ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, HostForwardState};
+use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-11-04-v3";
+pub const VERSION: &str = "2026-11-05-v4";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -438,9 +438,12 @@ pub unsafe extern "C" fn stlp_lbfgs(x: *mut f64, n: usize, options: *const c_cha
 type DiscKey = [u64; 5];
 
 /// Disc-patch statistics ([`stl_core::disc`]): the plan of `stlp_new`
-/// (one channel, or the cross terms of two), CPU, the patches of a batch
+/// (one channel, or the cross terms of two).  CPU: the patches of a batch
 /// evaluated on `threads` host threads, the geometry of the last `cache`
-/// discs kept (key: centre, radius, core).
+/// discs kept (key: centre, radius, core).  GPU (`stl_gpu::disc`): the
+/// supports and decimations of the last `cache` discs kept on the host
+/// (built on `threads` threads), their convolution geometry on the device
+/// within `cache_bytes`.
 pub struct PatchHandle {
     geo: LocalGeometry,
     cfg: EngineConfig,
@@ -448,13 +451,46 @@ pub struct PatchHandle {
     channels: usize,
     threads: usize,
     capacity: usize,
-    cache: HashMap<DiscKey, Arc<DiscGeometry>>,
+    cache: HashMap<DiscKey, Disc>,
     order: VecDeque<DiscKey>,
     hits: u64,
     misses: u64,
-    selected: Vec<Arc<DiscGeometry>>,
+    selected: Vec<(DiscKey, Disc)>,
     states: Vec<DiscState>,
     current: Option<u64>,
+    #[cfg(feature = "gpu")]
+    device: Option<GpuDiscEngine>,
+}
+
+/// A cached disc: the CPU operators, or the support of the device engine.
+#[derive(Clone)]
+enum Disc {
+    Cpu(Arc<DiscGeometry>),
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    Gpu(Arc<DiscSupport>),
+}
+
+impl Disc {
+    fn ids(&self) -> &[i64] {
+        match self {
+            Disc::Cpu(g) => &g.ids[0],
+            Disc::Gpu(s) => &s.ids[0],
+        }
+    }
+
+    fn core_pixels(&self, n: usize) -> usize {
+        match self {
+            Disc::Cpu(g) => g.core_pixels(n),
+            Disc::Gpu(s) => s.core_pixels(n),
+        }
+    }
+
+    fn cpu(&self) -> &Arc<DiscGeometry> {
+        match self {
+            Disc::Cpu(g) => g,
+            Disc::Gpu(_) => unreachable!("device disc on the CPU path"),
+        }
+    }
 }
 
 /// `f(item)` for every item on `threads` scoped threads (contiguous
@@ -484,13 +520,22 @@ impl PatchHandle {
     }
 
     fn sizes(&self) -> Vec<usize> {
-        self.selected.iter().map(|g| g.ids[0].len()).collect()
+        self.selected.iter().map(|(_, g)| g.ids().len()).collect()
+    }
+
+    fn on_device(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        return self.device.is_some();
+        #[cfg(not(feature = "gpu"))]
+        false
     }
 }
 
 /// New patch handle from a JSON configuration: `nside`, `j`, `kernel` (5),
 /// `orientations` (4), `cross` (false), `threads` (0: `STL_THREADS`, else
-/// every CPU), `cache` (256 disc geometries).  Null on failure.
+/// every CPU), `cache` (256 discs), `backend` (`cpu` | `gpu`); GPU only:
+/// `device` (0), `cache_bytes` (device bytes for the disc geometries;
+/// default half the free device memory).  Null on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHandle {
     guard(std::ptr::null_mut(), || {
@@ -510,11 +555,28 @@ pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHand
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
             t => t,
         };
+        let channels = if cross { 2 } else { 1 };
+        #[cfg(feature = "gpu")]
+        let device = match v["backend"].as_str().unwrap_or("cpu") {
+            "gpu" => {
+                let gpu = Arc::new(Gpu::new(integer(&v, "device", 0)).expect("CUDA initialisation"));
+                let budget = integer(&v, "cache_bytes", gpu.memory().0 / 2);
+                Some(GpuDiscEngine::new(gpu, &geo, &cfg, channels, budget))
+            }
+            "cpu" => None,
+            other => panic!("backend must be cpu or gpu, not {other:?}"),
+        };
+        #[cfg(not(feature = "gpu"))]
+        match v["backend"].as_str().unwrap_or("cpu") {
+            "cpu" => {}
+            "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
+            other => panic!("backend must be cpu or gpu, not {other:?}"),
+        }
         Box::into_raw(Box::new(PatchHandle {
             geo,
             cfg,
             plan,
-            channels: if cross { 2 } else { 1 },
+            channels,
             threads,
             capacity: integer(&v, "cache", 256),
             cache: HashMap::new(),
@@ -524,6 +586,8 @@ pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHand
             selected: Vec::new(),
             states: Vec::new(),
             current: None,
+            #[cfg(feature = "gpu")]
+            device,
         }))
     })
 }
@@ -546,7 +610,19 @@ pub unsafe extern "C" fn stlp_patch_info(p: *mut PatchHandle) -> *mut c_char {
             "nside": h.geo.nside0, "j": h.cfg.j_count, "levels": h.cfg.levels(), "channels": h.channels, "cross": h.channels == 2,
             "dtype": "float64/complex128", "fewer": false, "threads": h.threads, "plan": plan_json(&h.plan),
             "cache": {"capacity": h.capacity, "entries": h.cache.len(), "hits": h.hits, "misses": h.misses},
-            "selected": h.sizes()});
+            "backend": if h.on_device() { "gpu" } else { "cpu" }, "selected": h.sizes()});
+        #[cfg(feature = "gpu")]
+        let info = {
+            let mut info = info;
+            if let Some(e) = &h.device {
+                let (entries, used, budget) = e.cache_info();
+                let (free, total) = e.gpu().memory();
+                info["device"] = json!({"name": e.gpu().name, "ordinal": e.gpu().ordinal(), "free": free, "total": total,
+                    "cache": {"entries": entries, "bytes": used, "budget": budget, "hits": e.hits, "misses": e.misses},
+                    "timers": e.timers()});
+            }
+            info
+        };
         CString::new(info.to_string()).unwrap().into_raw()
     })
 }
@@ -599,9 +675,13 @@ pub unsafe extern "C" fn stlp_patch_select(p: *mut PatchHandle, centres: *const 
         }
         let levels = h.cfg.levels();
         let geo = &h.geo;
-        let built = parallel(missing, h.threads, |(k, c)| (k, Arc::new(DiscGeometry::new(geo, levels, c, radius, core))));
-        let fresh: HashMap<DiscKey, Arc<DiscGeometry>> = built.into_iter().collect();
-        h.selected = keys.iter().map(|k| fresh.get(k).or_else(|| h.cache.get(k)).unwrap().clone()).collect();
+        let device = h.on_device();
+        let built = parallel(missing, h.threads, |(k, c)| {
+            let s = DiscSupport::new(geo, levels, c, radius, core);
+            (k, if device { Disc::Gpu(Arc::new(s)) } else { Disc::Cpu(Arc::new(DiscGeometry::bind(geo, s))) })
+        });
+        let fresh: HashMap<DiscKey, Disc> = built.into_iter().collect();
+        h.selected = keys.iter().map(|k| (*k, fresh.get(k).or_else(|| h.cache.get(k)).unwrap().clone())).collect();
         for (k, g) in fresh {
             if h.capacity > 0 {
                 h.cache.insert(k, g);
@@ -623,7 +703,7 @@ pub unsafe extern "C" fn stlp_patch_select(p: *mut PatchHandle, centres: *const 
 pub unsafe extern "C" fn stlp_patch_ids(p: *mut PatchHandle, i: usize, out: *mut i64) -> i32 {
     guard(-1, || {
         let h = &*p;
-        let ids = &h.selected.get(i).expect("disc index out of range").ids[0];
+        let ids = h.selected.get(i).expect("disc index out of range").1.ids();
         std::slice::from_raw_parts_mut(out, ids.len()).copy_from_slice(ids);
         0
     })
@@ -638,7 +718,7 @@ pub unsafe extern "C" fn stlp_patch_core_pixels(p: *mut PatchHandle, out: *mut u
         let h = &*p;
         let levels = h.cfg.levels();
         let out = std::slice::from_raw_parts_mut(out, h.selected.len() * levels);
-        for (o, g) in out.chunks_mut(levels).zip(&h.selected) {
+        for (o, (_, g)) in out.chunks_mut(levels).zip(&h.selected) {
             for (n, v) in o.iter_mut().enumerate() {
                 *v = g.core_pixels(n);
             }
@@ -661,15 +741,20 @@ pub unsafe extern "C" fn stlp_patch_forward(p: *mut PatchHandle, x: *const f64, 
         let sizes: Vec<usize> = h.sizes().iter().map(|s| s * h.channels).collect();
         assert_eq!(n, sizes.iter().sum::<usize>(), "input shape mismatch");
         let x = std::slice::from_raw_parts(x, n);
+        #[cfg(feature = "gpu")]
+        if h.on_device() {
+            device_forward(h, Patches::Host(x), generation, moments, out, var);
+            return 0;
+        }
         let mut offset = 0;
         let jobs: Vec<(Arc<DiscGeometry>, &[f64])> = h
             .selected
             .iter()
             .zip(&sizes)
-            .map(|(g, &s)| {
+            .map(|((_, g), &s)| {
                 let part = &x[offset..offset + s];
                 offset += s;
-                (g.clone(), part)
+                (g.cpu().clone(), part)
             })
             .collect();
         let (model, plan) = (h.model(), &h.plan);
@@ -699,14 +784,21 @@ pub unsafe extern "C" fn stlp_patch_forward(p: *mut PatchHandle, x: *const f64, 
 #[no_mangle]
 pub unsafe extern "C" fn stlp_patch_vjp(p: *mut PatchHandle, cot: *const f64, n: usize, generation: u64, out: *mut f64) -> i32 {
     guard(-1, || {
-        let h = &*p;
+        let h = &mut *p;
         assert_eq!(h.current, Some(generation), "stale forward state");
         let nc = h.plan.len();
         assert_eq!(n, h.selected.len() * nc, "cotangent shape mismatch");
         let c: Vec<Complex64> = std::slice::from_raw_parts(cot, 2 * n).chunks(2).map(|v| Complex64::new(v[0], v[1])).collect();
+        #[cfg(feature = "gpu")]
+        if let Some(e) = h.device.as_mut() {
+            let g = e.reverse(&h.plan, &c);
+            std::slice::from_raw_parts_mut(out, g.len()).copy_from_slice(&g);
+            return 0;
+        }
+        let h = &*h;
         let (model, plan) = (h.model(), &h.plan);
         let grads = parallel((0..h.selected.len()).collect(), h.threads, |i: usize| {
-            model.reverse(&h.selected[i], &h.states[i], plan, &c[i * nc..(i + 1) * nc])
+            model.reverse(h.selected[i].1.cpu(), &h.states[i], plan, &c[i * nc..(i + 1) * nc])
         });
         let total: usize = grads.iter().map(Vec::len).sum();
         let o = std::slice::from_raw_parts_mut(out, total);
@@ -716,5 +808,74 @@ pub unsafe extern "C" fn stlp_patch_vjp(p: *mut PatchHandle, cot: *const f64, n:
             offset += g.len();
         }
         0
+    })
+}
+
+/// The device forward of the selected discs (GPU patch handle).
+#[cfg(feature = "gpu")]
+unsafe fn device_forward(h: &mut PatchHandle, x: Patches, generation: u64, moments: bool, out: *mut f64, var: *mut f64) {
+    let e = h.device.as_mut().expect("not a GPU patch handle");
+    let discs: Vec<(DiscKey, &DiscSupport)> = h
+        .selected
+        .iter()
+        .map(|(k, d)| match d {
+            Disc::Gpu(s) => (*k, &**s),
+            Disc::Cpu(_) => unreachable!("CPU disc on the device path"),
+        })
+        .collect();
+    let (values, variance) = e.forward_from(&discs, x, &h.plan, moments);
+    let o = std::slice::from_raw_parts_mut(out, 2 * values.len());
+    for (k, z) in values.iter().enumerate() {
+        o[2 * k] = z.re;
+        o[2 * k + 1] = z.im;
+    }
+    if moments {
+        std::slice::from_raw_parts_mut(var, variance.len()).copy_from_slice(&variance);
+    }
+    h.current = Some(generation);
+}
+
+/// [`stlp_patch_forward`] reading the patches at the device address `x`
+/// (`f64`, `n` values, the layout of `stlp_patch_forward`) of the handle's
+/// device, e.g. a contiguous CUDA tensor whose stream the caller has
+/// synchronised.  GPU patch handles only.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_forward_device(p: *mut PatchHandle, x: u64, n: usize, generation: u64, moments: bool, out: *mut f64, var: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        h.states.clear();
+        assert!(!h.selected.is_empty(), "no disc selected");
+        assert_eq!(n, h.channels * h.sizes().iter().sum::<usize>(), "input shape mismatch");
+        assert!(x != 0, "null device address");
+        #[cfg(feature = "gpu")]
+        if h.on_device() {
+            device_forward(h, Patches::Device(x), generation, moments, out, var);
+            return 0;
+        }
+        let _ = (generation, moments, out, var);
+        panic!("device input needs a GPU patch handle (backend gpu)")
+    })
+}
+
+/// [`stlp_patch_vjp`] writing the patch cotangents to the device address
+/// `out` (`f64`, the layout of the forward input) of the handle's device;
+/// the device work is finished on return.  GPU patch handles only.  0, or
+/// -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_patch_vjp_device(p: *mut PatchHandle, cot: *const f64, n: usize, generation: u64, out: u64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        assert_eq!(h.current, Some(generation), "stale forward state");
+        assert_eq!(n, h.selected.len() * h.plan.len(), "cotangent shape mismatch");
+        assert!(out != 0, "null device address");
+        let c: Vec<Complex64> = std::slice::from_raw_parts(cot, 2 * n).chunks(2).map(|v| Complex64::new(v[0], v[1])).collect();
+        #[cfg(feature = "gpu")]
+        if let Some(e) = h.device.as_mut() {
+            e.reverse_device(&h.plan, &c, out);
+            return 0;
+        }
+        let _ = c;
+        panic!("device output needs a GPU patch handle (backend gpu)")
     })
 }

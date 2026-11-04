@@ -37,6 +37,12 @@ use std::f64::consts::PI;
 
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 
+/// Binding threshold of the disc convolutions
+/// ([`crate::conv::ConvGeometry::rows_eps`]): interpolation cells of weight
+/// at most `BIND_EPS` are not read, so that the stencils of the edge rows do
+/// not depend on rounding (host and device agree).
+pub const BIND_EPS: f64 = 1e-9;
+
 /// Unit vector of the NESTED pixel centre `pix` at `nside`.
 pub fn pixel_vector(pix: i64, nside: i64) -> [f64; 3] {
     let (theta, phi) = pix2ang_nest(pix, nside);
@@ -82,19 +88,19 @@ pub fn disc_pixels(nside: i64, centre: [f64; 3], radius: f64) -> Vec<i64> {
     cells
 }
 
-/// Operators of one disc patch, level by level.
-pub struct DiscGeometry {
+/// Support of one disc patch, level by level, without the convolution
+/// (what a device engine binds itself): pixels, averaging pixels and
+/// decimations.
+pub struct DiscSupport {
     /// Support of every level, sorted NESTED ids.
     pub ids: Vec<Vec<i64>>,
     /// Positions in `ids[n]` of the pixels averaged at level `n`.
     pub core: Vec<Vec<usize>>,
-    /// Wavelet of level `n` on its support.
-    pub conv: Vec<ConvPlan>,
     /// Decimation `d -> d + 1` restricted to the support (`down[d].out_ids == ids[d + 1]`).
     pub down: Vec<Down>,
 }
 
-impl DiscGeometry {
+impl DiscSupport {
     /// Disc of the angle `radius` (radians) around `centre` (any nonzero
     /// vector), statistics averaged within `core` (radians) if given.
     pub fn new(geo: &LocalGeometry, levels: usize, centre: [f64; 3], radius: f64, core: Option<f64>) -> Self {
@@ -134,8 +140,57 @@ impl DiscGeometry {
             });
             c = c.map(|cells| parents(&cells));
         }
-        let conv = (0..levels).map(|n| geo.conv_plan(n, &ids[n], &ids[n])).collect();
-        DiscGeometry { ids, core, conv, down }
+        DiscSupport { ids, core, down }
+    }
+
+    /// Number of pyramid levels.
+    pub fn levels(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Number of pixels averaged at level `n`.
+    pub fn core_pixels(&self, n: usize) -> usize {
+        self.core[n].len()
+    }
+
+    /// Host bytes held (ids, core positions, decimations).
+    pub fn bytes(&self) -> usize {
+        let csr = |c: &crate::decimation::Csr| (c.indptr.len() + c.indices.len()) * 8 + c.values.len() * 8;
+        self.ids.iter().map(|v| v.len() * 8).sum::<usize>()
+            + self.core.iter().map(|v| v.len() * 8).sum::<usize>()
+            + self.down.iter().map(|d| d.out_ids.len() * 8 + csr(&d.forward) + csr(&d.transposed)).sum::<usize>()
+    }
+}
+
+/// Operators of one disc patch, level by level.
+pub struct DiscGeometry {
+    /// Support of every level, sorted NESTED ids.
+    pub ids: Vec<Vec<i64>>,
+    /// Positions in `ids[n]` of the pixels averaged at level `n`.
+    pub core: Vec<Vec<usize>>,
+    /// Wavelet of level `n` on its support.
+    pub conv: Vec<ConvPlan>,
+    /// Decimation `d -> d + 1` restricted to the support (`down[d].out_ids == ids[d + 1]`).
+    pub down: Vec<Down>,
+}
+
+impl DiscGeometry {
+    /// Disc of the angle `radius` (radians) around `centre` (any nonzero
+    /// vector), statistics averaged within `core` (radians) if given.
+    pub fn new(geo: &LocalGeometry, levels: usize, centre: [f64; 3], radius: f64, core: Option<f64>) -> Self {
+        Self::bind(geo, DiscSupport::new(geo, levels, centre, radius, core))
+    }
+
+    /// Patch on the level-0 support `ids0` (sorted NESTED), averaged on
+    /// `core0` (sorted subset) or on the whole support.
+    pub fn from_support(geo: &LocalGeometry, levels: usize, ids0: Vec<i64>, core0: Option<Vec<i64>>) -> Self {
+        Self::bind(geo, DiscSupport::from_support(geo, levels, ids0, core0))
+    }
+
+    /// The wavelet of every level bound to the support `s`.
+    pub fn bind(geo: &LocalGeometry, s: DiscSupport) -> Self {
+        let conv = (0..s.levels()).map(|n| geo.conv_plan_eps(n, &s.ids[n], &s.ids[n], BIND_EPS)).collect();
+        DiscGeometry { ids: s.ids, core: s.core, conv, down: s.down }
     }
 
     /// Number of pyramid levels.

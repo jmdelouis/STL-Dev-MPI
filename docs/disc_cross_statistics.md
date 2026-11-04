@@ -3,7 +3,8 @@
 Two additions to the Python bridge (`stl_port.native`, C ABI of `crates/stl-bridge`) for
 training networks whose loss is made of STL statistics (Healpix-STL-IA): the statistics of a map
 known only on a **disc patch** of the sphere, and the **cross statistics** `S(a, b)` of two maps,
-both with exact gradients. Branch `claude/disc-cross-stats`, bridge version `2026-11-04-v3`.
+both with exact gradients, on the CPU or on a GPU (section 2.4). Branch `claude/disc-cross-stats`,
+bridge version `2026-11-05-v4`.
 
 ## 1. Definitions
 
@@ -128,6 +129,37 @@ the call, and split the gradient back. For the three losses of Delouis et al. (2
 `<S(T, u + n)>`, use a cross engine with the pair in the order written (S3/S4 are not symmetric
 in `a`, `b`; both orders are in the plan).
 
+### 2.4 GPU patch engine
+
+```python
+pe = PatchEngine(nside, j, cross=True, backend="gpu", device=0, cache=800, cache_bytes=None)
+# same select / gather / forward / vjp / forward_cross / vjp_cross / native_pixels
+values, var = pe.forward_device(x)    # x: contiguous float64 CUDA tensor on the engine's device,
+                                      # the selected patches concatenated (cross: [2, n_i] flattened)
+g = pe.vjp_device(cot)                # float64 CUDA tensor laid out as x
+```
+
+Same definitions and plan as the CPU engine (`stl_gpu::disc::GpuDiscEngine`, C ABI
+`stlp_patch_new` with `"backend": "gpu"`, `stlp_patch_forward_device`, `stlp_patch_vjp_device`):
+
+- The patches of a batch are grouped by disc: the members of a group (e.g. the pairs drawn on one
+  disc) share its operators and run as the rows of one launch per operator.
+- Per disc, the convolution geometry of every level is computed on the device on the support
+  (the bound stencils of `stl_gpu::geometry`, renormalised as on the CPU), once for the support
+  rows and once for the core rows (the second wavelets are only read on the core); the restricted
+  decimations come from the host support (`stl_core::disc::DiscSupport`, built on `threads` host
+  threads, the last `cache` kept). The device geometries are kept within `cache_bytes` (default:
+  half the free device memory at creation), least recently used out first; the discs of the
+  current batch always stay.
+- The term sums run in one launch per level for every (coefficient, patch), the cotangents in
+  one launch per level for every (operand row, patch, core pixel), contributions in plan order.
+- `forward_device` / `vjp_device` read the patches from and write the gradient to device memory
+  (no host copy of the maps); the caller's stream is synchronised by the wrapper. Values,
+  variances and coefficient cotangents stay on the host (`[B, ncoeff]`).
+- `info()["device"]`: device name and memory, geometry cache (entries, bytes, budget, hits,
+  misses) and timers (`geometry`, `forward_fields`, `forward_terms`, `reverse_terms`,
+  `reverse_chain`).
+
 ## 3. Validation
 
 | Test | Where | Result |
@@ -138,10 +170,23 @@ in `a`, `b`; both orders are in the plan).
 | Cross of `(a, a)` = auto (disc) | `stl-core/tests/disc.rs` | S2–S4 1e-12, S1 1e-7 |
 | C ABI: patch handle at 180° = full-sky handle (auto and cross), geometry cache, stale state refused | `stl-bridge/tests/bridge.rs` | 1e-10 |
 | Cross handle on the GPU (T4, garoupe) vs CPU, both convolution forms and field stores | `stl-bridge/tests/bridge.rs` (`--features gpu`) | values 5.8e-15, variances 6.2e-16, gradient 2.3e-12 (the cross S1 VJP divides by `(|z| + 1e-8)^1.5`) |
+| GPU patch handle (T4) vs CPU: 7 patches on 4 discs (groups of 1 to 3), R 40°, with and without a core 25°, auto and cross, device cache below one disc | `stl-bridge/tests/bridge.rs` (`--features gpu`) | auto: values 1.3e-15, gradient 2.5e-14; cross: values 1.1e-14, gradient 1.5e-12 |
+| GPU patch handle at 180° = CPU full-sky handle (auto and cross) | `stl-bridge/tests/bridge.rs` | values 5.7e-15, gradient 2.9e-13 |
+| Device-pointer forward / VJP = host forward / VJP | `stl-bridge/tests/bridge.rs` | bit-identical |
+| Python GPU `PatchEngine` vs CPU (auto, cross); torch tensors vs host (skipped without torch) | `python/stl_ensemble/tests/test_patch_gpu.py` | pass |
 | Python: 180° = full sky, FD of disc / cross (both maps, full sky and patch), `S(a, a)` = auto, Delouis transform VJP | `python/stl_ensemble/tests/test_patch_cross.py` | pass |
 
-The existing fixture tests (`stl-core`, `stl-bridge`) pass unchanged after the term formulas
-were factored out of `engine.rs`.
+The existing fixture tests (`stl-core`, `stl-bridge`, `stl-gpu` geometry) pass unchanged after
+the term formulas were factored out of `engine.rs`.
+
+**Binding threshold of the disc stencils.** On a ring boundary the bilinear interpolation of a
+tap may list a cell with a weight of 1e-16 in one arithmetic and 0 (or another ring) in the other.
+On a complete row this is rounding, but on a partial grid (the edge rows of a disc) such a cell
+decides whether a tap is "found" and, once renormalised, takes the whole weight: host and device
+then differ by O(1) on a few edge taps. The disc geometries therefore read only the cells of
+weight above `BIND_EPS = 1e-9` (`ConvGeometry::rows_eps`, `DeviceGeometry::build_eps`, same rule
+on both sides); the full-sky engines keep `eps = 0` (bit-identical to before). The CPU disc
+tests (180° = full sky, finite differences) pass unchanged.
 
 ## 4. Speed
 
@@ -160,5 +205,25 @@ The geometry of a new disc is dominated by the binding of the convolution (21 µ
 thread: 4 gauges × 25 taps of the library-exact bilinear interpolation); the support and the
 decimations are 10 % (`cargo run --release -p stl-core --example disc_profile NSIDE R`). Draw centres from a finite set (e.g. the NESTED pixels of a coarse nside)
 to reuse cached geometries (a disc of 10° costs about 2.4 MB at nside 64, 38 MB at nside 256).
-Everything runs on the CPU; the device geometry of `stl-gpu` is the route if patches at nside
-≥ 512 become necessary.
+
+**GPU, operating point of Healpix-STL-IA** (`python/stl_ensemble/tests/bench_patch_gpu.py`,
+garoupe Tesla T4, 30 steps): every step draws 16 discs among the 768 nside-8 pixel centres and
+evaluates 15 pairs on each (240 patches of 5978 pixels, nside 256, J 4, kernel 5, L 4, R 10°,
+core 4°, cross, 2912 coefficients) in one `forward_cross` and one `vjp_cross`.
+
+| | select (host supports) | forward | VJP | step |
+|---|---|---|---|---|
+| T4, steady state (last 15 steps) | 0.13 s | 0.78 s | 0.40 s | **1.33 s** |
+| CPU reference (hpc node, 32 cores, from train_patches.py) | | | | ~3.5 s |
+
+- The forward includes the device geometry of the discs not in the device cache: about 43 ms per
+  disc (stencils, transposition), 0.6 s of the 0.78 s here. A disc at nside 256 takes 91 MB on
+  the device (support and core stencils, decimations): the default budget (half the free memory of
+  the T4, 7.9 GB) holds 86 of the 768 centres, so most discs of a step are rebuilt. With every
+  centre cached (an A100 80 GB with `cache_bytes` ~70 GB holds the 768), what remains is the
+  field and term work, 0.15 s forward and 0.38 s VJP per step on the T4 (engine timers).
+- Host memory: only the supports and decimations are cached (`cache` entries, ~1 MB each at nside
+  256), not the CPU convolution plans (the 37 GB of the CPU engine).
+- The geometry transposition sorts the entries reading each cell; on the coarse levels of a disc
+  some cells are read by thousands of entries, now sorted in parallel in global memory (a serial
+  sort made the first version 400 times slower).

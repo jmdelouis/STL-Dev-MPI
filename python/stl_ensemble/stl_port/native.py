@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-04-v2"
+SCRIPT_VERSION = "2026-11-05-v3"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -70,6 +70,8 @@ def _library(path=None):
         "stlp_patch_core_pixels": ([_VOID, _SIZE], C.c_int),
         "stlp_patch_forward": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_bool, _DOUBLE, _DOUBLE], C.c_int),
         "stlp_patch_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, _DOUBLE], C.c_int),
+        "stlp_patch_forward_device": ([_VOID, C.c_uint64, C.c_size_t, C.c_uint64, C.c_bool, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_patch_vjp_device": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64], C.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -331,7 +333,10 @@ def delouis_transform_vjp(values, cotangents, eps=0.0):
 
 
 class PatchEngine:
-    """Statistics on disc patches (CPU; the patches of a batch on host threads).
+    """Statistics on disc patches, CPU (the patches of a batch on host threads)
+    or GPU (backend="gpu": the patches of a batch grouped by disc, the disc
+    geometries cached on the device within cache_bytes, default half the free
+    device memory; same definitions and API).
 
     Same plan and formulas as NativeEngine (cross=True: the cross terms of
     two maps), averaged over a spherical disc. The support is every NESTED
@@ -353,7 +358,7 @@ class PatchEngine:
     native_pixels [B, ncoeff]: number of pixels each coefficient averages.
     """
     def __init__(self, nside, j, kernel=5, orientations=4, cross=False,
-                 threads=0, cache=256, library=None):
+                 threads=0, cache=256, library=None, backend="cpu", device=0, cache_bytes=None):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -361,7 +366,11 @@ class PatchEngine:
         self.nside, self.j, self.cross = int(nside), int(j), bool(cross)
         self.channels = 2 if self.cross else 1
         self.config = dict(nside=self.nside, j=self.j, kernel=int(kernel), orientations=int(orientations),
-                           cross=self.cross, threads=int(threads), cache=int(cache))
+                           cross=self.cross, threads=int(threads), cache=int(cache), backend=str(backend))
+        if backend == "gpu":
+            self.config["device"] = int(device)
+            if cache_bytes is not None:
+                self.config["cache_bytes"] = int(cache_bytes)
         self._handle = self._lib.stlp_patch_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
@@ -495,6 +504,61 @@ class PatchEngine:
                 out.append(g[at:at + s].reshape((ids.size,) if not self.cross else (2, ids.size)))
                 at += s
             return np.stack(out) if self._dense else out
+
+    def _device_input(self, x):
+        n = sum(self.channels * i.size for i in self.ids)
+        if not getattr(x, "is_cuda", False):
+            raise ValueError("expected a CUDA tensor")
+        if str(x.dtype) != "torch.float64" or not x.is_contiguous() or x.numel() != n:
+            raise ValueError(f"expected a contiguous float64 CUDA tensor of {n} values (the patches concatenated)")
+        ordinal = self.info()["device"]["ordinal"]
+        if x.device.index != ordinal:
+            raise ValueError(f"tensor on cuda:{x.device.index}, engine on device {ordinal}")
+        return n
+
+    def forward_device(self, x, moments=True, generation=0):
+        """forward on device memory (backend="gpu"): x a contiguous float64
+        CUDA tensor on the engine's device holding the patches of the
+        selection concatenated (patch i: x[ids[i]], [2, n_i] flattened with
+        cross=True), e.g. torch.cat([u[..., i].reshape(-1) for i in ids]).
+        Values and variances are numpy arrays [B, ncoeff]."""
+        import torch
+        with self._lock:
+            self._open()
+            if not self.ids:
+                raise RuntimeError("no disc selected")
+            n = self._device_input(x)
+            torch.cuda.synchronize(x.device)
+            b = len(self.ids)
+            values = np.empty((b, self.ncoeff), dtype=np.complex128)
+            variance = np.empty((b, self.ncoeff if moments else 0), dtype=np.float64)
+            self._generation = None
+            if self._lib.stlp_patch_forward_device(self._handle, x.data_ptr(), n, int(generation), moments,
+                                                   _pointer(values.view(np.float64)), _pointer(variance)):
+                raise _error(self._lib)
+            self._generation, self._device_shape = int(generation), (n, x.device)
+            return values, variance
+
+    def vjp_device(self, cotangents, generation=0):
+        """vjp after forward_device: the patch cotangents as a float64 CUDA
+        tensor laid out as the input of forward_device."""
+        import torch
+        with self._lock:
+            self._open()
+            if self._generation != int(generation) or getattr(self, "_device_shape", None) is None:
+                raise RuntimeError("stale forward state")
+            b = len(self.ids)
+            c = np.ascontiguousarray(cotangents, dtype=np.complex128)
+            if c.shape != (b, self.ncoeff):
+                raise ValueError(f"expected cotangents {(b, self.ncoeff)}, got {c.shape}")
+            if not np.isfinite(c).all():
+                raise ValueError("non-finite coefficient cotangent")
+            n, device = self._device_shape
+            g = torch.empty(n, dtype=torch.float64, device=device)
+            torch.cuda.synchronize(device)
+            if self._lib.stlp_patch_vjp_device(self._handle, _pointer(c.view(np.float64)), c.size, int(generation), g.data_ptr()):
+                raise _error(self._lib)
+            return g
 
     def forward_cross(self, a, b, centres=None, radius=None, core=None, moments=True, generation=0):
         """Cross statistics S(a_i, b_i) of the patch pairs (cross=True)."""

@@ -85,6 +85,8 @@ pub struct DeviceGeometry {
     pub w: Option<CudaSlice<f64>>,
     /// `complete[k * G + g]` when requested.
     pub complete: Option<CudaSlice<u8>>,
+    /// Binding threshold (`ConvGeometry::rows_eps`; 0: none).
+    pub eps: f64,
     /// Transposed: grid positions read (`dest`), their entry ranges
     /// (`offsets`, `|dest| + 1`), the packed entries (`kgp`) and their
     /// weights (`wt`, `None` once stripped).
@@ -117,7 +119,7 @@ fn stride_grid(n: usize) -> (u32, u32) {
 }
 
 /// Positions and weights by row of the output rows `rows` (`k` cells) on `grid`.
-fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool) -> (CudaSlice<u32>, CudaSlice<f64>, Option<CudaSlice<u8>>) {
+fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool, eps: f64) -> (CudaSlice<u32>, CudaSlice<f64>, Option<CudaSlice<u8>>) {
     let order = order_of(s.nside);
     let p = s.kernel_sz * s.kernel_sz;
     let n_entries = 4 * s.g * k * p;
@@ -153,6 +155,7 @@ fn stencils(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, c
             gpu.a(&stencil),
             (p_ref as i32).into(),
             gpu.a(&thetas),
+            eps.into(),
             gpu.a(&pos),
             gpu.a(&w),
             comp.as_ref().map_or(NULL, |c| gpu.a(c)),
@@ -165,12 +168,18 @@ impl DeviceGeometry {
     /// Bound stencils of the output rows `rows` (`k` cells at `nside`) on
     /// `grid`, and their transposition.
     pub fn build(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool) -> Self {
+        Self::build_eps(gpu, grid, rows, k, s, complete, 0.0)
+    }
+
+    /// [`build`](Self::build) with the binding threshold `eps` of
+    /// `stl_core::conv::ConvGeometry::rows_eps`.
+    pub fn build_eps(gpu: &Gpu, grid: &Grid, rows: &CudaSlice<i64>, k: usize, s: &Spec, complete: bool, eps: f64) -> Self {
         let p = s.kernel_sz * s.kernel_sz;
         let n_entries = 4 * s.g * k * p;
         assert!(n_entries < u32::MAX as usize, "block too large for u32 entry indices");
         assert!(k <= MAX_ROWS && s.g <= 8 && p <= 64, "block, gauges or taps beyond the packed entry format");
         let lap = lapper(gpu);
-        let (pos, w, comp) = stencils(gpu, grid, rows, k, s, complete);
+        let (pos, w, comp) = stencils(gpu, grid, rows, k, s, complete, eps);
         lap("stencils");
         // Transpose: count per grid cell, offsets on the host, fill, sort.
         let count = gpu.zeros::<u32>(grid.n);
@@ -215,7 +224,7 @@ impl DeviceGeometry {
         drop(idx);
         lap("pack");
         let dest = gpu.upload(&dest);
-        DeviceGeometry { k, g: s.g, p, pos: Some(pos), w: Some(w), complete: comp, dest, offsets, kgp, wt: Some(wt), n_dest }
+        DeviceGeometry { k, g: s.g, p, pos: Some(pos), w: Some(w), complete: comp, eps, dest, offsets, kgp, wt: Some(wt), n_dest }
     }
 
     /// Drops the weights and positions, keeps the transposition.
@@ -236,7 +245,7 @@ impl DeviceGeometry {
             return;
         }
         let lap = lapper(gpu);
-        let (pos, w, _) = stencils(gpu, grid, rows, self.k, s, false);
+        let (pos, w, _) = stencils(gpu, grid, rows, self.k, s, false, self.eps);
         lap("stencils (refresh)");
         let n_entries = self.kgp.len();
         let wt = gpu.zeros::<f64>(n_entries);

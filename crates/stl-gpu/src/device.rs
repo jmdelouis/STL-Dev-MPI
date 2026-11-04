@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 
-const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"));
+const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"));
 
-const KERNELS: [&str; 89] = [
+const KERNELS: [&str; 91] = [
+    "disc_terms",
+    "disc_terms_rev",
     "ring_thetas",
     "geom_build",
     "geom_pack",

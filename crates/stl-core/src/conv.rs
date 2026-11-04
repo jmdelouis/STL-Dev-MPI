@@ -61,6 +61,16 @@ impl ConvGeometry {
     /// the output) reading the grid `grid` (sorted, unique).  Row `k` is the
     /// row of `rows[k]` in `TorchConv(grid, ...)` when `rows[k]` is in `grid`.
     pub fn rows(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g_count: usize, gauge: Gauge) -> Self {
+        Self::rows_eps(grid, rows, nside, kernel_sz, g_count, gauge, 0.0)
+    }
+
+    /// [`rows`](Self::rows) where, with `eps > 0`, a cell of the bilinear
+    /// interpolation counts as found only if its weight exceeds `eps`.  On a
+    /// partial grid the binding then does not depend on cells of rounding
+    /// weight (a direction on a ring boundary lists a neighbour ring with a
+    /// weight of 0 or 1e-16 depending on the arithmetic), so that host and
+    /// device geometries agree on incomplete rows too (disc patches).
+    pub fn rows_eps(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g_count: usize, gauge: Gauge, eps: f64) -> Self {
         assert!(grid.windows(2).all(|w| w[0] < w[1]), "cell ids must be sorted and unique");
         assert!(grid.len() < u32::MAX as usize, "grid too large for u32 positions");
         let order = order_of(nside);
@@ -86,11 +96,22 @@ impl ConvGeometry {
                 }
                 for p in 0..pp {
                     let (mut ix, mut wx) = (idx[p], wt[p]);
-                    let mut found = ix.map(|v| search(grid, v));
+                    let bind = |ix: [i64; 4], wx: [f64; 4]| -> [Option<usize>; 4] {
+                        let mut f = ix.map(|v| search(grid, v));
+                        if eps > 0.0 {
+                            for n in 0..4 {
+                                if wx[n] <= eps {
+                                    f[n] = None;
+                                }
+                            }
+                        }
+                        f
+                    };
+                    let mut found = bind(ix, wx);
                     if found.iter().all(Option::is_none) {
                         // Empty tap: fall back to the central tap of the same row.
                         (ix, wx) = (idx[p_ref], wt[p_ref]);
-                        found = ix.map(|v| search(grid, v));
+                        found = bind(ix, wx);
                     }
                     let mut w = [0f64; 4];
                     for n in 0..4 {
@@ -297,6 +318,8 @@ pub enum ConvPlan {
         g: usize,
         /// Orientation convention.
         gauge: Gauge,
+        /// Binding threshold ([`ConvGeometry::rows_eps`]).
+        eps: f64,
     },
 }
 
@@ -304,6 +327,13 @@ impl ConvPlan {
     /// Holds the whole geometry, or the `Chunked` form when `chunk` is
     /// smaller than the number of `rows` (sub-blocks of at least one row).
     pub fn new(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g: usize, gauge: Gauge, chunk: Option<usize>) -> Self {
+        Self::new_eps(grid, rows, nside, kernel_sz, g, gauge, chunk, 0.0)
+    }
+
+    /// [`new`](Self::new) with the binding threshold `eps` of
+    /// [`ConvGeometry::rows_eps`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_eps(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g: usize, gauge: Gauge, chunk: Option<usize>, eps: f64) -> Self {
         match chunk {
             Some(c) if c < rows.len() => ConvPlan::Chunked {
                 grid: grid.to_vec(),
@@ -313,8 +343,9 @@ impl ConvPlan {
                 kernel_sz,
                 g,
                 gauge,
+                eps,
             },
-            _ => ConvPlan::Whole(ConvGeometry::rows(grid, rows, nside, kernel_sz, g, gauge)),
+            _ => ConvPlan::Whole(ConvGeometry::rows_eps(grid, rows, nside, kernel_sz, g, gauge, eps)),
         }
     }
 
@@ -339,10 +370,10 @@ impl ConvPlan {
     fn each_chunk(&self, sel: Option<&[usize]>, mut f: impl FnMut(&ConvGeometry, Option<&[usize]>, usize)) {
         match self {
             ConvPlan::Whole(geo) => f(geo, sel, 0),
-            ConvPlan::Chunked { grid, rows, chunk, nside, kernel_sz, g, gauge } => {
+            ConvPlan::Chunked { grid, rows, chunk, nside, kernel_sz, g, gauge, eps } => {
                 let ids: Vec<i64> = sel.map_or_else(|| rows.clone(), |s| s.iter().map(|&i| rows[i]).collect());
                 for (i, part) in ids.chunks(*chunk).enumerate() {
-                    let geo = ConvGeometry::rows(grid, part, *nside, *kernel_sz, *g, *gauge);
+                    let geo = ConvGeometry::rows_eps(grid, part, *nside, *kernel_sz, *g, *gauge, *eps);
                     f(&geo, None, i * chunk);
                 }
             }
