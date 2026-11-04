@@ -78,6 +78,8 @@ pub struct Sht {
     nest: Vec<u32>,
     /// `ln` of the `m`-dependent constant of `lambda_mm` (without `sin^m`).
     log_mm: Vec<f64>,
+    /// `ln n!`, `n = 0..=2 lmax + 1` (starts of the spin recursions).
+    ln_fact: Vec<f64>,
     fft: HashMap<usize, (Arc<dyn Fft<f64>>, Arc<dyn Fft<f64>>)>,
     threads: usize,
 }
@@ -166,12 +168,16 @@ impl Sht {
             }
             log_mm[m] = 0.5 * (((2 * m + 1) as f64) / (4.0 * std::f64::consts::PI)).ln() + 0.5 * acc;
         }
+        let mut ln_fact = vec![0.0; 2 * lmax + 2];
+        for n in 1..ln_fact.len() {
+            ln_fact[n] = ln_fact[n - 1] + (n as f64).ln();
+        }
         let mut planner = FftPlanner::new();
         let mut fft = HashMap::new();
         for r in &rings {
             fft.entry(r.nphi).or_insert_with(|| (planner.plan_fft_forward(r.nphi), planner.plan_fft_inverse(r.nphi)));
         }
-        Sht { nside, lmax, npix, rings, nest, log_mm, fft, threads: host_threads() }
+        Sht { nside, lmax, npix, rings, nest, log_mm, ln_fact, fft, threads: host_threads() }
     }
 
     /// Packed index of `(l, m)`, `m <= l <= lmax`.
@@ -453,6 +459,258 @@ impl Sht {
         self.lm().iter().zip(alm).map(|(&(l, m), a)| a * (2.0 * if m == 0 { 1.0 } else { 2.0 } * dcl[l] / (2 * l + 1) as f64)).collect()
     }
 
+    /// Cross spectrum `C_l = sum_m mult Re(a_lm conj(b_lm)) / (2 l + 1)`.
+    pub fn cross_power(&self, a: &[C64], b: &[C64]) -> Vec<f64> {
+        let mut cl = vec![0.0; self.lmax + 1];
+        for (&(l, m), (x, y)) in self.lm().iter().zip(a.iter().zip(b)) {
+            cl[l] += if m == 0 { 1.0 } else { 2.0 } * (x * y.conj()).re;
+        }
+        cl.iter_mut().enumerate().for_each(|(l, v)| *v /= (2 * l + 1) as f64);
+        cl
+    }
+
+    /// Cotangents of `a` and `b` from that of their cross `C_l`:
+    /// `mult dcl b / (2 l + 1)` and `mult dcl a / (2 l + 1)`.
+    pub fn cross_power_vjp(&self, a: &[C64], b: &[C64], dcl: &[f64]) -> (Vec<C64>, Vec<C64>) {
+        let f: Vec<f64> = self.lm().iter().map(|&(l, m)| if m == 0 { 1.0 } else { 2.0 } * dcl[l] / (2 * l + 1) as f64).collect();
+        (b.iter().zip(&f).map(|(y, s)| y * s).collect(), a.iter().zip(&f).map(|(x, s)| x * s).collect())
+    }
+
+    /// Recursion coefficients of the Wigner functions `d^l_{m, +-s}`, `l =
+    /// l0..=lmax` (`l0 = max(m, s)`): `(A_l, B_l, C_l)` of `d^{l+1} = A_l (x
+    /// -+ B_l) d^l - C_l d^{l-1}` (`B_l` enters with the sign of `-b`).
+    fn spin_coefficients(&self, m: usize, s: usize) -> Vec<(f64, f64, f64)> {
+        let (a2, b2) = ((m * m) as f64, (s * s) as f64);
+        let r = |l: f64| ((l * l - a2).max(0.0) * (l * l - b2).max(0.0)).sqrt();
+        (m.max(s)..=self.lmax)
+            .map(|l| {
+                let lf = l as f64;
+                let rn = r(lf + 1.0);
+                ((2.0 * lf + 1.0) * (lf + 1.0) / rn, (m * s) as f64 / (lf * (lf + 1.0)), (lf + 1.0) * r(lf) / (lf * rn))
+            })
+            .collect()
+    }
+
+    /// The spin-`s` functions of `m` on a ring of `(cos, sin)` (north
+    /// hemisphere or equator): `f(l, lambda+, lambda-)` with `lambda+- =
+    /// (_s lambda_lm +- _{-s} lambda_lm) / 2`, `_s lambda_lm = (-1)^s
+    /// sqrt((2l+1)/4pi) d^l_{m,-s}`, `_{-s} lambda_lm = sqrt((2l+1)/4pi)
+    /// d^l_{m,s}` (healpy's `map2alm_spin`), for every `l` where one of them
+    /// is in double range.
+    #[inline(always)]
+    fn recurse_spin(&self, m: usize, s: usize, coef: &[(f64, f64, f64)], cos: f64, sin: f64, mut f: impl FnMut(usize, f64, f64)) {
+        let j = m.max(s);
+        // Half-angle cosine and sine without cancellation.
+        let (ch, sh) = if cos >= 0.0 {
+            let ch = ((1.0 + cos) / 2.0).sqrt();
+            (ch, sin / (2.0 * ch))
+        } else {
+            let sh = ((1.0 - cos) / 2.0).sqrt();
+            (sin / (2.0 * sh), sh)
+        };
+        let (lch, lsh) = (ch.ln(), sh.ln());
+        let lf = |n: usize| self.ln_fact[n];
+        // d^j_{m,b} at j = max(m, s), b = -s then +s: (log magnitude, sign).
+        let start = |b: i64| -> (f64, f64) {
+            let (jj, a) = (j as i64, m as i64);
+            if m >= s {
+                let log = 0.5 * (lf(2 * j) - lf((jj + b) as usize) - lf((jj - b) as usize)) + (jj + b) as f64 * lch + (jj - b) as f64 * lsh;
+                (log, if (jj - b) % 2 == 0 { 1.0 } else { -1.0 })
+            } else {
+                let base = 0.5 * (lf(2 * j) - lf((jj + a) as usize) - lf((jj - a) as usize));
+                if b > 0 {
+                    (base + (jj + a) as f64 * lch + (jj - a) as f64 * lsh, 1.0)
+                } else {
+                    (base + (jj - a) as f64 * lch + (jj + a) as f64 * lsh, if (a + jj) % 2 == 0 { 1.0 } else { -1.0 })
+                }
+            }
+        };
+        let init = |(log, sign): (f64, f64)| -> (f64, i32) {
+            let k: i32 = if log > -650.0 * std::f64::consts::LN_2 { 0 } else { ((log - 300.0 * std::f64::consts::LN_2) / LN_SCALE).ceil() as i32 };
+            ((log - k as f64 * LN_SCALE).exp() * sign, k)
+        };
+        // [b = -s, b = +s]: current, previous and scale exponent.
+        let (c0, k0) = init(start(-(s as i64)));
+        let (c1, k1) = init(start(s as i64));
+        let mut cur = [c0, c1];
+        let mut prev = [0.0; 2];
+        let mut k = [k0, k1];
+        let sgn = if s % 2 == 0 { 1.0 } else { -1.0 };
+        let norm = |l: usize| (((2 * l + 1) as f64) / (4.0 * std::f64::consts::PI)).sqrt();
+        let emit = |l: usize, cur: &[f64; 2], k: &[i32; 2], f: &mut dyn FnMut(usize, f64, f64)| {
+            if k[0] == 0 || k[1] == 0 {
+                let ls = if k[0] == 0 { sgn * cur[0] } else { 0.0 };
+                let lm = if k[1] == 0 { cur[1] } else { 0.0 };
+                let n = 0.5 * norm(l);
+                f(l, n * (ls + lm), n * (ls - lm));
+            }
+        };
+        emit(j, &cur, &k, &mut f);
+        for l in j + 1..=self.lmax {
+            let (a, b, c) = coef[l - 1 - j];
+            for t in 0..2 {
+                let bt = if t == 0 { -b } else { b };
+                let next = a * (cos - bt) * cur[t] - c * prev[t];
+                prev[t] = cur[t];
+                cur[t] = next;
+                if k[t] < 0 && cur[t].abs() > LIMIT {
+                    cur[t] /= SCALE;
+                    prev[t] /= SCALE;
+                    k[t] += 1;
+                }
+            }
+            emit(l, &cur, &k, &mut f);
+        }
+    }
+
+    /// Spin-`s` analysis (`s >= 1`) of the pairs `(Q, U)` (NESTED), healpy's
+    /// `map2alm_spin` without iteration: `E = -(a_s + a_{-s}) / 2`, `B = i
+    /// (a_s - a_{-s}) / 2`, `a_{+-s} = Omega sum_p (Q +- iU) conj(_{+-s}Y_lm)`;
+    /// the `a_lm` with `l < s` are zero.  The recursions are shared by the
+    /// pairs.
+    pub fn analysis_spin(&self, s: usize, maps: &[(&[f64], &[f64])]) -> Vec<(Vec<C64>, Vec<C64>)> {
+        assert!(s >= 1 && s <= self.lmax, "spin must be in 1..=lmax (spin 0: analysis)");
+        maps.iter().for_each(|(q, u)| assert!(q.len() == self.npix && u.len() == self.npix));
+        let nr = self.rings.len();
+        let nm = maps.len();
+        let pairs = self.pairs();
+        // Ring spectra [ring][m][map] of Q and U (phase of the first pixel included).
+        let spectra = par_map(nr, self.threads, |r| {
+            let ring = &self.rings[r];
+            let n = ring.nphi;
+            let (fwd, _) = &self.fft[&n];
+            let mut out = vec![(C64::default(), C64::default()); (self.lmax + 1) * nm];
+            for (i, (q, u)) in maps.iter().enumerate() {
+                let f = |x: &[f64]| {
+                    let mut buf: Vec<C64> = (0..n).map(|j| C64::new(x[self.nest[ring.start + j] as usize], 0.0)).collect();
+                    fwd.process(&mut buf);
+                    buf
+                };
+                let (fq, fu) = (f(q), f(u));
+                for m in 0..=self.lmax {
+                    let shift = C64::from_polar(1.0, -(m as f64) * ring.phi0);
+                    out[m * nm + i] = (fq[m % n] * shift, fu[m % n] * shift);
+                }
+            }
+            out
+        });
+        let area = self.area();
+        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+            let coef = self.spin_coefficients(m, s);
+            let len = self.lmax + 1 - m;
+            let mut e = vec![C64::default(); nm * len];
+            let mut b = vec![C64::default(); nm * len];
+            // [map][Q even, Q odd, U even, U odd] of the ring pair.
+            let mut x = vec![[C64::default(); 4]; nm];
+            for p in 0..=pairs {
+                let ring = &self.rings[p];
+                let south = nr - 1 - p;
+                for (i, v) in x.iter_mut().enumerate() {
+                    let (qn, un) = spectra[p][m * nm + i];
+                    let (qs, us) = if p < pairs { spectra[south][m * nm + i] } else { (C64::default(), C64::default()) };
+                    *v = [qn + qs, qn - qs, un + us, un - us];
+                }
+                self.recurse_spin(m, s, &coef, ring.cos, ring.sin, |l, lp, lm| {
+                    // lambda+ is even in l + m + s about the equator, lambda- odd.
+                    let par = (l + m + s) & 1;
+                    for (i, v) in x.iter().enumerate() {
+                        let o = i * len + l - m;
+                        e[o] -= v[par] * lp + C64::new(0.0, lm) * v[3 - par];
+                        b[o] -= v[2 + par] * lp - C64::new(0.0, lm) * v[1 - par];
+                    }
+                });
+            }
+            (e, b)
+        });
+        (0..nm)
+            .map(|i| {
+                let mut e = Vec::with_capacity(self.nalm());
+                let mut b = Vec::with_capacity(self.nalm());
+                for (m, (pe, pb)) in per_m.iter().enumerate() {
+                    let len = self.lmax + 1 - m;
+                    e.extend(pe[i * len..(i + 1) * len].iter().map(|v| v * area));
+                    b.extend(pb[i * len..(i + 1) * len].iter().map(|v| v * area));
+                }
+                (e, b)
+            })
+            .collect()
+    }
+
+    /// Map cotangents `(Q, U)` of [`analysis_spin`](Self::analysis_spin) from
+    /// the cotangents of `(E, B)` (each coefficient counted once).
+    pub fn analysis_spin_vjp(&self, s: usize, cots: &[(&[C64], &[C64])]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        assert!(s >= 1 && s <= self.lmax, "spin must be in 1..=lmax (spin 0: analysis_vjp)");
+        cots.iter().for_each(|(e, b)| assert!(e.len() == self.nalm() && b.len() == self.nalm()));
+        let nr = self.rings.len();
+        let nm = cots.len();
+        let pairs = self.pairs();
+        // Per m: [ring][map] sums G^Q, G^U.
+        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+            let coef = self.spin_coefficients(m, s);
+            let base = self.index(m, m);
+            let mut g = vec![(C64::default(), C64::default()); nr * nm];
+            // [map][parity]: sum cE l+, i cB l-, cB l+, -i cE l-.
+            let mut acc = vec![[[C64::default(); 4]; 2]; nm];
+            for p in 0..=pairs {
+                let ring = &self.rings[p];
+                acc.iter_mut().for_each(|a| *a = [[C64::default(); 4]; 2]);
+                self.recurse_spin(m, s, &coef, ring.cos, ring.sin, |l, lp, lm| {
+                    let par = (l + m + s) & 1;
+                    for (i, (ce, cb)) in cots.iter().enumerate() {
+                        let (e, b) = (ce[base + l - m], cb[base + l - m]);
+                        let a = &mut acc[i][par];
+                        a[0] += e * lp;
+                        a[1] += C64::new(0.0, lm) * b;
+                        a[2] += b * lp;
+                        a[3] -= C64::new(0.0, lm) * e;
+                    }
+                });
+                for (i, a) in acc.iter().enumerate() {
+                    let north = |t: usize| a[0][t] + a[1][t];
+                    g[p * nm + i] = (north(0) + north(1), north(2) + north(3));
+                    if p < pairs {
+                        // South ring: lambda+ times (-1)^(l+m+s), lambda- times -(-1)^(l+m+s).
+                        let south = |t: usize| a[0][t] - a[0][t + 1] - a[1][t] + a[1][t + 1];
+                        g[(nr - 1 - p) * nm + i] = (south(0), south(2));
+                    }
+                }
+            }
+            g
+        });
+        let area = self.area();
+        let per_ring = par_map(nr, self.threads, |r| {
+            let ring = &self.rings[r];
+            let n = ring.nphi;
+            let (_, inv) = &self.fft[&n];
+            (0..nm)
+                .map(|i| {
+                    let (mut hq, mut hu) = (vec![C64::default(); n], vec![C64::default(); n]);
+                    for (m, g) in per_m.iter().enumerate() {
+                        let shift = C64::from_polar(1.0, m as f64 * ring.phi0);
+                        let (q, u) = g[r * nm + i];
+                        hq[m % n] += q * shift;
+                        hu[m % n] += u * shift;
+                    }
+                    inv.process(&mut hq);
+                    inv.process(&mut hu);
+                    (hq.into_iter().map(|z| -area * z.re).collect::<Vec<f64>>(), hu.into_iter().map(|z| -area * z.re).collect::<Vec<f64>>())
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut out = vec![(vec![0.0; self.npix], vec![0.0; self.npix]); nm];
+        for (r, values) in per_ring.into_iter().enumerate() {
+            let start = self.rings[r].start;
+            for (i, (q, u)) in values.into_iter().enumerate() {
+                for (j, (a, b)) in q.into_iter().zip(u).enumerate() {
+                    let p = self.nest[start + j] as usize;
+                    out[i].0[p] = a;
+                    out[i].1[p] = b;
+                }
+            }
+        }
+        out
+    }
+
     /// First and second covariant derivatives of the map of `alm` in the
     /// orthonormal `(theta, phi)` frame: `d_theta f`, `d_phi f / sin`,
     /// `H_theta_theta`, `H_phi_phi`, `H_theta_phi` (`derivative_maps` of the
@@ -578,6 +836,30 @@ mod tests {
         let back = sht.analysis(&sht.synthesis(&a));
         let err = a.iter().zip(&back).fold(0f64, |e, (p, q)| e.max((p - q).norm()));
         assert!(err < 1e-2, "analysis of a band-limited map (iter = 0 quadrature): {err}");
+    }
+
+    /// Spin analysis: its transpose (`<A x, c> = <x, A^T c>`, each
+    /// coefficient once) for spins 1 to 3, and the spin-weighted
+    /// orthonormality of a band-limited pure-E field (`E = Y_20` read back).
+    #[test]
+    fn spin_adjoint() {
+        for (nside, lmax) in [(4usize, 11usize), (8, 20)] {
+            let sht = Sht::new(nside, lmax);
+            for s in 1..=3 {
+                let (q, u) = (noise(sht.npix, 21), noise(sht.npix, 22));
+                let (e, b) = sht.analysis_spin(s, &[(&q, &u)]).pop().unwrap();
+                let (ce, cb) = (random_alm(&sht, 23), random_alm(&sht, 25));
+                let lhs: f64 = e.iter().zip(&ce).chain(b.iter().zip(&cb)).map(|(v, c)| (c.conj() * v).re).sum();
+                let (gq, gu) = sht.analysis_spin_vjp(s, &[(&ce, &cb)]).pop().unwrap();
+                let rhs: f64 = gq.iter().zip(&q).chain(gu.iter().zip(&u)).map(|(g, x)| g * x).sum();
+                assert!((lhs - rhs).abs() <= 1e-12 * lhs.abs().max(1.0), "nside {nside} spin {s}: {lhs} {rhs}");
+                for (l, m) in sht.lm() {
+                    if l < s {
+                        assert!(e[sht.index(l, m)].norm() == 0.0 && b[sht.index(l, m)].norm() == 0.0);
+                    }
+                }
+            }
+        }
     }
 
     /// Derivative maps of `Y_20 + Y_21` against finite differences of the

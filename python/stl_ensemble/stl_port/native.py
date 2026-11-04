@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-05-v4"
+SCRIPT_VERSION = "2026-11-06-v6"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -74,6 +74,12 @@ def _library(path=None):
         "stlp_patch_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, _DOUBLE], C.c_int),
         "stlp_patch_forward_device": ([_VOID, C.c_uint64, C.c_size_t, C.c_uint64, C.c_bool, _DOUBLE, _DOUBLE], C.c_int),
         "stlp_patch_vjp_device": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64], C.c_int),
+        "stlp_spec_new": ([C.c_char_p], _VOID),
+        "stlp_spec_free": ([_VOID], None),
+        "stlp_spec_info": ([_VOID], _VOID),
+        "stlp_spec_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_spec_forward": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
+        "stlp_spec_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -303,6 +309,173 @@ class NativeEngine:
     def close(self):
         if getattr(self, "_handle", None):
             self._lib.stlp_free(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+class SpectrumEngine:
+    """Differentiable anafast (iter=0, no ring weights, healpy conventions) of
+    NESTED full-sky maps, CPU or GPU (backend="gpu": the transforms on the
+    device, the spectra and their cotangents on the host).
+
+    forward(maps [batch, npix], generation) -> C_l [batch, lmax + 1]; with
+    masks (K mask weights, set_masks), every map is multiplied by each
+    weight before the analysis and C_l is [batch, K, lmax + 1] (pseudo-C_l,
+    not divided by f_sky; self.fsky gives mean(w^2) per mask).
+    cross=True: maps [batch, 2, npix] and the cross spectra
+    sum_m mult Re(a_lm conj(b_lm)) / (2l + 1) only (forward_cross(a, b)).
+    spin=s >= 1: every field is a pair (Q, U) of a spin-s field, maps
+    [batch, 2, npix] ([batch, 2, 2, npix] with cross), E and B as healpy's
+    map2alm_spin (spin 2: anafast(pol=True)); C_l [batch, (K,) 3, lmax + 1]
+    for EE, BB, EB, with cross [.., 4, ..] for E1E2, B1B2, E1B2, B1E2
+    (self.components). The masks multiply Q and U alike. Spin >= 1 uses the
+    host transforms with either backend.
+    vjp(cotangents shaped like C_l, generation) -> map gradients shaped like
+    maps, after the forward of the same (generation, member, objective).
+    """
+    def __init__(self, nside, lmax=None, batch=1, backend="cpu", device=0, cross=False,
+                 masks=None, library=None, spin=0):
+        self._lib = _library(library)
+        self.library_sha256 = self._lib._stlp_binary_sha256
+        self._handle = None
+        self._lock = threading.RLock()
+        if backend not in ("cpu", "gpu"):
+            raise ValueError("backend must be cpu or gpu")
+        self.nside, self.batch = int(nside), int(batch)
+        self.lmax = 3 * self.nside - 1 if lmax is None else int(lmax)
+        if self.batch <= 0 or self.lmax < 0:
+            raise ValueError("batch must be positive and lmax nonnegative")
+        self.npix = 12 * self.nside**2
+        self.backend, self.cross = backend, bool(cross)
+        self.channels = 2 if self.cross else 1
+        if isinstance(spin, bool) or int(spin) != spin or int(spin) < 0:
+            raise ValueError("spin must be a nonnegative integer")
+        self.spin = int(spin)
+        self.config = dict(nside=self.nside, lmax=self.lmax, batch=self.batch, backend=backend,
+                           device=int(device), cross=self.cross, spin=self.spin)
+        self._handle = self._lib.stlp_spec_new(json.dumps(self.config).encode())
+        if not self._handle:
+            raise _error(self._lib)
+        self.components = self.info()["components"]
+        self._current_key = None
+        self.nmasks, self.fsky = 0, None
+        if masks is not None:
+            self.set_masks(masks)
+
+    def _open(self):
+        if not self._handle:
+            raise RuntimeError("spectrum engine is closed")
+
+    def info(self):
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_spec_info(self._handle)
+            if not p:
+                raise _error(self._lib)
+            try:
+                result = json.loads(C.string_at(p))
+                result["library_sha256"] = self.library_sha256
+                return result
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def set_masks(self, masks):
+        """Multiply the maps by each mask from now on (None: the whole sky).
+        masks: [K, npix] / [npix] weights (any finite values, e.g. apodised)
+        or a list of NESTED id arrays (weight 1 on the ids)."""
+        with self._lock:
+            self._open()
+            if masks is None:
+                w = np.zeros((0, self.npix))
+            elif isinstance(masks, np.ndarray) and masks.dtype != object and masks.shape[-1] == self.npix and masks.ndim in (1, 2):
+                w = np.ascontiguousarray(np.atleast_2d(masks), dtype=np.float64)
+            else:
+                w = np.zeros((len(masks), self.npix))
+                for k, ids in enumerate(masks):
+                    ids = np.asarray(ids, dtype=np.int64)
+                    if ids.size and (ids.min() < 0 or ids.max() >= self.npix):
+                        raise ValueError(f"mask {k}: pixel ids out of range")
+                    w[k, ids] = 1.0
+            if not np.isfinite(w).all():
+                raise ValueError("mask weights must be finite")
+            self._current_key = None
+            if self._lib.stlp_spec_set_masks(self._handle, _pointer(w), w.shape[0]):
+                raise _error(self._lib)
+            self.nmasks = w.shape[0]
+            self.fsky = np.mean(w**2, axis=1) if self.nmasks else None
+
+    def _shape(self):
+        inner = (self.lmax + 1,) if self.spin == 0 else (len(self.components), self.lmax + 1)
+        return (self.batch, self.nmasks) + inner if self.nmasks else (self.batch,) + inner
+
+    def _map_shape(self):
+        field = (self.npix,) if self.spin == 0 else (2, self.npix)
+        return (self.batch,) + ((2,) if self.cross else ()) + field
+
+    def forward(self, maps, generation=0, member=0, objective="cl"):
+        with self._lock:
+            self._open()
+            key = _key(generation, member, objective)
+            x = np.ascontiguousarray(maps, dtype=np.float64)
+            shape = self._map_shape()
+            if x.shape == shape[1:] and self.batch == 1:
+                x = x[None]
+            if x.shape != shape:
+                raise ValueError(f"expected maps {shape}, got {x.shape}")
+            if not np.isfinite(x).all():
+                raise ValueError("input map contains non-finite values")
+            cl = np.empty(self._shape(), dtype=np.float64)
+            self._current_key = None
+            if self._lib.stlp_spec_forward(self._handle, _pointer(x), x.size, *key, _pointer(cl)):
+                raise _error(self._lib)
+            self._current_key = key
+            return cl
+
+    def vjp(self, cotangents, generation=0, member=0, objective="cl"):
+        with self._lock:
+            self._open()
+            key = _key(generation, member, objective)
+            if key != self._current_key:
+                raise RuntimeError("stale/wrong-member/objective forward state")
+            c = np.ascontiguousarray(cotangents, dtype=np.float64)
+            shape = self._shape()
+            if c.shape == shape[1:] and self.batch == 1:
+                c = c[None]
+            if c.shape != shape:
+                raise ValueError(f"expected cotangents {shape}, got {c.shape}")
+            if not np.isfinite(c).all():
+                raise ValueError("non-finite spectrum cotangent")
+            grad = np.empty(self._map_shape(), dtype=np.float64)
+            if self._lib.stlp_spec_vjp(self._handle, _pointer(c), c.size, *key, _pointer(grad)):
+                raise _error(self._lib)
+            return grad
+
+    def forward_cross(self, a, b, generation=0, member=0, objective="cl"):
+        """Cross spectra of the pairs a, b [batch, npix] ([batch, 2, npix]
+        (Q, U) with spin >= 1) (cross=True)."""
+        if not self.cross:
+            raise RuntimeError("forward_cross needs SpectrumEngine(..., cross=True)")
+        field = self._map_shape()[2:]
+        a = np.asarray(a, dtype=np.float64).reshape((self.batch,) + field)
+        b = np.asarray(b, dtype=np.float64).reshape((self.batch,) + field)
+        return self.forward(np.stack([a, b], 1), generation, member, objective)
+
+    def vjp_cross(self, cotangents, generation=0, member=0, objective="cl"):
+        """(grad_a, grad_b), each shaped like a, after forward_cross."""
+        g = self.vjp(cotangents, generation, member, objective)
+        return g[:, 0], g[:, 1]
+
+    def close(self):
+        if getattr(self, "_handle", None):
+            self._lib.stlp_spec_free(self._handle)
             self._handle = None
 
     def __del__(self):

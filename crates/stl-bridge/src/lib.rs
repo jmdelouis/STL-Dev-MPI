@@ -20,6 +20,10 @@
 //! those of the full sky; values, variances and cotangents become
 //! `[batch, K, len(plan)]`.
 //!
+//! A spectrum handle (`stlp_spec_*`) gives the pseudo-C_l of masked
+//! full-sky maps (anafast, `iter = 0`; spin 0, or EE/BB/EB of spin-`s`
+//! fields) and their VJP.
+//!
 //! A patch handle (`stlp_patch_*`) evaluates the same statistics on disc
 //! patches ([`stl_core::disc`]): a batch of discs with their own centres,
 //! each map holding only its disc's pixels.
@@ -40,14 +44,15 @@ use stl_core::local::LocalGeometry;
 use stl_core::mask::Masks;
 use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState, DiscSupport};
 use stl_core::plan::{build_plan, Coefficient, Family};
+use stl_core::sht::Sht;
 use stl_core::stencil::Gauge;
 #[cfg(feature = "gpu")]
 use stl_core::engine::{Partition, Serial};
 #[cfg(feature = "gpu")]
-use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, HostForwardState};
+use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, GpuSht, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-11-05-v5";
+pub const VERSION: &str = "2026-11-06-v7";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -930,5 +935,304 @@ pub unsafe extern "C" fn stlp_patch_vjp_device(p: *mut PatchHandle, cot: *const 
         }
         let _ = c;
         panic!("device output needs a GPU patch handle (backend gpu)")
+    })
+}
+
+// -- pseudo-spectra ---------------------------------------------------------------
+
+/// Pseudo-power spectra (anafast, `iter = 0`, no ring weights) of full-sky
+/// NESTED maps, optionally multiplied by `K` mask weights before the
+/// analysis ([`stl_core::sht::Sht`]; on a GPU the spin-0 transforms of
+/// `stl_gpu::GpuSht`, the spectra and their cotangents on the host).
+///
+/// Spin 0: maps `[batch, fields, 12 nside^2]`, one component (one field:
+/// the auto spectrum; two, `cross`: the cross spectrum `Re(a_lm
+/// conj(b_lm))`).  Spin `s >= 1`: maps `[batch, fields, 2, 12 nside^2]`
+/// (`Q`, `U` of a spin-`s` field, healpy's `map2alm_spin`), components
+/// `EE, BB, EB` (one field) or `E1E2, B1B2, E1B2, B1E2` (two).  Spectra
+/// `[batch, K, components, lmax + 1]` (`K = 1` without masks).
+pub struct SpectrumHandle {
+    sht: Sht,
+    #[cfg(feature = "gpu")]
+    device: Option<(GpuSht, Arc<Gpu>)>,
+    id: u64,
+    batch: usize,
+    /// Fields per member: 1, or 2 with `cross`.
+    fields: usize,
+    spin: usize,
+    /// Mask weights `[K][npix]` (empty: the whole sky).
+    masks: Vec<Vec<f64>>,
+    /// `a_lm` of the last forward, `[batch][K][fields]` (spin `s`: then `[E, B]`).
+    alms: Vec<Vec<Complex64>>,
+    current: Option<Identity>,
+}
+
+/// Maps per transform batch on the device (bounds its Legendre sums).
+#[cfg(feature = "gpu")]
+const SPEC_CHUNK: usize = 16;
+
+impl SpectrumHandle {
+    fn averages(&self) -> usize {
+        self.masks.len().max(1)
+    }
+
+    fn identity(&self, generation: u64, member: u64, objective: u64) -> Identity {
+        Identity { owner: self.id, generation, member, objective }
+    }
+
+    /// Real maps per field: 1 (spin 0) or 2 (`Q`, `U`).
+    fn parts(&self) -> usize {
+        if self.spin == 0 {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// The spectra as pairs `(i, j)` of the `a_lm` of one `(member, mask)`:
+    /// `sum_m mult Re(a_i conj(a_j)) / (2l + 1)`.
+    fn pairs(&self) -> &'static [(usize, usize)] {
+        match (self.spin, self.fields) {
+            (0, 1) => &[(0, 0)],
+            (0, _) => &[(0, 1)],
+            (_, 1) => &[(0, 0), (1, 1), (0, 1)],
+            _ => &[(0, 2), (1, 3), (0, 3), (1, 2)],
+        }
+    }
+
+    /// `a_lm` of every map (spin 0) or `(E, B)` of every pair of maps, in order.
+    fn analysis(&self, maps: &[Vec<f64>]) -> Vec<Vec<Complex64>> {
+        if self.spin > 0 {
+            let pairs: Vec<(&[f64], &[f64])> = maps.chunks(2).map(|p| (&p[0][..], &p[1][..])).collect();
+            return self.sht.analysis_spin(self.spin, &pairs).into_iter().flat_map(|(e, b)| [e, b]).collect();
+        }
+        #[cfg(feature = "gpu")]
+        if let Some((s, gpu)) = &self.device {
+            let mut out = Vec::with_capacity(maps.len());
+            for part in maps.chunks(SPEC_CHUNK) {
+                let up: Vec<_> = part.iter().map(|x| gpu.upload(x)).collect();
+                for a in s.analysis_many(gpu, &up.iter().collect::<Vec<_>>()) {
+                    out.push(gpu.download(&a).chunks(2).map(|v| Complex64::new(v[0], v[1])).collect());
+                }
+            }
+            return out;
+        }
+        maps.iter().map(|x| self.sht.analysis(x)).collect()
+    }
+
+    /// Map cotangents of the analysis from the `a_lm` cotangents, in order.
+    fn analysis_vjp(&self, cots: &[Vec<Complex64>]) -> Vec<Vec<f64>> {
+        if self.spin > 0 {
+            let pairs: Vec<(&[Complex64], &[Complex64])> = cots.chunks(2).map(|p| (&p[0][..], &p[1][..])).collect();
+            return self.sht.analysis_spin_vjp(self.spin, &pairs).into_iter().flat_map(|(q, u)| [q, u]).collect();
+        }
+        #[cfg(feature = "gpu")]
+        if let Some((s, gpu)) = &self.device {
+            // `Omega Y(c / mult)`: the scaling on the host, the synthesis on the device.
+            let area = self.sht.area();
+            let lm = self.sht.lm();
+            let mut out = Vec::with_capacity(cots.len());
+            for part in cots.chunks(SPEC_CHUNK) {
+                let up: Vec<_> = part
+                    .iter()
+                    .map(|c| {
+                        let v: Vec<f64> = lm
+                            .iter()
+                            .zip(c)
+                            .flat_map(|(&(_, m), z)| {
+                                let z = z * if m == 0 { area } else { area / 2.0 };
+                                [z.re, z.im]
+                            })
+                            .collect();
+                        gpu.upload(&v)
+                    })
+                    .collect();
+                for g in s.synthesis_many(gpu, &up.iter().collect::<Vec<_>>()) {
+                    out.push(gpu.download(&g));
+                }
+            }
+            return out;
+        }
+        cots.iter().map(|c| self.sht.analysis_vjp(c)).collect()
+    }
+}
+
+/// New spectrum handle from a JSON configuration: `nside`, `lmax`
+/// (`3 nside - 1`), `batch` (1), `cross` (false), `spin` (0), `backend`
+/// (`cpu` | `gpu`), `device` (0).  The host transforms run on
+/// `STL_THREADS` threads; spin `s >= 1` uses them with either backend.
+/// Null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_new(config: *const c_char) -> *mut SpectrumHandle {
+    guard(std::ptr::null_mut(), || {
+        let v = parse(config);
+        let nside = integer(&v, "nside", 128);
+        assert!(nside.is_power_of_two(), "nside must be a power of two");
+        let lmax = integer(&v, "lmax", 3 * nside - 1);
+        assert!(lmax <= 4 * nside, "lmax must be at most 4 nside");
+        let batch = integer(&v, "batch", 1);
+        assert!(batch > 0, "batch must be positive");
+        let spin = integer(&v, "spin", 0);
+        assert!(spin <= lmax, "spin must be at most lmax");
+        let fields = if v["cross"].as_bool().unwrap_or(false) { 2 } else { 1 };
+        let sht = Sht::new(nside, lmax);
+        #[cfg(feature = "gpu")]
+        let device = match v["backend"].as_str().unwrap_or("cpu") {
+            "gpu" if spin == 0 => {
+                let gpu = Arc::new(Gpu::new(integer(&v, "device", 0)).expect("CUDA initialisation"));
+                Some((GpuSht::new(&gpu, &sht).expect("device transforms"), gpu))
+            }
+            "gpu" | "cpu" => None,
+            other => panic!("backend must be cpu or gpu, not {other:?}"),
+        };
+        #[cfg(not(feature = "gpu"))]
+        match v["backend"].as_str().unwrap_or("cpu") {
+            "cpu" => {}
+            "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
+            other => panic!("backend must be cpu or gpu, not {other:?}"),
+        }
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        Box::into_raw(Box::new(SpectrumHandle {
+            sht,
+            #[cfg(feature = "gpu")]
+            device,
+            id,
+            batch,
+            fields,
+            spin,
+            masks: Vec::new(),
+            alms: Vec::new(),
+            current: None,
+        }))
+    })
+}
+
+/// Frees a spectrum handle (null is ignored).
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_free(p: *mut SpectrumHandle) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
+    }
+}
+
+/// JSON: version, sizes, spin, components, where the transforms run
+/// (`transforms`), number of masks and their `f_sky = mean w^2`.  Free with
+/// `stlp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_info(p: *mut SpectrumHandle) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let h = &*p;
+        #[cfg(feature = "gpu")]
+        let transforms = if h.device.is_some() { "gpu" } else { "cpu" };
+        #[cfg(not(feature = "gpu"))]
+        let transforms = "cpu";
+        let fsky: Vec<f64> = h.masks.iter().map(|w| w.iter().map(|v| v * v).sum::<f64>() / w.len() as f64).collect();
+        let components: &[&str] = match (h.spin, h.fields) {
+            (0, _) => &["TT"],
+            (_, 1) => &["EE", "BB", "EB"],
+            _ => &["EE", "BB", "EB", "BE"],
+        };
+        let info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"),
+            "nside": h.sht.nside, "lmax": h.sht.lmax, "batch": h.batch, "fields": h.fields, "cross": h.fields == 2,
+            "spin": h.spin, "components": components, "transforms": transforms, "dtype": "float64",
+            "masks": h.masks.len(), "fsky": fsky, "iter": 0});
+        CString::new(info.to_string()).unwrap().into_raw()
+    })
+}
+
+/// Multiplies the maps by each of the `k` mask weights `weights` (`[k,
+/// 12 nside^2]`, any finite values, e.g. apodised; `Q` and `U` alike) before
+/// the analysis from the next forward on, or by nothing (`k = 0`).  0, or
+/// -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_set_masks(p: *mut SpectrumHandle, weights: *const f64, k: usize) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        h.alms.clear();
+        let npix = h.sht.npix;
+        let w: &[f64] = if k > 0 { std::slice::from_raw_parts(weights, k * npix) } else { &[] };
+        assert!(w.iter().all(|v| v.is_finite()), "mask weights must be finite");
+        h.masks = w.chunks(npix).map(<[f64]>::to_vec).collect();
+        0
+    })
+}
+
+/// Spectra of the maps `x` (`n = batch * fields * parts * 12 nside^2`,
+/// `parts` 1 for spin 0, else 2) to `out` (`batch K components (lmax +
+/// 1)`).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_forward(p: *mut SpectrumHandle, x: *const f64, n: usize, generation: u64, member: u64, objective: u64, out: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        let npix = h.sht.npix;
+        let maps_per = h.fields * h.parts();
+        assert_eq!(n, h.batch * maps_per * npix, "input shape mismatch");
+        h.current = None;
+        h.alms.clear();
+        let x = std::slice::from_raw_parts(x, n);
+        let k_count = h.averages();
+        let mut maps = Vec::with_capacity(h.batch * k_count * maps_per);
+        for b in 0..h.batch {
+            for k in 0..k_count {
+                for c in 0..maps_per {
+                    let xi = &x[(b * maps_per + c) * npix..][..npix];
+                    maps.push(match h.masks.get(k) {
+                        Some(w) => xi.iter().zip(w).map(|(a, m)| a * m).collect(),
+                        None => xi.to_vec(),
+                    });
+                }
+            }
+        }
+        h.alms = h.analysis(&maps);
+        let (nl, pairs) = (h.sht.lmax + 1, h.pairs());
+        let o = std::slice::from_raw_parts_mut(out, h.batch * k_count * pairs.len() * nl);
+        for (rows, a) in o.chunks_mut(pairs.len() * nl).zip(h.alms.chunks(maps_per)) {
+            for (row, &(i, j)) in rows.chunks_mut(nl).zip(pairs) {
+                row.copy_from_slice(&h.sht.cross_power(&a[i], &a[j]));
+            }
+        }
+        h.current = Some(h.identity(generation, member, objective));
+        0
+    })
+}
+
+/// Map cotangent `out` (the layout of the forward input) of the spectrum
+/// cotangents `cot` (`n = batch K components (lmax + 1)`) after the forward
+/// of the same identity.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spec_vjp(p: *mut SpectrumHandle, cot: *const f64, n: usize, generation: u64, member: u64, objective: u64, out: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        assert_eq!(h.current, Some(h.identity(generation, member, objective)), "stale, wrong-member or wrong-objective forward state");
+        let (nl, k_count, npix, pairs) = (h.sht.lmax + 1, h.averages(), h.sht.npix, h.pairs());
+        let maps_per = h.fields * h.parts();
+        assert_eq!(n, h.batch * k_count * pairs.len() * nl, "cotangent shape mismatch");
+        let cot = std::slice::from_raw_parts(cot, n);
+        let mut ca: Vec<Vec<Complex64>> = h.alms.iter().map(|a| vec![Complex64::default(); a.len()]).collect();
+        for ((d, a), c) in cot.chunks(pairs.len() * nl).zip(h.alms.chunks(maps_per)).zip(ca.chunks_mut(maps_per)) {
+            for (dl, &(i, j)) in d.chunks(nl).zip(pairs) {
+                let (gi, gj) = h.sht.cross_power_vjp(&a[i], &a[j], dl);
+                c[i].iter_mut().zip(&gi).for_each(|(x, y)| *x += y);
+                c[j].iter_mut().zip(&gj).for_each(|(x, y)| *x += y);
+            }
+        }
+        let g = h.analysis_vjp(&ca);
+        let o = std::slice::from_raw_parts_mut(out, h.batch * maps_per * npix);
+        o.fill(0.0);
+        // The masks are summed in mask order.
+        for b in 0..h.batch {
+            for k in 0..k_count {
+                for c in 0..maps_per {
+                    let gi = &g[(b * k_count + k) * maps_per + c];
+                    let oi = &mut o[(b * maps_per + c) * npix..][..npix];
+                    match h.masks.get(k) {
+                        Some(w) => oi.iter_mut().zip(gi.iter().zip(w)).for_each(|(o, (v, m))| *o += v * m),
+                        None => oi.iter_mut().zip(gi).for_each(|(o, v)| *o += v),
+                    }
+                }
+            }
+        }
+        0
     })
 }
