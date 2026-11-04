@@ -73,8 +73,20 @@ C ABI (`crates/stl-bridge`):
 | `stl-core` `tests/mask.rs`: the full-sky mask against the unmasked engine | 1e-13 | pass |
 | bridge `cpu_masks_match_single_masks`: 3 masks against handles with one mask each (values and variances bit-identical; gradient against the sum), auto and cross | 1e-13 | 8e-16, 1.4e-15 |
 | Python `test_masks.py`: shapes, ids against indicators, native pixels, finite differences | 1e-7 (FD) | pass |
-| bridge `gpu::device_masks_match_cpu`, Python `test_masked_gpu_matches_cpu`: T4 against the CPU, auto and cross | values 1e-13, variances 1e-12, gradient 1e-11 | GPU_RESULTS |
+| bridge `gpu::device_masks_match_cpu`, Python `test_masked_gpu_matches_cpu`: T4 against the CPU, auto and cross | values 1e-13, variances 1e-12, gradient 1e-11 | auto: values 2e-16, variances 2e-16, gradient 1.3e-14; cross: 1.0e-14, 1.3e-15, 2.6e-13 (both convolution forms and field stores) |
 
 ## 5. Speed
 
-BENCH_RESULTS
+One Tesla T4 (garoupe), nside 256, J = 4, L = 4, batch 1, `bench_masks.py`: 5 masks (the whole
+sky, then `|b| > 0°, 20°, 30°, 45°`: 786 432, 785 408, 517 120, 393 216 and 229 440 pixels).
+Times are the median of 5 steps.
+
+| Plan | Masks | ncoeff | forward | vjp | step | peak device memory |
+|---|---|---|---|---|---|---|
+| auto | none | 1474 | 0.79 s | 0.99 s | 1.78 s | 1.62 GB |
+| auto | 5 | 1474 × 5 | 0.86 s | 1.22 s | 2.07 s (+16 %) | 1.66 GB |
+| cross | none | 2912 | 0.87 s | 1.19 s | 2.06 s | 1.76 GB |
+| cross | 5 | 2912 × 5 | 0.96 s | 1.64 s | 2.61 s (+27 %) | 1.83 GB |
+
+The extra cost is that of the coefficient kernels, repeated per mask. The fields are not
+recomputed.
