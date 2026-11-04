@@ -1,0 +1,53 @@
+{
+ "levels": [
+  32,
+  64,
+  128,
+  256
+ ],
+ "niter": [
+  300,
+  200,
+  200,
+  400
+ ],
+ "warm0": 100,
+ "detail": "conditional",
+ "opt": "",
+ "per_level": [
+  {
+   "n": 32,
+   "evaluations": 422,
+   "wall_seconds": 24.46992254257202,
+   "loss_first": 73.39791484774156,
+   "loss_last": 0.04363699086744923,
+   "equivalent_evaluations": 6.59375
+  },
+  {
+   "n": 64,
+   "evaluations": 210,
+   "wall_seconds": 27.372448444366455,
+   "loss_first": 17.407443291086725,
+   "loss_last": 0.1554456750707512,
+   "equivalent_evaluations": 13.125
+  },
+  {
+   "n": 128,
+   "evaluations": 205,
+   "wall_seconds": 56.153913736343384,
+   "loss_first": 10.659375896980366,
+   "loss_last": 0.2311045080404259,
+   "equivalent_evaluations": 51.25
+  },
+  {
+   "n": 256,
+   "evaluations": 434,
+   "wall_seconds": 240.82027411460876,
+   "loss_first": 8.205789617880912,
+   "loss_last": 0.31537285615843635,
+   "equivalent_evaluations": 434.0
+  }
+ ],
+ "equivalent_evaluations": 504.96875,
+ "wall_seconds": 348.8165588378906
+}

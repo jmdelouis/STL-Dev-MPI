@@ -1,0 +1,53 @@
+{
+ "levels": [
+  32,
+  64,
+  128,
+  256
+ ],
+ "niter": [
+  300,
+  200,
+  200,
+  400
+ ],
+ "warm0": 100,
+ "detail": "conditional",
+ "opt": "--lagrangian both --anchor 50",
+ "per_level": [
+  {
+   "n": 32,
+   "evaluations": 422,
+   "wall_seconds": 24.8011736869812,
+   "loss_first": 73.39791484774156,
+   "loss_last": 0.04363699086744923,
+   "equivalent_evaluations": 6.59375
+  },
+  {
+   "n": 64,
+   "evaluations": 40,
+   "wall_seconds": 17.20097589492798,
+   "loss_first": 17.407443291086725,
+   "loss_last": 17.407443458347828,
+   "equivalent_evaluations": 2.5
+  },
+  {
+   "n": 128,
+   "evaluations": 32,
+   "wall_seconds": 22.486379384994507,
+   "loss_first": 28.27943089573325,
+   "loss_last": 28.279431785005084,
+   "equivalent_evaluations": 8.0
+  },
+  {
+   "n": 256,
+   "evaluations": 64,
+   "wall_seconds": 72.30754852294922,
+   "loss_first": 39.923014395750926,
+   "loss_last": 39.92301514187728,
+   "equivalent_evaluations": 64.0
+  }
+ ],
+ "equivalent_evaluations": 81.09375,
+ "wall_seconds": 136.7960774898529
+}

@@ -47,6 +47,19 @@ run:
   --groups G            MPI groups of ranks sharing B / G members (default 1)
   --init MAP            Gaussian maps of the members ('{m}': one per member); default Gaussian
                         random fields with the mean C_l of the drawn references (--seed + m)
+  --init-noise conditional
+                        --init names maps of the members at a lower nside (from a coarser run): put on the
+                        children, plus details drawn from the references' per bin of the parent's value
+                        and local variation (docs/lagrangian_synthesis.md)
+  --init-space g|physical
+                        where --init-noise conditional works: g (default; --init: PREFIX_m{m}_gaussian,
+                        histogram-matched to the parents of the references' g at this nside) or physical
+                        (--init: PREFIX_m{m}_physical, Gaussianised with the LUT after the draw)
+  --init-upsample harmonic|copy
+                        the coarse init of --init-noise conditional on the children: smooth (a_lm up to
+                        2 nside_init, default; details around the same upsampling of the references'
+                        parents) or copied (details around the parent means)
+  --init-bins Q         quantile bins per feature of --init-noise conditional (default 8)
   --seed N              default 61022026
   --ps-variance-upper X upper band centre of the C_l variance term (default 383 at nside 128;
                         required otherwise)
@@ -98,6 +111,16 @@ pub struct Args {
     /// `--init`: Gaussian maps g of the members (`{m}` replaced by the
     /// member); default Gaussian random fields of the calibration's C_l.
     pub init: Option<String>,
+    /// `--init-noise conditional`: `--init` holds physical maps at a lower
+    /// nside, refined by [`crate::conditional::Conditional`] on the references.
+    pub init_conditional: bool,
+    /// `--init-bins`: quantile bins per feature (default 8).
+    pub init_bins: usize,
+    /// `--init-upsample copy`: the coarse init copied on the children
+    /// (default: harmonic upsampling).
+    pub init_copy: bool,
+    /// `--init-space physical`: the conditional draw on kappa (default: on g).
+    pub init_physical: bool,
     /// `--ps-variance-upper`: upper band centre of the C_l variance term
     /// (default 383 at nside 128, required otherwise).
     pub ps_variance_upper: Option<f64>,
@@ -146,6 +169,7 @@ impl Args {
             block_pixels: 16384,
             ranks: 1,
             gpu_cache: "auto".into(),
+            init_bins: 8,
             ..Default::default()
         };
         let mut it = argv.iter().peekable();
@@ -174,6 +198,21 @@ impl Args {
                 "--niter" => a.niter = num(it.next(), k)?,
                 "--max-eval" => a.max_eval = Some(num(it.next(), k)?),
                 "--init" => a.init = Some(it.next().ok_or("--init needs a path")?.clone()),
+                "--init-noise" => match it.next().map(|v| v.as_str()) {
+                    Some("conditional") => a.init_conditional = true,
+                    _ => return Err("--init-noise: conditional".into()),
+                },
+                "--init-bins" => a.init_bins = num(it.next(), k)?,
+                "--init-space" => match it.next().map(|v| v.as_str()) {
+                    Some("physical") => a.init_physical = true,
+                    Some("g") => a.init_physical = false,
+                    _ => return Err("--init-space: g or physical".into()),
+                },
+                "--init-upsample" => match it.next().map(|v| v.as_str()) {
+                    Some("copy") => a.init_copy = true,
+                    Some("harmonic") => a.init_copy = false,
+                    _ => return Err("--init-upsample: harmonic or copy".into()),
+                },
                 "--ps-variance-upper" => a.ps_variance_upper = Some(it.next().ok_or("--ps-variance-upper needs a value")?.parse().map_err(|_| "--ps-variance-upper: a number")?),
                 "--history-size" => a.history_size = num(it.next(), k)?,
                 "--checkpoint" => a.checkpoint = num(it.next(), k)?,
@@ -201,6 +240,7 @@ impl Args {
         match a.command.as_str() {
             "calibrate" if a.references.len() < 2 || a.nside == 0 || a.out.is_none() => Err("calibrate needs --references (two or more), --nside and --out".into()),
             "run" if a.calibration.is_none() || a.out.is_none() => Err("run needs --calibration and --out".into()),
+            "run" if a.init_conditional && a.init.is_none() => Err("--init-noise conditional needs --init".into()),
             "calibrate" | "run" => {
                 if a.gpu && !cfg!(feature = "gpu") {
                     return Err("--gpu: built without the feature gpu".into());
@@ -383,6 +423,59 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
     let seed = args.seed.unwrap_or(61022026);
     let mut x = Vec::with_capacity(local * (e - s));
     match &args.init {
+        Some(p) if args.init_conditional => {
+            // The references at this nside, the parents' features and their details.
+            let mut refs = cal.references.iter().map(|r| read_map(&PathBuf::from(r)).map_err(|e| format!("{r}: {e}")).and_then(|x| degrade(&x, nside))).collect::<Result<Vec<_>, _>>()?;
+            // The physical outputs have their monopole removed: the references' is put back.
+            let monopole = refs.iter().map(|r| r.iter().sum::<f64>() / npix as f64).sum::<f64>() / refs.len() as f64;
+            if !args.init_physical {
+                refs.iter_mut().for_each(|r| r.iter_mut().for_each(|v| *v = cal.lut.gaussianize(*v)));
+            }
+            let slices: Vec<&[f64]> = refs.iter().map(|r| &r[s..e]).collect();
+            let read = |m: usize| -> Result<Vec<f64>, String> {
+                let f = PathBuf::from(p.replace("{m}", &format!("{m:03}")));
+                let v = read_map(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                let factor = npix / v.len().max(1);
+                if factor < 4 || factor * v.len() != npix || !factor.is_power_of_two() {
+                    return Err(format!("{}: --init-noise conditional needs a map at a lower nside than {nside}", f.display()));
+                }
+                Ok(v)
+            };
+            let factor = npix / read(first)?.len();
+            let nside_c = (nside as f64 / (factor as f64).sqrt()).round() as usize;
+            // g: the coarse g of a coarser run has that run's LUT; its values are
+            // matched to the pooled parent means of the references' g at this nside.
+            let mut pool: Vec<f64> = if args.init_physical { Vec::new() } else { refs.iter().flat_map(|r| r.chunks(factor).map(|c| c.iter().sum::<f64>() / factor as f64)).collect() };
+            pool.sort_by(f64::total_cmp);
+            let member = |m: usize| -> Result<Vec<f64>, String> {
+                let mut v = read(m)?;
+                if args.init_physical {
+                    v.iter_mut().for_each(|k| *k += monopole);
+                } else {
+                    let mut order: Vec<usize> = (0..v.len()).collect();
+                    order.sort_by(|&i, &j| v[i].total_cmp(&v[j]).then(i.cmp(&j)));
+                    let (n, q) = (v.len(), pool.len());
+                    for (rank, &i) in order.iter().enumerate() {
+                        v[i] = pool[((2 * rank + 1) * q) / (2 * n)];
+                    }
+                }
+                Ok(v)
+            };
+            let up = |v: &[f64]| crate::conditional::upsample(v, nside_c, nside);
+            let bases: Vec<Vec<f64>> = if args.init_copy { Vec::new() } else { refs.iter().map(|r| up(&degrade(r, nside_c).unwrap())[s..e].to_vec()).collect() };
+            let base_slices: Vec<&[f64]> = bases.iter().map(|b| b.as_slice()).collect();
+            let cond = crate::conditional::Conditional::pooled(gcomm, &slices, (!args.init_copy).then_some(&base_slices[..]), s, factor, nside_c as i64, args.init_bins);
+            for m in first..first + local {
+                let v = member(m)?;
+                let base = (!args.init_copy).then(|| up(&v)[s..e].to_vec());
+                let drawn = cond.draw_on(&v, base.as_deref(), s, e, seed + m as u64);
+                if args.init_physical {
+                    x.extend(drawn.into_iter().map(|k| cal.lut.gaussianize(k)));
+                } else {
+                    x.extend(drawn);
+                }
+            }
+        }
         Some(p) => {
             for m in first..first + local {
                 let f = PathBuf::from(p.replace("{m}", &format!("{m:03}")));
@@ -505,7 +598,7 @@ pub fn run_synthesis<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json
         "nside": nside, "scales": cal.scales, "orientations": 4, "kernel": 5, "members": members, "groups": groups,
         "ranks": comm.size(), "calibration": path, "references": cal.references, "bootstrap_ids": cal.bootstrap_ids,
         "ps_variance_upper": cutoff, "niter": args.niter, "max_eval": args.max_eval, "history_size": args.history_size,
-        "checkpoint": args.checkpoint, "init": args.init, "seed": seed, "gpu": gpu_info, "harmonic": if obj.device_terms() { "gpu" } else { "cpu" },
+        "checkpoint": args.checkpoint, "init": args.init, "init_noise": if args.init_conditional { json!({"conditional": true, "bins": args.init_bins, "upsample": if args.init_copy { "copy" } else { "harmonic" }, "space": if args.init_physical { "physical" } else { "g" }}) } else { serde_json::Value::Null }, "seed": seed, "gpu": gpu_info, "harmonic": if obj.device_terms() { "gpu" } else { "cpu" },
         "evaluations": history.len(), "seconds": seconds, "setup_seconds": setup_seconds,
         "seconds_per_evaluation": per_eval, "first_evaluation_seconds": evals.first(),
         "loss_history": &history, "blocks": BLOCKS, "blocks_history": &*blocks_history.borrow(),

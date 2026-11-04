@@ -1,0 +1,39 @@
+/tmp/jmdeloui-planar2d/stl-dev/STL_main/__init__.py:9: UserWarning: In development mode: Please run 'pip install -e .' in the root directory of the STL repository to properly install the package, its dependencies and enable proper version tracking.
+  warnings.warn(
+Running synthesis on device: cuda:0 dtype: torch.float64
+Initial shape for u: (10, 1, 32, 32)
+Prefiltering target to remove sub-pixel frequencies
+Synthesis on 764 ST coefficients
+Prefiltering initial map to remove sub-pixel frequencies
+Running synthesis on device: cuda:0 dtype: torch.float64
+Initial shape for u: (10, 1, 64, 64)
+Prefiltering target to remove sub-pixel frequencies
+Synthesis on 1478 ST coefficients
+Prefiltering initial map to remove sub-pixel frequencies
+Running synthesis on device: cuda:0 dtype: torch.float64
+Initial shape for u: (10, 1, 128, 128)
+Prefiltering target to remove sub-pixel frequencies
+Synthesis on 2530 ST coefficients
+Prefiltering initial map to remove sub-pixel frequencies
+Running synthesis on device: cuda:0 dtype: torch.float64
+Initial shape for u: (10, 1, 256, 256)
+Prefiltering target to remove sub-pixel frequencies
+Synthesis on 3986 ST coefficients
+Prefiltering initial map to remove sub-pixel frequencies
+0 {64: 1.5703, 128: 6.7442, 256: 15.9828}
+20 {64: 0.9941, 128: 4.4349, 256: 10.8415}
+40 {64: 0.936, 128: 2.8823, 256: 6.1257}
+60 {64: 0.7597, 128: 1.9968, 256: 4.3812}
+80 {64: 0.6026, 128: 1.6417, 256: 3.9086}
+100 {64: 0.5265, 128: 1.4831, 256: 3.7205}
+120 {64: 0.5403, 128: 1.464, 256: 3.6944}
+140 {64: 0.5166, 128: 1.4755, 256: 3.7322}
+160 {64: 0.531, 128: 1.4309, 256: 3.6399}
+180 {64: 0.5346, 128: 1.4005, 256: 3.5361}
+200 {64: 0.4379, 128: 1.3719, 256: 3.5385}
+220 {64: 0.4678, 128: 1.3366, 256: 3.4745}
+240 {64: 0.4701, 128: 1.3282, 256: 3.4182}
+260 {64: 0.439, 128: 1.3484, 256: 3.4963}
+280 {64: 0.4363, 128: 1.2822, 256: 3.3244}
+conditional_draw forward 8.068198259847646 after 300 evals 4.6268334364281805e-05
+attention forward 3.2821084966865346 after 300 evals 4.034827506092122e-05

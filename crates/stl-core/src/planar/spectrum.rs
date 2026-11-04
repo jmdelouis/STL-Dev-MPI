@@ -83,7 +83,7 @@ impl Fft2 {
 
     /// `Re ifft(H fft x)` for a real plane: a real linear operator when the
     /// multiplier is Hermitian.
-    fn multiply(&self, x: &[f64], hk: impl Fn(i64, i64) -> C64) -> Vec<f64> {
+    pub fn multiply(&self, x: &[f64], hk: impl Fn(i64, i64) -> C64) -> Vec<f64> {
         let mut v: Vec<C64> = x.iter().map(|&a| C64::new(a, 0.0)).collect();
         self.forward(&mut v);
         for r in 0..self.h {
