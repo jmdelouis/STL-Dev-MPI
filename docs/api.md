@@ -82,3 +82,5 @@ The synthesis driver is `stl_cli::run` (behind `stl-synth`); the ensemble method
 
 `stl-bridge` exposes the engines through a C ABI used by P. Campeti's Python package
 (`python/stl_ensemble`); see [the merge report](campeti_merge.md), section 2.
+Disc patches (`PatchEngine`, `stlp_patch_*`) and cross statistics (`cross=True`): see
+[Disc patches and cross statistics](disc_cross_statistics.md).

@@ -10,6 +10,7 @@ pub mod cublas;
 pub mod cufft;
 pub mod device;
 pub mod dia;
+pub mod disc;
 pub mod engine;
 pub mod geometry;
 pub mod harmonic;

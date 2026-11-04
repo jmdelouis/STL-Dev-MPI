@@ -155,6 +155,12 @@ impl LocalGeometry {
         ConvPlan::new(grid, rows, self.nside(dg), self.kernel_sz, self.l, self.gauge, self.conv_chunk)
     }
 
+    /// [`conv_plan`](Self::conv_plan) with the binding threshold `eps` of
+    /// [`crate::conv::ConvGeometry::rows_eps`].
+    pub fn conv_plan_eps(&self, dg: usize, grid: &[i64], rows: &[i64], eps: f64) -> ConvPlan {
+        ConvPlan::new_eps(grid, rows, self.nside(dg), self.kernel_sz, self.l, self.gauge, self.conv_chunk, eps)
+    }
+
     /// Wavelet of `x_level` `[R, N_dg]` on `block`: `z` `[R, L, |block|]`.
     pub fn wave(&self, x_level: &[f64], block: &[i64], dg: usize) -> Wave {
         let n = self.pixels(dg);

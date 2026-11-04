@@ -68,9 +68,64 @@ impl H {
         }
     }
 
+    /// Values of one member: channels times pixels.
     fn npix(&self) -> usize {
-        let nside = self.info()["nside"].as_u64().unwrap() as usize;
-        12 * nside * nside
+        let info = self.info();
+        let nside = info["nside"].as_u64().unwrap() as usize;
+        info["channels"].as_u64().unwrap() as usize * 12 * nside * nside
+    }
+}
+
+/// A patch handle, or `None` (with the reason) when it cannot be built.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+struct P(*mut PatchHandle);
+
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+impl P {
+    fn new(config: &str) -> Option<P> {
+        let c = CString::new(config).unwrap();
+        let p = unsafe { stlp_patch_new(c.as_ptr()) };
+        if p.is_null() {
+            eprintln!("patch handle not built ({config}): {}", error());
+            return None;
+        }
+        Some(P(p))
+    }
+
+    fn info(&self) -> serde_json::Value {
+        unsafe {
+            let s = stlp_patch_info(self.0);
+            assert!(!s.is_null(), "{}", error());
+            let v = serde_json::from_str(CStr::from_ptr(s).to_str().unwrap()).unwrap();
+            stlp_string_free(s);
+            v
+        }
+    }
+
+    /// Level-0 sizes of the discs (radii in radians, core <= 0: none).
+    fn select(&self, centres: &[f64], radius: f64, core: f64) -> Vec<usize> {
+        let mut counts = vec![0usize; centres.len() / 3];
+        assert_eq!(unsafe { stlp_patch_select(self.0, centres.as_ptr(), counts.len(), radius, core, counts.as_mut_ptr()) }, 0, "{}", error());
+        counts
+    }
+
+    fn forward(&self, x: &[f64], b: usize, generation: u64) -> (Vec<f64>, Vec<f64>) {
+        let n = b * self.info()["plan"].as_array().unwrap().len();
+        let (mut v, mut var) = (vec![0.0; 2 * n], vec![0.0; n]);
+        assert_eq!(unsafe { stlp_patch_forward(self.0, x.as_ptr(), x.len(), generation, true, v.as_mut_ptr(), var.as_mut_ptr()) }, 0, "{}", error());
+        (v, var)
+    }
+
+    fn vjp(&self, cot: &[f64], len: usize, generation: u64) -> Vec<f64> {
+        let mut g = vec![0.0; len];
+        assert_eq!(unsafe { stlp_patch_vjp(self.0, cot.as_ptr(), cot.len() / 2, generation, g.as_mut_ptr()) }, 0, "{}", error());
+        g
+    }
+}
+
+impl Drop for P {
+    fn drop(&mut self) {
+        unsafe { stlp_patch_free(self.0) };
     }
 }
 
@@ -256,6 +311,51 @@ fn bad_configuration_is_an_error() {
     assert!(H::new(r#"{"nside": 8, "j": 3, "backend": "tpu"}"#).is_none());
 }
 
+/// Patch handle on discs of radius 180 degrees (two centres, one batch)
+/// against the full-sky handle: values, variances, gradients; the cross
+/// handle on `(a, a)` against the auto terms; the geometry cache.
+#[test]
+fn patch_full_disc_matches_the_full_sky_handle() {
+    let nside = 8usize;
+    let npix = 12 * nside * nside;
+    for cross in [false, true] {
+        let channels = if cross { 2 } else { 1 };
+        let full = H::new(&format!(r#"{{"nside": {nside}, "j": 3, "batch": 2, "block_pixels": 256, "cross": {cross}}}"#)).unwrap();
+        let x = noise(2 * channels * npix, 11);
+        let (v_ref, var_ref) = full.forward(&x, 1, 0, 0);
+        let cot = noise(v_ref.len(), 12);
+        let g_ref = full.vjp(&cot, 1, 0, 0).unwrap();
+        let config = CString::new(format!(r#"{{"nside": {nside}, "j": 3, "cross": {cross}, "threads": 2, "cache": 1}}"#)).unwrap();
+        let p = unsafe { stlp_patch_new(config.as_ptr()) };
+        assert!(!p.is_null(), "{}", error());
+        let centres = [0.0, 0.0, 1.0, 1.0, 2.0, -0.5];
+        let mut counts = [0usize; 2];
+        for _ in 0..2 {
+            assert_eq!(unsafe { stlp_patch_select(p, centres.as_ptr(), 2, std::f64::consts::PI, 0.0, counts.as_mut_ptr()) }, 0, "{}", error());
+            assert_eq!(counts, [npix, npix]);
+        }
+        let mut ids = vec![0i64; npix];
+        assert_eq!(unsafe { stlp_patch_ids(p, 1, ids.as_mut_ptr()) }, 0);
+        assert!(ids.iter().enumerate().all(|(i, &v)| v == i as i64));
+        let (mut v, mut var) = (vec![0.0; v_ref.len()], vec![0.0; var_ref.len()]);
+        assert_eq!(unsafe { stlp_patch_forward(p, x.as_ptr(), x.len(), 5, true, v.as_mut_ptr(), var.as_mut_ptr()) }, 0, "{}", error());
+        assert!(max_rel(&v, &v_ref) < 1e-10 && max_rel(&var, &var_ref) < 1e-10);
+        let mut g = vec![0.0; x.len()];
+        assert_ne!(unsafe { stlp_patch_vjp(p, cot.as_ptr(), cot.len() / 2, 4, g.as_mut_ptr()) }, 0, "stale generation accepted");
+        assert_eq!(unsafe { stlp_patch_vjp(p, cot.as_ptr(), cot.len() / 2, 5, g.as_mut_ptr()) }, 0, "{}", error());
+        assert!(max_rel(&g, &g_ref) < 1e-10);
+        let info = unsafe {
+            let s = stlp_patch_info(p);
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(s).to_str().unwrap()).unwrap();
+            stlp_string_free(s);
+            v
+        };
+        assert_eq!(info["plan"], full.info()["plan"]);
+        assert_eq!((info["cache"]["entries"].as_u64(), info["cache"]["hits"].as_u64(), info["cache"]["misses"].as_u64()), (Some(1), Some(1), Some(3)));
+        unsafe { stlp_patch_free(p) };
+    }
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
@@ -283,6 +383,112 @@ mod gpu {
             let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
             eprintln!("{conv}/{fields}: values {ev:e}, variances {es:e}, gradient {eg:e}");
             assert!(ev <= 1e-13 && es <= 1e-12 && eg <= 1e-12);
+        }
+    }
+
+    /// Cross handle (two channels, cross terms only): device against CPU.
+    #[test]
+    fn device_cross_matches_cpu() {
+        let cpu = H::new(r#"{"nside": 32, "j": 4, "batch": 2, "block_pixels": 256, "cross": true}"#).unwrap();
+        let x = noise(2 * cpu.npix(), 31);
+        let cot = noise(4 * cpu.ncoeff(), 32);
+        let (vc, sc) = cpu.forward(&x, 1, 0, 0);
+        let gc = cpu.vjp(&cot, 1, 0, 0).unwrap();
+        for (conv, fields) in FORMS {
+            let cfg = config(2, conv, fields).replace("\"backend\"", "\"cross\": true, \"backend\"");
+            let Some(h) = H::new(&cfg) else { return };
+            let (v, s) = h.forward(&x, 1, 0, 0);
+            let g = h.vjp(&cot, 1, 0, 0).unwrap();
+            let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
+            eprintln!("cross {conv}/{fields}: values {ev:e}, variances {es:e}, gradient {eg:e}");
+            // The cross S1 VJP divides by (|z| + 1e-8)^1.5: rounding of small
+            // |z| is amplified (2.2e-12 measured on a T4).
+            assert!(ev <= 1e-13 && es <= 1e-12 && eg <= 1e-11);
+        }
+    }
+
+    /// Device patch handle against the CPU one: several patches per disc
+    /// (groups of different sizes), with and without a core, auto and
+    /// cross, the device cache capped below one disc or a reserve above the
+    /// device memory (only the batch kept).
+    #[test]
+    fn device_patches_match_cpu() {
+        let deg = std::f64::consts::PI / 180.0;
+        let centres = [0.0, 0.0, 1.0, 1.0, 2.0, -0.5, 0.0, 0.0, 1.0, -1.0, 0.3, 0.2, 1.0, 2.0, -0.5];
+        let b = centres.len() / 3;
+        for cross in [false, true] {
+            let channels = if cross { 2 } else { 1 };
+            let base = format!(r#""nside": 32, "j": 4, "cross": {cross}, "threads": 2"#);
+            let cpu = P::new(&format!("{{{base}}}")).unwrap();
+            for (gpu_cfg, core) in [(r#""cache_bytes": 0"#, 25.0 * deg), (r#""cache": 2, "reserve_bytes": 1000000000000000"#, 0.0)] {
+                let Some(dev) = P::new(&format!(r#"{{{base}, "backend": "gpu", {gpu_cfg}}}"#)) else { return };
+                let counts = cpu.select(&centres, 40.0 * deg, core);
+                for _ in 0..2 {
+                    assert_eq!(dev.select(&centres, 40.0 * deg, core), counts);
+                }
+                let n: usize = channels * counts.iter().sum::<usize>();
+                let x = noise(n, 41);
+                let (vc, sc) = cpu.forward(&x, b, 3);
+                let cot = noise(vc.len(), 42);
+                let gc = cpu.vjp(&cot, n, 3);
+                for round in 0..2 {
+                    let (v, s) = dev.forward(&x, b, 7);
+                    let g = dev.vjp(&cot, n, 7);
+                    let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
+                    eprintln!("patches cross {cross} core {core:.3} round {round}: values {ev:e}, variances {es:e}, gradient {eg:e}");
+                    assert!(ev <= 1e-12 && es <= 1e-11 && eg <= 1e-11);
+                }
+                let info = dev.info();
+                eprintln!("device {}", info["device"]);
+                assert_eq!(info["backend"], "gpu");
+            }
+        }
+    }
+
+    /// Patches read from and cotangents written to device memory: the
+    /// host results.
+    #[test]
+    fn device_pointers_match_host_patches() {
+        let deg = std::f64::consts::PI / 180.0;
+        let centres = [0.0, 0.0, 1.0, 1.0, 2.0, -0.5, 0.0, 0.0, 1.0];
+        let Some(dev) = P::new(r#"{"nside": 32, "j": 4, "cross": true, "backend": "gpu"}"#) else { return };
+        let counts = dev.select(&centres, 30.0 * deg, 20.0 * deg);
+        let n = 2 * counts.iter().sum::<usize>();
+        let x = noise(n, 61);
+        let (vh, sh) = dev.forward(&x, 3, 1);
+        let cot = noise(vh.len(), 62);
+        let gh = dev.vjp(&cot, n, 1);
+        let gpu = stl_gpu::Gpu::new(0).unwrap();
+        let xd = gpu.upload(&x);
+        let gd = gpu.zeros::<f64>(n);
+        let (mut v, mut s) = (vec![0.0; vh.len()], vec![0.0; sh.len()]);
+        assert_eq!(unsafe { stlp_patch_forward_device(dev.0, gpu.ptr(&xd), n, 2, true, v.as_mut_ptr(), s.as_mut_ptr()) }, 0, "{}", error());
+        assert_eq!(unsafe { stlp_patch_vjp_device(dev.0, cot.as_ptr(), cot.len() / 2, 2, gpu.ptr(&gd)) }, 0, "{}", error());
+        let g = gpu.download(&gd);
+        assert_eq!((v, s), (vh, sh));
+        assert_eq!(g, gh);
+    }
+
+    /// A device disc of radius 180 degrees: the full-sky statistics.
+    #[test]
+    fn device_full_disc_matches_the_full_sky_handle() {
+        let nside = 16usize;
+        let npix = 12 * nside * nside;
+        for cross in [false, true] {
+            let channels = if cross { 2 } else { 1 };
+            let full = H::new(&format!(r#"{{"nside": {nside}, "j": 3, "batch": 2, "block_pixels": 256, "cross": {cross}}}"#)).unwrap();
+            let x = noise(2 * channels * npix, 51);
+            let (v_ref, var_ref) = full.forward(&x, 1, 0, 0);
+            let cot = noise(v_ref.len(), 52);
+            let g_ref = full.vjp(&cot, 1, 0, 0).unwrap();
+            let Some(p) = P::new(&format!(r#"{{"nside": {nside}, "j": 3, "cross": {cross}, "backend": "gpu"}}"#)) else { return };
+            assert_eq!(p.select(&[0.0, 0.0, 1.0, 1.0, 2.0, -0.5], std::f64::consts::PI, 0.0), [npix, npix]);
+            let (v, var) = p.forward(&x, 2, 1);
+            let g = p.vjp(&cot, x.len(), 1);
+            let (ev, es, eg) = (max_rel(&v, &v_ref), max_rel(&var, &var_ref), max_rel(&g, &g_ref));
+            eprintln!("full disc cross {cross}: values {ev:e}, variances {es:e}, gradient {eg:e}");
+            assert!(ev <= 1e-10 && es <= 1e-10 && eg <= 1e-10);
+            assert_eq!(p.info()["plan"], full.info()["plan"]);
         }
     }
 

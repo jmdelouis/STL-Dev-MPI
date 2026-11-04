@@ -334,7 +334,7 @@ __device__ __forceinline__ void rotate_interp(double r[3][3], const double* v, i
 // cell found takes the central tap (`ref_idx`, `ref_w`).
 __device__ void bind_tap(double r[3][3], const double* v, int order, const double* thetas,
     const i64* ref_idx, const double* ref_w,
-    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
+    const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0, double eps,
     i64 ix[4], i64 found[4], double w[4])
 {
     double wx[4];
@@ -342,6 +342,7 @@ __device__ void bind_tap(double r[3][3], const double* v, int order, const doubl
     bool any = false;
     for (int n = 0; n < 4; n++) {
         found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
+        if (eps > 0.0 && wx[n] <= eps) found[n] = -1;
         any = any || found[n] >= 0;
     }
     if (!any) {
@@ -349,6 +350,7 @@ __device__ void bind_tap(double r[3][3], const double* v, int order, const doubl
             ix[n] = ref_idx[n];
             wx[n] = ref_w[n];
             found[n] = grid_find(grid, n_grid, own_start, own_end, own_pos0, ix[n]);
+            if (eps > 0.0 && wx[n] <= eps) found[n] = -1;
         }
     }
     for (int n = 0; n < 4; n++) w[n] = wx[n] * (found[n] >= 0 ? 1.0 : 0.0);
@@ -361,12 +363,13 @@ __device__ void bind_tap(double r[3][3], const double* v, int order, const doubl
 }
 
 // Bound stencils of the output rows `rows[K]` reading `grid`, one thread
-// per (row, gauge).  Entry ((g * 4 + n) * P + p) * K + k (rows fastest, so
+// per (row, gauge); with eps > 0 the cells of weight <= eps are not read
+// (ConvGeometry::rows_eps).  Entry ((g * 4 + n) * P + p) * K + k (rows fastest, so
 // that consecutive threads read consecutive entries).  `complete[k * G + g]`.
 extern "C" __global__ void geom_build(
     const i64* grid, i64 n_grid, i64 own_start, i64 own_end, i64 own_pos0,
     const i64* rows, i64 K, i64 nside, int order, int G, int P, int gauge,
-    const double* stencil, int p_ref, const double* thetas,
+    const double* stencil, int p_ref, const double* thetas, double eps,
     u32* pos, double* wout, unsigned char* complete)
 {
     i64 t = (i64)blockIdx.x * blockDim.x + threadIdx.x;
@@ -382,7 +385,7 @@ extern "C" __global__ void geom_build(
     for (int p = 0; p < P; p++) {
         i64 ix[4], found[4];
         double w[4];
-        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, ix, found, w);
+        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, eps, ix, found, w);
         for (int n = 0; n < 4; n++) {
             i64 a = (((i64)g * 4 + n) * P + p) * K + k;
             wout[a] = w[n];
@@ -422,8 +425,8 @@ __device__ __forceinline__ u32 key_entry(u32 key, u64 K, u64 P) {
 }
 
 // One block per segment: entries sorted by their scatter order, bitonic
-// sort in shared memory (segments up to SEG_CAP entries), serial insertion
-// sort above.
+// sort in shared memory (segments up to SEG_CAP entries), in global memory
+// above (cells read by many rows, e.g. on the coarse levels of a disc).
 #define SEG_CAP 2048
 extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx, i64 K, int P) {
     __shared__ u32 buf[SEG_CAP];
@@ -432,16 +435,28 @@ extern "C" __global__ void seg_sort(const u32* offsets, i64 n_seg, u32* idx, i64
         u32 len = b - a;
         if (len <= 1) continue;
         if (len > SEG_CAP) {
-            if (threadIdx.x == 0) {
-                for (u32 i = a; i < b; i++) idx[i] = entry_key(idx[i], K, P);
-                for (u32 i = a + 1; i < b; i++) {
-                    u32 v = idx[i];
-                    u32 j = i;
-                    while (j > a && idx[j - 1] > v) { idx[j] = idx[j - 1]; j--; }
-                    idx[j] = v;
+            // Bitonic sort in global memory, in the form whose compares are
+            // all ascending (mirror pairs i ^ (size - 1), then i ^ stride):
+            // the virtual padding up to m (+inf) never moves.  The keys are
+            // unique, so the order is that of any sort.
+            u32* h = idx + a;
+            for (u32 i = threadIdx.x; i < len; i += blockDim.x) h[i] = entry_key(h[i], K, P);
+            __syncthreads();
+            u32 m = 1;
+            while (m < len) m <<= 1;
+            for (u32 size = 2; size <= m; size <<= 1) {
+                for (u32 stride = size >> 1; stride > 0; stride >>= 1) {
+                    for (u32 i = threadIdx.x; i < m; i += blockDim.x) {
+                        u32 j = stride == (size >> 1) ? i ^ (size - 1) : i ^ stride;
+                        if (j > i && j < len) {
+                            u32 x = h[i], y = h[j];
+                            if (x > y) { h[i] = y; h[j] = x; }
+                        }
+                    }
+                    __syncthreads();
                 }
-                for (u32 i = a; i < b; i++) idx[i] = key_entry(idx[i], K, P);
             }
+            for (u32 i = threadIdx.x; i < len; i += blockDim.x) h[i] = key_entry(h[i], K, P);
             __syncthreads();
             continue;
         }
@@ -785,7 +800,7 @@ extern "C" __global__ void dia_build(
     for (int p = 0; p < P; p++) {
         i64 ix[4], found[4];
         double w[4];
-        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, ix, found, w);
+        bind_tap(r, stencil + 3 * p, order, thetas, ref_idx, ref_w, grid, n_grid, own_start, own_end, own_pos0, 0.0, ix, found, w);
         for (int n = 0; n < 4; n++) {
             if (w[n] == 0.0) continue;
             int d = diag_of(x, y, f, ix[n], nside, order, dindex, W);

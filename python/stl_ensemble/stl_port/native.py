@@ -13,10 +13,12 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-10-28-v1"
+SCRIPT_VERSION = "2026-11-05-v3"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
+_INT64 = C.POINTER(C.c_int64)
+_SIZE = C.POINTER(C.c_size_t)
 _VOID = C.c_void_p
 _CALLBACK = C.CFUNCTYPE(C.c_double, _DOUBLE, C.c_size_t, _DOUBLE, _VOID)
 _LIBRARIES = {}
@@ -59,6 +61,17 @@ def _library(path=None):
         "stlp_checkpoint_free": ([_VOID], None),
         "stlp_restore": ([_VOID, _VOID, C.c_uint64, C.c_uint64, C.c_uint64], C.c_int),
         "stlp_lbfgs": ([_DOUBLE, C.c_size_t, C.c_char_p, _CALLBACK, _VOID], C.c_int64),
+        "stlp_patch_new": ([C.c_char_p], _VOID),
+        "stlp_patch_free": ([_VOID], None),
+        "stlp_patch_info": ([_VOID], _VOID),
+        "stlp_pixel_vectors": ([C.c_size_t, _INT64, C.c_size_t, _DOUBLE], C.c_int),
+        "stlp_patch_select": ([_VOID, _DOUBLE, C.c_size_t, C.c_double, C.c_double, _SIZE], C.c_int),
+        "stlp_patch_ids": ([_VOID, C.c_size_t, _INT64], C.c_int),
+        "stlp_patch_core_pixels": ([_VOID, _SIZE], C.c_int),
+        "stlp_patch_forward": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_bool, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_patch_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, _DOUBLE], C.c_int),
+        "stlp_patch_forward_device": ([_VOID, C.c_uint64, C.c_size_t, C.c_uint64, C.c_bool, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_patch_vjp_device": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64], C.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -107,10 +120,15 @@ class NativeEngine:
     forward returns (complex values, real within-map spatial variances). The
     latter is an empty (batch,0) array unless moments=True; it is NOT the
     TRAIN54 across-map variance and is NOT divided by native pixel count.
+
+    cross=True: the maps are pairs [batch, 2, npix] and the plan holds the
+    cross terms of the two channels only (S1, S2, S3, S4 with c1 != c2;
+    S3/S4 in both orders); see forward_cross / vjp_cross.
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
-                 threads=1, cache="transposition", device=0, library=None):
+                 threads=1, cache="transposition", device=0, library=None,
+                 cross=False):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -124,10 +142,12 @@ class NativeEngine:
         self.nside, self.j, self.batch = int(nside), int(j), int(batch)
         self.npix = 12 * self.nside**2
         self.backend = backend
+        self.cross = bool(cross)
+        self.channels = 2 if self.cross else 1
         self.config = dict(nside=self.nside, j=self.j, batch=self.batch,
                            backend=backend, kernel=int(kernel), orientations=int(orientations),
                            block_pixels=int(block_pixels), cache_bytes=int(cache_bytes),
-                           threads=int(threads), cache=cache, device=int(device))
+                           threads=int(threads), cache=cache, device=int(device), cross=self.cross)
         self._handle = self._lib.stlp_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
@@ -158,10 +178,11 @@ class NativeEngine:
             self._open()
             key = _key(generation, member, objective)
             x = np.ascontiguousarray(maps, dtype=np.float64)
-            if x.shape == (self.npix,) and self.batch == 1:
-                x = x[None, :]
-            if x.shape != (self.batch, self.npix):
-                raise ValueError(f"expected maps {(self.batch, self.npix)}, got {x.shape}")
+            shape = (self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix)
+            if x.shape == shape[1:] and self.batch == 1:
+                x = x[None]
+            if x.shape != shape:
+                raise ValueError(f"expected maps {shape}, got {x.shape}")
             if not np.isfinite(x).all():
                 raise ValueError("input map contains non-finite values")
             values = np.empty((self.batch, self.ncoeff), dtype=np.complex128)
@@ -187,11 +208,24 @@ class NativeEngine:
                 raise ValueError(f"expected cotangents {(self.batch,self.ncoeff)}, got {c.shape}")
             if not np.isfinite(c).all():
                 raise ValueError("non-finite coefficient cotangent")
-            grad = np.empty((self.batch, self.npix), dtype=np.float64)
+            grad = np.empty((self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix), dtype=np.float64)
             status = self._lib.stlp_vjp(self._handle, _pointer(c.view(np.float64)), c.size, *key, _pointer(grad))
             if status:
                 raise _error(self._lib)
             return grad
+
+    def forward_cross(self, a, b, generation=0, member=0, objective="gaussian", moments=False):
+        """Cross statistics S(a, b) of the pairs a, b [batch, npix] (cross=True)."""
+        if not self.cross:
+            raise RuntimeError("forward_cross needs NativeEngine(..., cross=True)")
+        a = np.asarray(a, dtype=np.float64).reshape(self.batch, self.npix)
+        b = np.asarray(b, dtype=np.float64).reshape(self.batch, self.npix)
+        return self.forward(np.stack([a, b], 1), generation, member, objective, moments)
+
+    def vjp_cross(self, cotangents, generation=0, member=0, objective="gaussian"):
+        """(grad_a, grad_b), each [batch, npix], after forward_cross."""
+        g = self.vjp(cotangents, generation, member, objective)
+        return g[:, 0], g[:, 1]
 
     def checkpoint(self):
         with self._lock:
@@ -280,3 +314,283 @@ def native_lbfgs(callback, x, options=None, library=None):
     return x, dict(evaluations=int(count), loss_history=history, options=resolved,
                    optimizer="native STL joint L-BFGS", line_search="strong_wolfe",
                    version=SCRIPT_VERSION)
+
+
+def delouis_transform(values):
+    """sign(Re) sqrt|Re| + i sign(Im) sqrt|Im| (Delouis et al. 2022, A&A 668,
+    A122, Sect. 2.2), element-wise on complex statistics."""
+    v = np.asarray(values, dtype=np.complex128)
+    return np.sign(v.real) * np.sqrt(np.abs(v.real)) + 1j * np.sign(v.imag) * np.sqrt(np.abs(v.imag))
+
+
+def delouis_transform_vjp(values, cotangents, eps=0.0):
+    """Cotangent of the statistics from the cotangent of
+    delouis_transform(values): d sqrt|x| / dx = 1 / (2 sqrt|x|), unbounded at
+    x = 0 (eps > 0 bounds it)."""
+    v = np.asarray(values, dtype=np.complex128)
+    g = np.asarray(cotangents, dtype=np.complex128)
+    return g.real / (2 * np.sqrt(np.abs(v.real)) + eps) + 1j * g.imag / (2 * np.sqrt(np.abs(v.imag)) + eps)
+
+
+class PatchEngine:
+    """Statistics on disc patches, CPU (the patches of a batch on host threads)
+    or GPU (backend="gpu": the patches of a batch grouped by disc, the disc
+    geometries cached on the device while it keeps reserve_bytes free (2 GiB,
+    the free memory read when a disc is built, so that a network on the same
+    GPU is accounted for), optionally capped at cache_bytes; same definitions
+    and API).
+
+    Same plan and formulas as NativeEngine (cross=True: the cross terms of
+    two maps), averaged over a spherical disc. The support is every NESTED
+    pixel of `nside` whose centre lies within `radius` degrees of the disc
+    centre; a coarser level keeps the parents of the finer one; the wavelet
+    is bound to the support with renormalised weights and the decimation is
+    the smooth one restricted to the support. With `core` (degrees, <
+    radius) the coefficients are means over the core pixels (and their
+    parents at the coarser levels) only. A disc of radius 180 gives the
+    full-sky statistics.
+
+    select(centres, radius, core=None) -> ids, a list of sorted NESTED pixel
+        arrays; centres are NESTED pixels [B] at nside or vectors [B, 3].
+    forward(maps, centres=None, radius=None, core=None, moments=True,
+        generation=0) -> (values [B, ncoeff] complex, variances [B, ncoeff]);
+        maps[i] is the patch x[ids[i]] ([n_i], or [2, n_i] with cross=True),
+        a list, or a dense array when every disc has the same size.
+    vjp(cotangents [B, ncoeff], generation=0) -> gradients shaped like maps.
+    native_pixels [B, ncoeff]: number of pixels each coefficient averages.
+    """
+    def __init__(self, nside, j, kernel=5, orientations=4, cross=False,
+                 threads=0, cache=256, library=None, backend="cpu", device=0, cache_bytes=None,
+                 reserve_bytes=None):
+        self._lib = _library(library)
+        self.library_sha256 = self._lib._stlp_binary_sha256
+        self._handle = None
+        self._lock = threading.RLock()
+        self.nside, self.j, self.cross = int(nside), int(j), bool(cross)
+        self.channels = 2 if self.cross else 1
+        self.config = dict(nside=self.nside, j=self.j, kernel=int(kernel), orientations=int(orientations),
+                           cross=self.cross, threads=int(threads), cache=int(cache), backend=str(backend))
+        if backend == "gpu":
+            self.config["device"] = int(device)
+            if cache_bytes is not None:
+                self.config["cache_bytes"] = int(cache_bytes)
+            if reserve_bytes is not None:
+                self.config["reserve_bytes"] = int(reserve_bytes)
+        self._handle = self._lib.stlp_patch_new(json.dumps(self.config).encode())
+        if not self._handle:
+            raise _error(self._lib)
+        info = self.info()
+        self.plan, self.levels = info["plan"], info["levels"]
+        self.ncoeff = len(self.plan)
+        self._native = np.array([c["native_dg"] for c in self.plan], dtype=np.int64)
+        self.ids, self.native_pixels = [], None
+        self._selection, self._dense, self._generation = None, False, None
+
+    def _open(self):
+        if not self._handle:
+            raise RuntimeError("patch engine is closed")
+
+    def info(self):
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_patch_info(self._handle)
+            if not p:
+                raise _error(self._lib)
+            try:
+                result = json.loads(C.string_at(p))
+                result["library_sha256"] = self.library_sha256
+                return result
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def centre_vectors(self, centres):
+        """Unit vectors [B, 3] of NESTED pixels [B] at nside; vectors [B, 3] as given."""
+        c = np.asarray(centres)
+        if np.issubdtype(c.dtype, np.integer):
+            ids = np.ascontiguousarray(c.reshape(-1), dtype=np.int64)
+            out = np.empty((ids.size, 3), dtype=np.float64)
+            if self._lib.stlp_pixel_vectors(self.nside, ids.ctypes.data_as(_INT64), ids.size, _pointer(out)):
+                raise _error(self._lib)
+            return out
+        c = np.ascontiguousarray(c, dtype=np.float64)
+        if c.ndim == 1:
+            c = c[None]
+        if c.ndim != 2 or c.shape[1] != 3:
+            raise ValueError("centres must be NESTED pixel indices [B] or vectors [B, 3]")
+        return c
+
+    def select(self, centres, radius, core=None):
+        """Selects the discs (radius, core in degrees); returns their sorted
+        NESTED pixels (level 0). A repeated selection is free."""
+        with self._lock:
+            self._open()
+            v = np.ascontiguousarray(self.centre_vectors(centres))
+            key = (v.tobytes(), float(radius), None if core is None else float(core))
+            if key == self._selection:
+                return self.ids
+            b = v.shape[0]
+            counts = np.empty(b, dtype=np.uintp)
+            rc = 0.0 if core is None else np.radians(float(core))
+            self._generation, self._selection = None, None
+            if self._lib.stlp_patch_select(self._handle, _pointer(v), b, np.radians(float(radius)), rc,
+                                           counts.ctypes.data_as(_SIZE)):
+                raise _error(self._lib)
+            ids = []
+            for i, n in enumerate(counts):
+                a = np.empty(int(n), dtype=np.int64)
+                if self._lib.stlp_patch_ids(self._handle, i, a.ctypes.data_as(_INT64)):
+                    raise _error(self._lib)
+                ids.append(a)
+            core_pixels = np.empty((b, self.levels), dtype=np.uintp)
+            if self._lib.stlp_patch_core_pixels(self._handle, core_pixels.ctypes.data_as(_SIZE)):
+                raise _error(self._lib)
+            self.ids, self._selection = ids, key
+            self.native_pixels = core_pixels.astype(np.float64)[:, self._native]
+            return ids
+
+    def gather(self, maps):
+        """Patches of the selected discs from full-sky maps: maps [npix]
+        (the same map for every disc) or [B, npix] / [B, 2, npix] (map i
+        for disc i); returns a list."""
+        m = np.asarray(maps)
+        if m.ndim == 1:
+            return [m[i] for i in self.ids]
+        return [m[k][..., i] for k, i in enumerate(self.ids)]
+
+    def forward(self, maps, centres=None, radius=None, core=None, moments=True, generation=0):
+        with self._lock:
+            self._open()
+            if centres is not None:
+                if radius is None:
+                    raise ValueError("radius (degrees) is required with centres")
+                self.select(centres, radius, core)
+            if not self.ids:
+                raise RuntimeError("no disc selected")
+            b = len(self.ids)
+            if len(maps) != b:
+                raise ValueError(f"expected {b} patches, got {len(maps)}")
+            parts = []
+            for i, (m, ids) in enumerate(zip(maps, self.ids)):
+                m = np.asarray(m, dtype=np.float64)
+                shape = (ids.size,) if not self.cross else (2, ids.size)
+                if m.shape != shape:
+                    raise ValueError(f"patch {i}: expected {shape}, got {m.shape}")
+                parts.append(m.reshape(-1))
+            x = np.ascontiguousarray(np.concatenate(parts))
+            if not np.isfinite(x).all():
+                raise ValueError("input patch contains non-finite values")
+            self._dense = isinstance(maps, np.ndarray)
+            values = np.empty((b, self.ncoeff), dtype=np.complex128)
+            variance = np.empty((b, self.ncoeff if moments else 0), dtype=np.float64)
+            self._generation = None
+            if self._lib.stlp_patch_forward(self._handle, _pointer(x), x.size, int(generation), moments,
+                                            _pointer(values.view(np.float64)), _pointer(variance)):
+                raise _error(self._lib)
+            self._generation = int(generation)
+            return values, variance
+
+    def vjp(self, cotangents, generation=0):
+        with self._lock:
+            self._open()
+            if self._generation != int(generation):
+                raise RuntimeError("stale forward state")
+            b = len(self.ids)
+            c = np.ascontiguousarray(cotangents, dtype=np.complex128)
+            if c.shape != (b, self.ncoeff):
+                raise ValueError(f"expected cotangents {(b, self.ncoeff)}, got {c.shape}")
+            if not np.isfinite(c).all():
+                raise ValueError("non-finite coefficient cotangent")
+            sizes = [self.channels * i.size for i in self.ids]
+            g = np.empty(sum(sizes), dtype=np.float64)
+            if self._lib.stlp_patch_vjp(self._handle, _pointer(c.view(np.float64)), c.size, int(generation), _pointer(g)):
+                raise _error(self._lib)
+            out, at = [], 0
+            for s, ids in zip(sizes, self.ids):
+                out.append(g[at:at + s].reshape((ids.size,) if not self.cross else (2, ids.size)))
+                at += s
+            return np.stack(out) if self._dense else out
+
+    def _device_input(self, x):
+        n = sum(self.channels * i.size for i in self.ids)
+        if not getattr(x, "is_cuda", False):
+            raise ValueError("expected a CUDA tensor")
+        if str(x.dtype) != "torch.float64" or not x.is_contiguous() or x.numel() != n:
+            raise ValueError(f"expected a contiguous float64 CUDA tensor of {n} values (the patches concatenated)")
+        ordinal = self.info()["device"]["ordinal"]
+        if x.device.index != ordinal:
+            raise ValueError(f"tensor on cuda:{x.device.index}, engine on device {ordinal}")
+        return n
+
+    def forward_device(self, x, moments=True, generation=0):
+        """forward on device memory (backend="gpu"): x a contiguous float64
+        CUDA tensor on the engine's device holding the patches of the
+        selection concatenated (patch i: x[ids[i]], [2, n_i] flattened with
+        cross=True), e.g. torch.cat([u[..., i].reshape(-1) for i in ids]).
+        Values and variances are numpy arrays [B, ncoeff]."""
+        import torch
+        with self._lock:
+            self._open()
+            if not self.ids:
+                raise RuntimeError("no disc selected")
+            n = self._device_input(x)
+            torch.cuda.synchronize(x.device)
+            b = len(self.ids)
+            values = np.empty((b, self.ncoeff), dtype=np.complex128)
+            variance = np.empty((b, self.ncoeff if moments else 0), dtype=np.float64)
+            self._generation = None
+            if self._lib.stlp_patch_forward_device(self._handle, x.data_ptr(), n, int(generation), moments,
+                                                   _pointer(values.view(np.float64)), _pointer(variance)):
+                raise _error(self._lib)
+            self._generation, self._device_shape = int(generation), (n, x.device)
+            return values, variance
+
+    def vjp_device(self, cotangents, generation=0):
+        """vjp after forward_device: the patch cotangents as a float64 CUDA
+        tensor laid out as the input of forward_device."""
+        import torch
+        with self._lock:
+            self._open()
+            if self._generation != int(generation) or getattr(self, "_device_shape", None) is None:
+                raise RuntimeError("stale forward state")
+            b = len(self.ids)
+            c = np.ascontiguousarray(cotangents, dtype=np.complex128)
+            if c.shape != (b, self.ncoeff):
+                raise ValueError(f"expected cotangents {(b, self.ncoeff)}, got {c.shape}")
+            if not np.isfinite(c).all():
+                raise ValueError("non-finite coefficient cotangent")
+            n, device = self._device_shape
+            g = torch.empty(n, dtype=torch.float64, device=device)
+            torch.cuda.synchronize(device)
+            if self._lib.stlp_patch_vjp_device(self._handle, _pointer(c.view(np.float64)), c.size, int(generation), g.data_ptr()):
+                raise _error(self._lib)
+            return g
+
+    def forward_cross(self, a, b, centres=None, radius=None, core=None, moments=True, generation=0):
+        """Cross statistics S(a_i, b_i) of the patch pairs (cross=True)."""
+        if not self.cross:
+            raise RuntimeError("forward_cross needs PatchEngine(..., cross=True)")
+        pairs = [np.stack([np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)]) for x, y in zip(a, b)]
+        if isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
+            pairs = np.stack(pairs)
+        return self.forward(pairs, centres, radius, core, moments, generation)
+
+    def vjp_cross(self, cotangents, generation=0):
+        """(grad_a, grad_b) shaped like a and b."""
+        g = self.vjp(cotangents, generation)
+        if isinstance(g, np.ndarray):
+            return g[:, 0], g[:, 1]
+        return [x[0] for x in g], [x[1] for x in g]
+
+    def close(self):
+        if getattr(self, "_handle", None):
+            self._lib.stlp_patch_free(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
