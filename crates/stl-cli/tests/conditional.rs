@@ -70,9 +70,20 @@ fn pooled_copies_draw_as_one_map() {
     let n = t.len();
     let one = run_ranks(2, |comm| {
         let (s, e) = (comm.rank() * n / 2, (comm.rank() + 1) * n / 2);
-        let pooled = Conditional::pooled(comm, &[&t[s..e], &t[s..e]], s, FACTOR, NSIDE / 2, 2);
+        let pooled = Conditional::pooled(comm, &[&t[s..e], &t[s..e]], None, s, FACTOR, NSIDE / 2, 2);
         pooled.draw(&parents, s, e, 42)
     })
     .concat();
     assert_eq!(one, draw(1));
+}
+
+#[test]
+fn harmonic_upsampling_keeps_low_multipoles() {
+    // A constant plus a dipole along z at nside 8, upsampled to 16.
+    let theta = |nside: i64, p: usize| stl_core::healpix::pix2ang_nest(p as i64, nside).0;
+    let f = |nside: i64| -> Vec<f64> { (0..12 * (nside * nside) as usize).map(|p| 2.0 + theta(nside, p).cos()).collect() };
+    let up = stl_cli::conditional::upsample(&f(8), 8, 16);
+    let want = f(16);
+    let err = up.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+    assert!(err < 1e-3, "max error {err}");
 }

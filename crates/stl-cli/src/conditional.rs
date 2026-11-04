@@ -104,22 +104,27 @@ impl Conditional {
     /// `target`: this rank's standardised target slice `[s, s + len)` at the
     /// fine nside, `s` and the length multiples of `factor`.
     pub fn new<C: Comm>(comm: &C, target: &[f64], s: usize, factor: usize, nside_c: i64, q: usize) -> Self {
-        Self::pooled(comm, &[target], s, factor, nside_c, q)
+        Self::pooled(comm, &[target], None, s, factor, nside_c, q)
     }
 
     /// As [`Conditional::new`], with the parents and details of several
-    /// target maps pooled (the same slice `[s, s + len)` of each).
-    pub fn pooled<C: Comm>(comm: &C, targets: &[&[f64]], s: usize, factor: usize, nside_c: i64, q: usize) -> Self {
+    /// target maps pooled (the same slice `[s, s + len)` of each).  With
+    /// `bases`, the details are `target - base` (a smooth upsampling of the
+    /// target's parents, [`upsample`]) instead of `target - parent mean`.
+    pub fn pooled<C: Comm>(comm: &C, targets: &[&[f64]], bases: Option<&[&[f64]]>, s: usize, factor: usize, nside_c: i64, q: usize) -> Self {
         let n_c = 12 * (nside_c * nside_c) as usize;
         let (mut means, mut var, mut details) = (Vec::new(), Vec::new(), Vec::new());
-        for target in targets {
+        for (k, target) in targets.iter().enumerate() {
             let (p0, p1) = (s / factor, (s + target.len()) / factor);
             let m: Vec<f64> = target.chunks(factor).map(|c| c.iter().sum::<f64>() / factor as f64).collect();
             let mut full = vec![0.0; n_c];
             full[p0..p1].copy_from_slice(&m);
             comm.allreduce_sum(&mut full);
             var.extend((p0..p1).map(|p| local_variation(&full, nside_c, p)));
-            details.extend(target.iter().zip(m.iter().flat_map(|&v| std::iter::repeat(v).take(factor))).map(|(v, mean)| v - mean));
+            match bases {
+                Some(b) => details.extend(target.iter().zip(b[k].iter()).map(|(v, u)| v - u)),
+                None => details.extend(target.iter().zip(m.iter().flat_map(|&v| std::iter::repeat(v).take(factor))).map(|(v, mean)| v - mean)),
+            }
             means.extend(m);
         }
         let edges = [global_quantiles(comm, &means, q), global_quantiles(comm, &var, q)];
@@ -163,6 +168,12 @@ impl Conditional {
     /// Initial slice `[s, e)` at the fine nside: the coarse map `coarse`
     /// (full, standardised, at `nside_c`) on its children plus the drawn details.
     pub fn draw(&self, coarse: &[f64], s: usize, e: usize, seed: u64) -> Vec<f64> {
+        self.draw_on(coarse, None, s, e, seed)
+    }
+
+    /// As [`Conditional::draw`], the details added to `base` (the slice
+    /// `[s, e)` of a smooth upsampling of `coarse`) when given.
+    pub fn draw_on(&self, coarse: &[f64], base: Option<&[f64]>, s: usize, e: usize, seed: u64) -> Vec<f64> {
         let f = self.factor;
         let mut out = Vec::with_capacity(e - s);
         let mut p = usize::MAX;
@@ -172,10 +183,19 @@ impl Conditional {
                 p = id / f;
                 b = self.bin(coarse[p], local_variation(coarse, self.nside_c, p));
             }
-            out.push(coarse[p] + self.sample(b, uniforms(seed, id as i64)));
+            let at = base.map_or(coarse[p], |u| u[id - s]);
+            out.push(at + self.sample(b, uniforms(seed, id as i64)));
         }
         out
     }
+}
+
+/// Harmonic upsampling of a NESTED map from `nside_c` to `nside`: its
+/// `a_lm` up to `l = 2 nside_c` (analysis at `nside_c`) synthesised at `nside`.
+pub fn upsample(coarse: &[f64], nside_c: usize, nside: usize) -> Vec<f64> {
+    let lmax = 2 * nside_c;
+    let alm = stl_core::sht::Sht::new(nside_c, lmax).analysis(coarse);
+    stl_core::sht::Sht::new(nside, lmax).synthesis(&alm)
 }
 
 /// `numpy.searchsorted(edges, v)` (side left).
