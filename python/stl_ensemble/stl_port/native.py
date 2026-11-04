@@ -100,6 +100,8 @@ def _library(path=None):
         "stlp_train_bias": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t], C.c_int),
         "stlp_train_loss": ([_VOID, C.c_uint32, C.c_bool, _DOUBLE], C.c_int),
         "stlp_train_step": ([_VOID, C.c_uint32, C.c_double, _DOUBLE], C.c_int),
+        "stlp_train_live": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t, _UINT64, _DOUBLE, C.c_size_t, C.c_bool,
+                             C.c_double, _DOUBLE], C.c_int),
         "stlp_train_lbfgs": ([_VOID, _UINT32, C.c_size_t, C.c_char_p], _VOID),
     }
     for name, (argtypes, restype) in signatures.items():
@@ -737,6 +739,22 @@ class NativeUNet:
             self._open()
             out = np.empty(5)
             self._check(self._lib.stlp_train_step(self._handle, self._field_id(name), float(lr), _pointer(out)))
+            return self._terms(out)
+
+    def live(self, name, data_draws, hm_draws, lr=0.0, backward=False):
+        """Live-bias loss of field `name` (train_denoise.py --bias live): the
+        models are means over fresh draws with the gradient through them,
+        data_draws = (sims, signs) of the data term, hm_draws those of the l
+        terms (full and half missions of the same simulations). lr > 0: one
+        Adam step (cotangents zeroed first); backward: cotangents added."""
+        with self._lock:
+            self._open()
+            (ds, dg), (hs, hg) = [(np.ascontiguousarray(s, dtype=np.uint64), np.ascontiguousarray(g, dtype=np.float64))
+                                  for s, g in (data_draws, hm_draws)]
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_live(self._handle, self._field_id(name), ds.ctypes.data_as(_UINT64),
+                                                  _pointer(dg), ds.size, hs.ctypes.data_as(_UINT64), _pointer(hg),
+                                                  hs.size, bool(backward), float(lr), _pointer(out)))
             return self._terms(out)
 
     def lbfgs(self, names, options=None):

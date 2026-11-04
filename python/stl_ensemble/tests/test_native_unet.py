@@ -165,6 +165,48 @@ def test_training_step_matches_torch():
         assert ea < 1e-6
 
 
+def test_live_step_matches_torch():
+    """Live biases (train_denoise.py losses() and delouis()), the same draws."""
+    if torch is None:
+        return
+    net, o = _setup(5)
+    ddraws = (np.array([2, 0, 4]), np.array([-1.0, 1.0, 1.0]))
+    hdraws = (np.array([1, 3]), np.array([1.0, -1.0]))
+    one = NativeEngine(NSIDE, J, batch=1)
+    k, kh = len(ddraws[0]), len(hdraws[0])
+    many = NativeEngine(NSIDE, J, batch=k)
+    xeng = NativeEngine(NSIDE, J, batch=3 + 3 * kh, cross=True)
+    loss_fn, xloss = DenoiseLoss(one.plan, NSIDE), DenoiseLoss(xeng.plan, NSIDE)
+    xrun = {"engine": xeng, "generation": 0}
+    T = torch.as_tensor(o["t857"])
+    d, d1, d2 = (torch.as_tensor(o[x]) for x in ("d", "d1", "d2"))
+    u = net(d[None], d.std(), cond=torch.as_tensor(o["cond"])[None])[0]
+    pick = lambda pool, dr: torch.as_tensor(np.stack([g * o[pool][s] for s, g in zip(*dr)]))
+    vt, tv = one.forward(o["d"][None], moments=True)
+    st = StatsFunction.apply(u + pick("n0", ddraws), many, 1)
+    terms = {"data": loss_fn(st, torch.as_tensor(as_real(vt[0])), torch.as_tensor(tv[0]))}
+    n, n1, n2 = pick("n0", hdraws), pick("n1", hdraws), pick("n2", hdraws)
+    A = torch.cat([d1[None], d[None], T[None], u + n1, u + n, T.expand(kh, -1)])
+    Bm = torch.cat([d2[None], u[None], d[None], u + n2, u.expand(kh, -1), u + n])
+    xs = CrossStats.apply(A, Bm, xrun)
+    for t, name in enumerate(("l1", "l2", "l3")):
+        target = xs[t] if name == "l2" else xs[t].detach()
+        terms[name] = xloss(xs[3 + t * kh:3 + (t + 1) * kh], target, xrun["var"][t])
+    total = sum(terms.values())
+    net.zero_grad()
+    total.backward()
+    ref = {x: float(v) for x, v in terms.items()} | {"total": float(total)}
+    with _native(net, o) as nat:
+        nat.zero_grad()
+        got = nat.live("Q", ddraws, hdraws, backward=True)
+        g = nat.grads_dict()
+        floor = 1e-2 * max(np.abs(q.grad.numpy()).max() for q in net.parameters())
+        eg = max(_rel(g[x], q.grad.numpy(), floor) for x, q in net.named_parameters())
+        et = max(abs(got[x] - ref[x]) / abs(ref[x]) for x in ref)
+        print(f"live step: terms {et:.2e}, gradients {eg:.2e}")
+        assert et < 1e-4 and eg < 1e-3
+
+
 def test_lbfgs_round_decreases_the_loss():
     if torch is None:
         return
@@ -180,5 +222,6 @@ def test_lbfgs_round_decreases_the_loss():
 if __name__ == "__main__":
     test_network_matches_torch()
     test_training_step_matches_torch()
+    test_live_step_matches_torch()
     test_lbfgs_round_decreases_the_loss()
     print("native U-Net tests passed")

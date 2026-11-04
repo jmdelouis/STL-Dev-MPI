@@ -573,6 +573,115 @@ impl<B: Backend> Trainer<B> {
         self.fields.get_mut(&f).unwrap().bias = Some(bias);
     }
 
+    /// The live-bias loss of field `f` (`train_denoise.py --bias live`):
+    /// the models are means over `B` draws with the gradient through every
+    /// one, `<Phi(u + n_i)>` (draws `data`), `<Phi(u + n1_i, u + n2_i)>`,
+    /// `<Phi(u + n_i, u)>`, `<Phi(T, u + n_i)>` (draws `hm`, full and half
+    /// missions of one simulation); targets and weights as the frozen loss.
+    fn loss_live(&mut self, f: u32, data: &[(usize, f64)], hm: &[(usize, f64)], backward: bool) -> [f64; 5] {
+        self.targets(f);
+        let w = self.weights;
+        let n = self.npix();
+        let (u, tape) = {
+            let fd = self.field(f);
+            self.back.net_forward(&fd.d, fd.scale)
+        };
+        let scale = self.field(f).scale;
+        let mut du = self.back.zeros(n);
+        let mut terms = [0.0; 5];
+        let targets = self.field(f).targets.as_ref().unwrap();
+        let (data_t, l1_t, l3_t) = (targets.data.clone(), targets.l1.clone(), targets.l3.clone());
+        let mean = |v: &[C64], k: usize, at: usize, h: usize| -> Vec<C64> {
+            let mut m = vec![C64::default(); h];
+            for i in 0..k {
+                m.iter_mut().zip(&v[(at + i) * h..(at + i + 1) * h]).for_each(|(a, b)| *a += b);
+            }
+            m.iter_mut().for_each(|a| *a /= k as f64);
+            m
+        };
+        if w.data != 0.0 {
+            assert!(!data.is_empty(), "live data term: no draws");
+            let fd = self.fields.get(&f).unwrap();
+            let noise = fd.noise[0].as_ref().expect("noise pool");
+            let rows: Vec<Row<B::Map>> = data.iter().map(|&(s, sg)| (&u, 0, Some((noise, s * n, sg)))).collect();
+            let x = self.back.combine(&rows);
+            let k = data.len();
+            let (v, _) = self.back.stats(Kind::Auto, k, x, false);
+            let h = v.len() / k;
+            let (t, tv) = data_t.unwrap();
+            let wc = chi2_weights(&tv, &self.back.stats_pixels(Kind::Auto));
+            let (l, cot) = chi2(&mean(&v, k, 0, h), &t, &wc);
+            terms[1] = l;
+            if backward {
+                let one: Vec<C64> = cot.iter().map(|c| c * (w.data / k as f64)).collect();
+                let all: Vec<C64> = (0..k).flat_map(|_| one.iter().cloned()).collect();
+                let g = self.back.stats_grad(Kind::Auto, k, &all);
+                for i in 0..k {
+                    self.back.add_scaled(&mut du, &g, i * n, 1.0);
+                }
+            }
+        }
+        if w.cross() {
+            assert!(!hm.is_empty(), "live l terms: no draws");
+            let k = hm.len();
+            let fd = self.fields.get(&f).unwrap();
+            let t857 = self.t857.as_ref().expect("857 map");
+            let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
+            let mut rows: Vec<Row<B::Map>> = vec![(&fd.d, 0, None), (&u, 0, None)];
+            for &(s, sg) in hm {
+                rows.push((&u, 0, Some((n1, s * n, sg))));
+                rows.push((&u, 0, Some((n2, s * n, sg))));
+            }
+            for &(s, sg) in hm {
+                rows.push((&u, 0, Some((n0, s * n, sg))));
+                rows.push((&u, 0, None));
+            }
+            for &(s, sg) in hm {
+                rows.push((t857, 0, None));
+                rows.push((&u, 0, Some((n0, s * n, sg))));
+            }
+            let x = self.back.combine(&rows);
+            let batch = 1 + 3 * k;
+            let (v, var) = self.back.stats(Kind::Cross, batch, x, true);
+            let h = v.len() / batch;
+            let pix = self.back.stats_pixels(Kind::Cross);
+            let (t1, v1) = l1_t.unwrap();
+            let (t3, v3) = l3_t.unwrap();
+            let du_t = &v[..h];
+            let (a1, c1) = chi2(&mean(&v, k, 1, h), &t1, &chi2_weights(&v1, &pix));
+            let (a2, c2) = chi2(&mean(&v, k, 1 + k, h), du_t, &chi2_weights(&var[..h], &pix));
+            let (a3, c3) = chi2(&mean(&v, k, 1 + 2 * k, h), &t3, &chi2_weights(&v3, &pix));
+            terms[2] = a1;
+            terms[3] = a2;
+            terms[4] = a3;
+            if backward {
+                let kf = k as f64;
+                let mut cot: Vec<C64> = c2.iter().map(|c| -c * w.l2).collect();
+                for (c, s) in [(&c1, w.l1), (&c2, w.l2), (&c3, w.l3)] {
+                    for _ in 0..k {
+                        cot.extend(c.iter().map(|x| x * (s / kf)));
+                    }
+                }
+                let g = self.back.stats_grad(Kind::Cross, batch, &cot);
+                // [pair, channel, npix]: u is channel 1 of (d, u), both channels of the l1
+                // and l2 pairs, channel 1 of the l3 pairs.
+                self.back.add_scaled(&mut du, &g, n, 1.0);
+                for pair in 1..1 + 2 * k {
+                    self.back.add_scaled(&mut du, &g, 2 * pair * n, 1.0);
+                    self.back.add_scaled(&mut du, &g, (2 * pair + 1) * n, 1.0);
+                }
+                for pair in 1 + 2 * k..batch {
+                    self.back.add_scaled(&mut du, &g, (2 * pair + 1) * n, 1.0);
+                }
+            }
+        }
+        terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4];
+        if backward {
+            self.back.net_backward(&tape, scale, &du);
+        }
+        terms
+    }
+
     /// The frozen-bias loss of field `f`: terms `[total, data, l1, l2, l3]`;
     /// with `backward`, the parameter cotangents of the total are added.
     fn loss(&mut self, f: u32, backward: bool) -> [f64; 5] {
@@ -988,6 +1097,54 @@ pub unsafe extern "C" fn stlp_train_loss(p: *mut UNetHandle, field: u32, backwar
     guard(-1, || {
         let h = &mut *p;
         let terms = with!(h, t => t.loss(field, backward));
+        std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&terms);
+        0
+    })
+}
+
+/// Live-bias loss terms of `field` (`[total, data, l1, l2, l3]` to `out`):
+/// the `kd` draws `(dsims, dsigns)` of the data term, the `kh` draws
+/// `(hsims, hsigns)` of the `l` terms; with `backward` the parameter
+/// cotangents are added, and with `lr > 0` an Adam step follows (the
+/// cotangents zeroed first).  0, or -1 on failure.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stlp_train_live(
+    p: *mut UNetHandle,
+    field: u32,
+    dsims: *const u64,
+    dsigns: *const f64,
+    kd: usize,
+    hsims: *const u64,
+    hsigns: *const f64,
+    kh: usize,
+    backward: bool,
+    lr: f64,
+    out: *mut f64,
+) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        let draws = |s: *const u64, g: *const f64, k: usize| -> Vec<(usize, f64)> {
+            if k == 0 {
+                return Vec::new();
+            }
+            std::slice::from_raw_parts(s, k).iter().zip(std::slice::from_raw_parts(g, k)).map(|(&a, &b)| (a as usize, b)).collect()
+        };
+        let (dd, hd) = (draws(dsims, dsigns, kd), draws(hsims, hsigns, kh));
+        let terms = with!(h, t => {
+            for &(s, _) in dd.iter().chain(&hd) {
+                assert!(s < t.field(field).sims, "simulation {s} out of the pool");
+            }
+            if lr > 0.0 {
+                t.back.zero_grad();
+            }
+            let terms = t.loss_live(field, &dd, &hd, backward || lr > 0.0);
+            assert!(terms.iter().all(|v| v.is_finite()), "non-finite loss");
+            if lr > 0.0 {
+                t.back.adam(lr);
+            }
+            terms
+        });
         std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&terms);
         0
     })
