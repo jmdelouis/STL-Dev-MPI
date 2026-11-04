@@ -63,3 +63,16 @@ fn draws_follow_the_details_of_their_bin() {
     }
     assert!(zero > 1000 && one > 1000);
 }
+
+#[test]
+fn pooled_copies_draw_as_one_map() {
+    let (t, parents) = target();
+    let n = t.len();
+    let one = run_ranks(2, |comm| {
+        let (s, e) = (comm.rank() * n / 2, (comm.rank() + 1) * n / 2);
+        let pooled = Conditional::pooled(comm, &[&t[s..e], &t[s..e]], s, FACTOR, NSIDE / 2, 2);
+        pooled.draw(&parents, s, e, 42)
+    })
+    .concat();
+    assert_eq!(one, draw(1));
+}

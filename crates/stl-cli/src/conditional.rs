@@ -104,15 +104,25 @@ impl Conditional {
     /// `target`: this rank's standardised target slice `[s, s + len)` at the
     /// fine nside, `s` and the length multiples of `factor`.
     pub fn new<C: Comm>(comm: &C, target: &[f64], s: usize, factor: usize, nside_c: i64, q: usize) -> Self {
+        Self::pooled(comm, &[target], s, factor, nside_c, q)
+    }
+
+    /// As [`Conditional::new`], with the parents and details of several
+    /// target maps pooled (the same slice `[s, s + len)` of each).
+    pub fn pooled<C: Comm>(comm: &C, targets: &[&[f64]], s: usize, factor: usize, nside_c: i64, q: usize) -> Self {
         let n_c = 12 * (nside_c * nside_c) as usize;
-        let (p0, p1) = (s / factor, (s + target.len()) / factor);
-        let means: Vec<f64> = target.chunks(factor).map(|c| c.iter().sum::<f64>() / factor as f64).collect();
-        let mut full = vec![0.0; n_c];
-        full[p0..p1].copy_from_slice(&means);
-        comm.allreduce_sum(&mut full);
-        let var: Vec<f64> = (p0..p1).map(|p| local_variation(&full, nside_c, p)).collect();
+        let (mut means, mut var, mut details) = (Vec::new(), Vec::new(), Vec::new());
+        for target in targets {
+            let (p0, p1) = (s / factor, (s + target.len()) / factor);
+            let m: Vec<f64> = target.chunks(factor).map(|c| c.iter().sum::<f64>() / factor as f64).collect();
+            let mut full = vec![0.0; n_c];
+            full[p0..p1].copy_from_slice(&m);
+            comm.allreduce_sum(&mut full);
+            var.extend((p0..p1).map(|p| local_variation(&full, nside_c, p)));
+            details.extend(target.iter().zip(m.iter().flat_map(|&v| std::iter::repeat(v).take(factor))).map(|(v, mean)| v - mean));
+            means.extend(m);
+        }
         let edges = [global_quantiles(comm, &means, q), global_quantiles(comm, &var, q)];
-        let details: Vec<f64> = target.iter().enumerate().map(|(i, v)| v - means[i / factor]).collect();
         let (lo, hi) = global_range(comm, &details);
         let width = (hi - lo) / HIST as f64;
         let nb = q * q;
