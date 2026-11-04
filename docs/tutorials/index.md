@@ -15,7 +15,7 @@ bash examples/01_healpix_synthesis/run.sh
 :::{grid-item-card} HEALPix synthesis
 :link: healpix_synthesis
 :link-type: doc
-One map from the WebSky kappa map at nside 64, on CPU threads and on a GPU, with `stl-synth`.
+One map from the Takahashi weak-lensing map at nside 64, on CPU threads and on a GPU, with `stl-synth`.
 :::
 
 :::{grid-item-card} Ensemble synthesis

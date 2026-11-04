@@ -1,8 +1,9 @@
 # HEALPix synthesis of one map, on CPU and GPU
 
-Synthesis of a map whose scattering-covariance statistics match those of a target: the WebSky
-convergence map κ at nside 64 (`fixtures/synthesis/synthesis_kap_nside64_nested_niter20/target_map.npy`,
-NESTED, shipped with the repository), starting from white noise, with `stl-synth`.
+Synthesis of a map whose scattering-covariance statistics match those of a target: the
+weak-lensing convergence κ of Takahashi et al. (2017), realisation r000 at source redshift zs1,
+block-averaged to nside 64 (`fixtures/takahashi/takahashi_r000_zs1_nside64_nested.npy`, NESTED,
+shipped with the repository), starting from white noise, with `stl-synth`.
 
 ```bash
 cargo build --release -p stl-cli --features gpu      # without a GPU: no feature, and GPU=0
@@ -12,8 +13,8 @@ bash examples/01_healpix_synthesis/run.sh            # NITER=100 RANKS=8 GPU=1 b
 The commands it runs:
 
 ```bash
-stl-synth --target target_map.npy --L 4 --weights ergodic --niter 100 --seed 1 --ranks 8 --out out/cpu
-stl-synth --target target_map.npy --L 4 --weights ergodic --niter 100 --seed 1 --gpu --out out/gpu
+stl-synth --target takahashi_r000_zs1_nside64_nested.npy --L 4 --weights ergodic --niter 100 --seed 1 --ranks 8 --out out/cpu
+stl-synth --target takahashi_r000_zs1_nside64_nested.npy --L 4 --weights ergodic --niter 100 --seed 1 --gpu --out out/gpu
 ```
 
 - `--L 4`: four orientations (the default; two leave anisotropic textures);
@@ -29,20 +30,24 @@ stl-synth --target target_map.npy --L 4 --weights ergodic --niter 100 --seed 1 -
 ![maps](maps.png)
 
 Top: Mollweide views; bottom: one base face (64 × 64 pixels). All panels share one
-histogram-equalised colour scale, set by the target (healpy's `norm='hist'`). At nside 64 (pixels of 0.9°) the
-WebSky κ map is dominated by small-scale fluctuations and looks almost Gaussian; the strongly
-non-Gaussian case is [example 02](https://github.com/jmdelouis/STL-Dev-MPI/tree/main/examples/02_healpix_ensemble).
+histogram-equalised colour scale, set by the target (healpy's `norm='hist'`). At nside 64 (pixels of
+0.9°) the Takahashi κ map is strongly non-Gaussian (pixel skewness 8.4): filaments and halos on
+voids. The syntheses reproduce the filamentary network, and their statistics match the target's
+(reduced χ² 0.14, [example 03](https://github.com/jmdelouis/STL-Dev-MPI/tree/main/examples/03_statistics)). They also keep pixel-scale noise, because a
+direct synthesis of so skewed a field from white noise in 100 iterations does not settle the
+smallest scales. The recipe for such fields (Gaussian anamorphosis, synthesis at `2N`,
+histogram matching; [USAGE](../../docs/USAGE.md), section 4) and the ensemble method of
+[example 02](https://github.com/jmdelouis/STL-Dev-MPI/tree/main/examples/02_healpix_ensemble) give clean maps.
 
 ![loss](loss.png)
 
 | Run | Evaluations | s / evaluation | Optimisation | Wall clock (setup included) | Loss | Peak memory |
 |---|---|---|---|---|---|---|
-| CPU, 8 thread ranks | 107 | 3.95 | 422 s | 427 s | 132.1 → 0.2403 | 0.42 GiB host |
-| GPU (Tesla T4) | 107 | 0.061 | 6.5 s | 24 s | 132.1 → 0.2403 | 0.31 GiB host, 0.99 GiB device |
+| CPU, 8 thread ranks | 112 | 3.58 | 401 s | 404 s | 259.2 → 0.1429 | 0.42 GiB host |
+| GPU (Tesla T4) | 112 | 0.043 | 4.8 s | 22 s | 259.2 → 0.1429 | 0.31 GiB host, 0.51 GiB device |
 
-garoupe: 2 × Xeon Bronze 3204 (12 cores at 1.9 GHz) shared with other jobs during the run (load
-about 16), Tesla T4 (whose FP64 is 1/32 of its FP32). The two runs follow the same trajectory: the
-final losses agree to 6e-7 relative (the GPU and CPU gradients differ by about 1e-12, which
+garoupe: 2 × Xeon Bronze 3204 (12 cores at 1.9 GHz), Tesla T4 (whose FP64 is 1/32 of its FP32).
+The two runs follow the same trajectory: the final losses agree to 2.3e-8 relative (the GPU and CPU gradients differ by about 1e-12, which
 L-BFGS amplifies slowly; see the [GPU report](../../docs/gpu.md), section 5).
 
 ## Outputs (`out/`)

@@ -8,9 +8,10 @@ ROOT=$(cd "$HERE/../.." && pwd)
 : "${PY:=python3}"
 : "${OUT:=$HERE/out}"
 mkdir -p "$OUT"
-# The HEALPix target of examples 01, 03 and 05: the WebSky kappa map at
-# nside 64 (NESTED, float64), shipped with the fixtures.
-KAPPA64=$ROOT/fixtures/synthesis/synthesis_kap_nside64_nested_niter20/target_map.npy
+# The HEALPix target of examples 01, 03, 05 and 06: the weak-lensing
+# convergence of Takahashi et al. (2017), realisation r000, source redshift
+# zs1, block-averaged to nside 64 (NESTED, float64), shipped with the fixtures.
+KAPPA64=$ROOT/fixtures/takahashi/takahashi_r000_zs1_nside64_nested.npy
 
 # step NAME COMMAND...: runs COMMAND, prints its wall-clock time.
 step() {

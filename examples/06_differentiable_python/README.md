@@ -3,8 +3,9 @@
 The statistics and pseudo-spectra of STL-Dev-MPI are differentiable functions in Python
 (`stl_port.native`, see [the user guide](https://github.com/jmdelouis/STL-Dev-MPI/blob/main/docs/user-guide/differentiable.md)).
 This example wraps the three engines as torch operations and optimises three losses with
-`torch.optim.LBFGS` on a map at nside 32. The target is the WebSky κ map of the other examples,
-degraded from nside 64 and standardised. It runs on a laptop CPU in about two minutes.
+`torch.optim.LBFGS` on a map at nside 32. The target is the weak-lensing convergence of
+Takahashi et al. (2017) used by the other HEALPix examples (realisation r000, source redshift
+zs1, `fixtures/takahashi/`), degraded from nside 64 and standardised. It runs on a laptop CPU in about two minutes.
 
 ```bash
 cargo build --release -p stl-bridge                  # libstl_bridge.so
@@ -67,9 +68,9 @@ evaluation, against 5.3 s for `NativeEngine(cross=True, batch=7)`, which runs on
 
 | Loss | Evaluations | Time (WSL, 20 threads) | Loss, first → last |
 |---|---|---|---|
-| 1. masked synthesis | 30 | 57 s (1.9 s each) | 23.7 → 0.98 |
-| 2. patch synthesis | 200 | 3 s | 55.5 → see `out/report.json` |
-| 3. denoising | 100 | 63 s (0.63 s each) | 112 → 0.94 |
+| 1. masked synthesis | 30 | 57 s (1.9 s each) | 127 → 0.73 |
+| 2. patch synthesis | 200 | 3.5 s (0.02 s each) | 20.4 → 2.1 |
+| 3. denoising | 100 | 64 s (0.64 s each) | 11.2 → 0.056 |
 
 ![](losses.png)
 
@@ -78,8 +79,8 @@ patch synthesis (grey outside the discs), the noisy map and the denoised map, al
 target's histogram-equalised colour scale. Bottom row: the losses, the masked pseudo-`C_ℓ` of the
 target and of the synthesis, and the full-sky `C_ℓ` of `s`, `d` and `u`.
 
-The denoiser restores statistics, not pixels. The mean of `|log C_ℓ(·) / C_ℓ(s)|` over
-`ℓ ≥ 2` drops from 0.67 for `d` to 0.36 for `u`. The pixel error of `u − s` (rms 1.03) is that
-of `d − s` (1.00): `u` is a map with the statistics of the signal, not its pixel-wise estimate.
-Longer runs, more noise draws and the third loss of the paper (with a template) bring the
-spectrum closer.
+The denoiser restores statistics more than pixels. The mean of `|log C_ℓ(·) / C_ℓ(s)|` over
+`ℓ ≥ 2` drops from 0.63 for `d` to 0.41 for `u`, while the pixel error drops only from 1.00
+(rms of `d − s`) to 0.94 (`u − s`). `u` is a map with the statistics of the signal more than a
+pixel-wise estimate of it. Longer runs, more noise draws and the third loss of the paper (with a
+template) bring the spectrum closer. The whole run takes 126 s on the laptop.

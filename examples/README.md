@@ -36,6 +36,8 @@ Environment of every script (`common.sh`):
 `plotting.py` draws the figures: Mollweide views and base faces of NESTED maps, loss curves,
 `stl-stats` statistics, and one-line summaries of the run reports.
 
-Data: examples 01, 03 and 05 use the WebSky κ map at nside 64 shipped in `fixtures/`. Example 02
+Data: examples 01, 03, 05 and 06 use the weak-lensing convergence of Takahashi et al. (2017)
+(realisation r000, source redshift zs1) block-averaged to nside 64, shipped in
+`fixtures/takahashi/`. Example 02
 needs ten reference maps (the Takahashi et al. 2017 full-sky convergence realisations were used).
 Example 04 needs `data/test/Turb_6.npy` from the STL-Dev repository.

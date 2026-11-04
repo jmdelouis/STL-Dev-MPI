@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Losses made of differentiable STL statistics and pseudo-spectra, optimised
-with torch.optim.LBFGS on a map at nside 32 (the WebSky kappa target of the
-other examples, degraded from nside 64).
+with torch.optim.LBFGS on a map at nside 32 (the Takahashi et al. 2017
+weak-lensing target of the other examples, degraded from nside 64).
 
     python run.py OUT TARGET_NSIDE64.npy FIGURE.png
 
