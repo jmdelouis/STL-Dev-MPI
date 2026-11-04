@@ -339,7 +339,7 @@ impl GpuPlanar {
                 for b in 0..self.batch {
                     for i in self.ranges[n].clone() {
                         let (kind, a, bb) = self.operands(&self.plan()[i]);
-                        items.push(ForwardItem { kind, pad: 0, a: self.operand(&t, None, b, a), b: if kind == F_MEAN || kind == F_SQ { NONE } else { self.operand(&t, None, b, bb) } });
+                        items.push(ForwardItem { kind, pad: 0, a: self.operand(&t, None, b, a), b: if kind == F_MEAN || kind == F_SQ { NONE } else { self.operand(&t, None, b, bb) }, mask: 0 });
                     }
                 }
                 let sums = self.partial_sums(&items, f.len());
@@ -467,7 +467,7 @@ impl GpuPlanar {
                 targets.push((target, Vec::new()));
                 targets.len() - 1
             });
-            targets[k].1.push(Contrib { kind, pad: 0, a, b, g_re: g.re, g_im: g.im, n_total: norm });
+            targets[k].1.push(Contrib { kind, pad: 0, a, b, g_re: g.re, g_im: g.im, n_total: norm, mask: 0 });
         };
         for b in 0..self.batch {
             for i in self.ranges[t.n].clone() {

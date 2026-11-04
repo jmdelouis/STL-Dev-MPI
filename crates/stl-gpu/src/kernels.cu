@@ -1252,11 +1252,12 @@ struct ForwardItem {
     int pad;
     Operand a;
     Operand b;
+    u64 mask;   // 0, or the mask indicator at pixel 0 (pixels where it is 0 are skipped)
 };
 
 // Partial sums of the items over n pixels, by chunks of `chunk` pixels:
 // out[(item * n_chunks + c) * 3 + {0, 1, 2}] = (sum re, sum im, sum |f|^2)
-// over chunk c, reduced in a fixed tree.
+// over chunk c (the pixels of the item's mask), reduced in a fixed tree.
 extern "C" __global__ void coef_partial(const ForwardItem* items, i64 n, i64 chunk, int moments, double* out) {
     __shared__ double sre[256], sim[256], ssq[256];
     int item = blockIdx.y;
@@ -1267,6 +1268,7 @@ extern "C" __global__ void coef_partial(const ForwardItem* items, i64 n, i64 chu
     double are, aim, bre, bim;
     double tre = 0.0, tim = 0.0, tsq = 0.0;
     for (i64 i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+        if (it.mask && ((const double*)it.mask)[i] == 0.0) continue;
         load(it.a, i, &are, &aim);
         double vre = 0.0, vim = 0.0, sq = 0.0;
         switch (it.kind) {
@@ -1337,6 +1339,7 @@ struct Contrib {
     Operand a;
     Operand b;
     double g_re, g_im, n_total;
+    u64 mask;   // as in ForwardItem: no contribution where the mask is 0
 };
 
 struct Target {
@@ -1368,6 +1371,7 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
     double dim = t.im_off >= 0 ? d[t.im_off + i] : 0.0;
     for (u32 q = t.start; q < t.end; q++) {
         Contrib c = contribs[q];
+        if (c.mask && ((const double*)c.mask)[i] == 0.0) continue;
         double are, aim, bre, bim, vr = 0.0, vi = 0.0;
         load(c.a, i, &are, &aim);
         switch (c.kind) {

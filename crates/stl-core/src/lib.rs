@@ -16,6 +16,7 @@ pub mod engine;
 pub mod healpix;
 pub mod lbfgs;
 pub mod local;
+pub mod mask;
 pub mod neighbours;
 pub mod plan;
 pub mod planar;

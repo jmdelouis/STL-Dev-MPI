@@ -15,6 +15,11 @@
 //! handle.  Panics are caught at the boundary: the call returns its failure
 //! value and `stlp_last_error` the message.
 //!
+//! Masks (`stlp_set_masks`, [`stl_core::mask`]): the coefficients are then
+//! averaged over each of `K` masks of their native level, the fields being
+//! those of the full sky; values, variances and cotangents become
+//! `[batch, K, len(plan)]`.
+//!
 //! A patch handle (`stlp_patch_*`) evaluates the same statistics on disc
 //! patches ([`stl_core::disc`]): a batch of discs with their own centres,
 //! each map holding only its disc's pixels.
@@ -32,6 +37,7 @@ use std::sync::Arc;
 use stl_core::engine::{EngineConfig, LocalEngine};
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
 use stl_core::local::LocalGeometry;
+use stl_core::mask::Masks;
 use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState, DiscSupport};
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::stencil::Gauge;
@@ -41,7 +47,7 @@ use stl_core::engine::{Partition, Serial};
 use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-11-05-v4";
+pub const VERSION: &str = "2026-11-05-v5";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -102,6 +108,8 @@ pub struct Handle {
     channels: usize,
     npix: usize,
     current: Option<Identity>,
+    /// Masks of the averages (none: the whole sky).
+    masks: Option<Masks>,
 }
 
 enum Fields {
@@ -214,7 +222,7 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
             other => panic!("backend must be cpu or gpu, not {other:?}"),
         };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, channels, npix, current: None }))
+        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, channels, npix, current: None, masks: None }))
     })
 }
 
@@ -236,7 +244,8 @@ pub unsafe extern "C" fn stlp_info(p: *mut Handle) -> *mut c_char {
         #[allow(unused_mut)]
         let mut info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"),
             "nside": h.nside, "batch": h.batch, "channels": h.channels, "cross": h.channels == 2,
-            "dtype": "float64/complex128", "fewer": false, "plan": plan_json(&h.plan)});
+            "dtype": "float64/complex128", "fewer": false, "plan": plan_json(&h.plan),
+            "masks": h.masks.as_ref().map_or(0, Masks::len)});
         #[cfg(feature = "gpu")]
         if let Backend::Gpu(e) = &h.backend {
             let (peak, total) = e.device_memory();
@@ -252,9 +261,50 @@ pub unsafe extern "C" fn stlp_info(p: *mut Handle) -> *mut c_char {
     })
 }
 
+/// Averages over the `k` masks `weights` (`[k, 12 nside^2]`, nonzero: in
+/// the mask; level `n + 1` holds the parents of level `n`) from the next
+/// forward sweep on, or over the whole sky (`k = 0`).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_set_masks(p: *mut Handle, weights: *const f64, k: usize) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        let masks = (k > 0).then(|| {
+            let w = std::slice::from_raw_parts(weights, k * h.npix);
+            Masks::from_weights(h.nside as i64, h._cfg.levels(), w.chunks(h.npix).map(<[f64]>::to_vec).collect())
+        });
+        match &mut h.backend {
+            Backend::Cpu(e) => e.set_masks(masks.clone()),
+            #[cfg(feature = "gpu")]
+            Backend::Gpu(e) => e.set_masks(masks.as_ref()),
+        }
+        h.masks = masks;
+        0
+    })
+}
+
+/// Number of pixels each coefficient averages to `out` (`[K, len(plan)]`,
+/// `K = 1` without masks): the pixels of the mask at the coefficient's
+/// native level.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_native_pixels(p: *mut Handle, out: *mut usize) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        let k_count = h.masks.as_ref().map_or(1, Masks::len);
+        let out = std::slice::from_raw_parts_mut(out, k_count * h.plan.len());
+        for (k, row) in out.chunks_mut(h.plan.len()).enumerate() {
+            for (o, c) in row.iter_mut().zip(&h.plan) {
+                *o = h.masks.as_ref().map_or_else(|| h._geo.pixels(c.native_dg), |m| m.counts[k][c.native_dg]);
+            }
+        }
+        0
+    })
+}
+
 /// Forward sweep of the maps `x` (`n = batch * channels * 12 nside^2`): values to `out`
-/// (`2 batch len(plan)`), and with `moments` the spatial variances of the
-/// terms to `var` (`batch len(plan)`).  0, or -1 on failure.
+/// (`2 batch K len(plan)`, `K = 1` without masks), and with `moments` the
+/// spatial variances of the terms to `var` (`batch K len(plan)`).  0, or -1
+/// on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_forward(
     p: *mut Handle,
@@ -301,7 +351,7 @@ pub unsafe extern "C" fn stlp_forward(
 }
 
 /// Map cotangent `out` (`batch * channels * 12 nside^2`) of the cotangents `cot`
-/// (`2 n`, `n = batch len(plan)`) after the forward sweep of the same
+/// (`2 n`, `n = batch K len(plan)`) after the forward sweep of the same
 /// identity.  0, or -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_vjp(
@@ -316,7 +366,7 @@ pub unsafe extern "C" fn stlp_vjp(
     guard(-1, || {
         let h = &mut *p;
         assert_eq!(h.current, Some(h.identity(generation, member, objective)), "stale, wrong-member or wrong-objective forward state");
-        assert_eq!(n, h.batch * h.plan.len(), "cotangent shape mismatch");
+        assert_eq!(n, h.batch * h.masks.as_ref().map_or(1, Masks::len) * h.plan.len(), "cotangent shape mismatch");
         let c: Vec<Complex64> = std::slice::from_raw_parts(cot, 2 * n).chunks(2).map(|v| Complex64::new(v[0], v[1])).collect();
         let grad = match &mut h.backend {
             Backend::Cpu(e) => {

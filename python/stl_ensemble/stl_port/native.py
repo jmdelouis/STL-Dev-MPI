@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-05-v3"
+SCRIPT_VERSION = "2026-11-05-v4"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -60,6 +60,8 @@ def _library(path=None):
         "stlp_checkpoint": ([_VOID], _VOID),
         "stlp_checkpoint_free": ([_VOID], None),
         "stlp_restore": ([_VOID, _VOID, C.c_uint64, C.c_uint64, C.c_uint64], C.c_int),
+        "stlp_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_native_pixels": ([_VOID, _SIZE], C.c_int),
         "stlp_lbfgs": ([_DOUBLE, C.c_size_t, C.c_char_p, _CALLBACK, _VOID], C.c_int64),
         "stlp_patch_new": ([C.c_char_p], _VOID),
         "stlp_patch_free": ([_VOID], None),
@@ -124,11 +126,19 @@ class NativeEngine:
     cross=True: the maps are pairs [batch, 2, npix] and the plan holds the
     cross terms of the two channels only (S1, S2, S3, S4 with c1 != c2;
     S3/S4 in both orders); see forward_cross / vjp_cross.
+
+    masks (or set_masks): K masks given as NESTED pixel ids of the full
+    resolution or as [K, npix] indicators (nonzero: in). Every coefficient
+    is then averaged over each mask at its native level (level n + 1 holds
+    the parents of the level-n mask), the wavelets and moduli being those
+    of the full sky; values, variances and cotangents are [batch, K,
+    ncoeff], and native_pixels() gives the [K, ncoeff] pixel counts of the
+    averages (for the ergodic weights).
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
                  threads=1, cache="transposition", device=0, library=None,
-                 cross=False):
+                 cross=False, masks=None):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -155,10 +165,49 @@ class NativeEngine:
         self.plan_digest = hashlib.sha256(json.dumps(self.plan, sort_keys=True).encode()).hexdigest()
         self.ncoeff = len(self.plan)
         self._current_key = None
+        self.nmasks = 0
+        if masks is not None:
+            self.set_masks(masks)
 
     def _open(self):
         if not self._handle:
             raise RuntimeError("native engine is closed")
+
+    def set_masks(self, masks):
+        """Average over the masks from now on (None: the whole sky). masks:
+        a list of NESTED id arrays, or [K, npix] / [npix] indicators."""
+        with self._lock:
+            self._open()
+            if masks is None:
+                w = np.zeros((0, self.npix))
+            elif isinstance(masks, np.ndarray) and masks.dtype != object and masks.shape[-1] == self.npix and masks.ndim in (1, 2):
+                w = np.ascontiguousarray(np.atleast_2d(masks), dtype=np.float64)
+            else:
+                w = np.zeros((len(masks), self.npix))
+                for k, ids in enumerate(masks):
+                    ids = np.asarray(ids, dtype=np.int64)
+                    if ids.size and (ids.min() < 0 or ids.max() >= self.npix):
+                        raise ValueError(f"mask {k}: pixel ids out of range")
+                    w[k, ids] = 1.0
+            if not np.isfinite(w).all():
+                raise ValueError("mask weights must be finite")
+            self._current_key = None
+            if self._lib.stlp_set_masks(self._handle, _pointer(w), w.shape[0]):
+                raise _error(self._lib)
+            self.nmasks = w.shape[0]
+
+    def native_pixels(self):
+        """Pixels each coefficient averages: [K, ncoeff] with masks, else [ncoeff]."""
+        with self._lock:
+            self._open()
+            out = np.empty((max(self.nmasks, 1), self.ncoeff), dtype=np.uintp)
+            if self._lib.stlp_native_pixels(self._handle, out.ctypes.data_as(_SIZE)):
+                raise _error(self._lib)
+            out = out.astype(np.int64)
+            return out if self.nmasks else out[0]
+
+    def _shape(self):
+        return (self.batch, self.nmasks, self.ncoeff) if self.nmasks else (self.batch, self.ncoeff)
 
     def info(self):
         with self._lock:
@@ -185,8 +234,8 @@ class NativeEngine:
                 raise ValueError(f"expected maps {shape}, got {x.shape}")
             if not np.isfinite(x).all():
                 raise ValueError("input map contains non-finite values")
-            values = np.empty((self.batch, self.ncoeff), dtype=np.complex128)
-            variance = np.empty((self.batch, self.ncoeff if moments else 0), dtype=np.float64)
+            values = np.empty(self._shape(), dtype=np.complex128)
+            variance = np.empty(self._shape() if moments else (self.batch, 0), dtype=np.float64)
             self._current_key = None
             status = self._lib.stlp_forward(self._handle, _pointer(x), x.size, *key,
                                            moments, _pointer(values.view(np.float64)), _pointer(variance))
@@ -202,10 +251,11 @@ class NativeEngine:
             if key != self._current_key:
                 raise RuntimeError("stale/wrong-member/objective forward state")
             c = np.ascontiguousarray(cotangents, dtype=np.complex128)
-            if c.shape == (self.ncoeff,) and self.batch == 1:
-                c = c[None, :]
-            if c.shape != (self.batch, self.ncoeff):
-                raise ValueError(f"expected cotangents {(self.batch,self.ncoeff)}, got {c.shape}")
+            shape = self._shape()
+            if c.shape == shape[1:] and self.batch == 1:
+                c = c[None]
+            if c.shape != shape:
+                raise ValueError(f"expected cotangents {shape}, got {c.shape}")
             if not np.isfinite(c).all():
                 raise ValueError("non-finite coefficient cotangent")
             grad = np.empty((self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix), dtype=np.float64)
