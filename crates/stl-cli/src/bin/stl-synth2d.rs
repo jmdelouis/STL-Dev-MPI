@@ -11,7 +11,7 @@ use stl_cli::planar::{nyquist_filter, standardize, white_noise, Config, Mode, Pl
 use stl_cli::proc_memory;
 use stl_core::lbfgs::{minimize, minimize_preconditioned, LbfgsOptions, Local, Preconditioner};
 use stl_core::planar::cascade::{resample, ConditionalDetail, SplitMix};
-use stl_core::planar::transport::{bicubic, gradient, Smoother};
+use stl_core::planar::transport::{bands, bicubic, gradient, Smoother};
 use stl_core::planar::warp::{reproject, Flow, Warp, WarpState};
 use stl_mpi::io::{read_npy_shape, write_npy_shape};
 
@@ -54,6 +54,14 @@ stl-synth2d: synthesis of periodic planar images (L-BFGS on the images)
                       refreshed every --transport-refresh iterations (default 20)
   --transport-levels N, --transport-slope B
                       K = sum_l 2^(B l) 4^l (D^T)^l D^l over N pyramid levels (defaults 6, 0)
+  --homotopy K        band-wise homotopy (after MGD, arXiv 2602.17211) before the --niter
+                      L-BFGS iterations: K instants t_k = k / K, moving targets
+                      I_t = sum_j cos(a_j(t)) Z_j + sin(a_j(t)) X_j over the pyramid bands
+                      (Z: the initial images, X: the targets, --nbatch = --ntarget),
+                      --homotopy-iter N warm-started L-BFGS iterations per instant
+                      (default 10), then noise sqrt(2 / K) sigma (--homotopy-sigma, 0);
+                      a_j ramps from 0 to pi/2 over a width --homotopy-width (0.5) of
+                      [0, 1], the coarsest band first; --homotopy-levels (6)
   --transport-step PX first tau: largest displacement of PX pixels (default 0.5);
                       tau is capped at 2 pixels of displacement
   --c2f LEVELS        coarse-to-fine start (docs/lagrangian_synthesis.md 6.4):
@@ -105,6 +113,11 @@ struct Args {
     residual: f64,
     anchor: usize,
     reproject: bool,
+    homotopy: usize,
+    homotopy_iter: usize,
+    homotopy_sigma: f64,
+    homotopy_width: f64,
+    homotopy_levels: usize,
     transport: bool,
     transport_precond: Option<f64>,
     transport_refresh: usize,
@@ -143,6 +156,11 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         residual: 0.0,
         anchor: 0,
         reproject: false,
+        homotopy: 0,
+        homotopy_iter: 10,
+        homotopy_sigma: 0.0,
+        homotopy_width: 0.5,
+        homotopy_levels: 6,
         transport: false,
         transport_precond: None,
         transport_refresh: 20,
@@ -211,6 +229,11 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--anchor" => a.anchor = num(it.next(), k)?,
             "--reproject" => a.reproject = true,
             "--transport" => a.transport = true,
+            "--homotopy" => a.homotopy = num(it.next(), k)?,
+            "--homotopy-iter" => a.homotopy_iter = num(it.next(), k)?,
+            "--homotopy-sigma" => a.homotopy_sigma = num::<f64>(it.next(), k)?,
+            "--homotopy-width" => a.homotopy_width = num::<f64>(it.next(), k)?,
+            "--homotopy-levels" => a.homotopy_levels = num(it.next(), k)?,
             "--transport-precond" => a.transport_precond = Some(num::<f64>(it.next(), k)?),
             "--transport-refresh" => a.transport_refresh = num(it.next(), k)?,
             "--transport-levels" => a.transport_levels = num(it.next(), k)?,
@@ -511,7 +534,44 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
     let mut warm_history = Vec::new();
     let mut transport_times: Vec<f64> = Vec::new();
     let mut evals = 0;
-    if a.warm > 0 && cfg.mode != Mode::StlDev && a.c2f.is_empty() {
+    if a.homotopy > 0 {
+        if a.nbatch != bt_use {
+            return Err("--homotopy pairs every image with a target: --nbatch must equal --ntarget".into());
+        }
+        let (k_inst, levels) = (a.homotopy, a.homotopy_levels);
+        let z_bands: Vec<Vec<Vec<f64>>> = u.chunks(h * w).map(|p| bands(p, h, w, levels)).collect();
+        let x_bands: Vec<Vec<Vec<f64>>> = t[..bt_use * n].chunks(h * w).map(|p| bands(p, h, w, levels)).collect();
+        let nb = levels + 1;
+        // Band j (0 the finest, levels the coarsest) ramps over [s_j, s_j + width].
+        let width = a.homotopy_width.clamp(1e-6, 1.0);
+        let angle = |j: usize, tt: f64| {
+            let s = (levels - j) as f64 / levels.max(1) as f64 * (1.0 - width);
+            std::f64::consts::FRAC_PI_2 * ((tt - s) / width).clamp(0.0, 1.0)
+        };
+        let mut instants = Vec::new();
+        let mut noise = SplitMix(a.seed ^ 0x40d0_70b1);
+        for k in 1..=k_inst {
+            let tt = k as f64 / k_inst as f64;
+            let it: Vec<f64> = z_bands
+                .iter()
+                .zip(&x_bands)
+                .flat_map(|(zb, xb)| (0..h * w).map(move |p| (0..nb).map(|j| angle(j, tt).cos() * zb[j][p] + angle(j, tt).sin() * xb[j][p]).sum::<f64>()))
+                .collect();
+            obj.retarget(&it);
+            let offset = evals - history.len();
+            let e = lbfgs(&obj, a.homotopy_iter, &mut u, &mut history, offset, None, None);
+            evals += e;
+            if a.homotopy_sigma > 0.0 && k < k_inst {
+                let amp = (2.0 / k_inst as f64).sqrt() * a.homotopy_sigma;
+                u.iter_mut().for_each(|v| *v += amp * noise.normal());
+            }
+            instants.push(serde_json::json!({"t": tt, "evaluations": e, "loss": history.last(), "angles": (0..nb).map(|j| angle(j, tt)).collect::<Vec<_>>()}));
+        }
+        obj.retarget(&t[..bt_use * n]);
+        report["homotopy"] = serde_json::json!({"instants": instants, "iterations": a.homotopy_iter, "sigma": a.homotopy_sigma, "width": width,
+            "levels": levels, "evaluations": evals});
+    }
+    if a.warm > 0 && cfg.mode != Mode::StlDev && a.c2f.is_empty() && a.homotopy == 0 {
         let mut wc = cfg.clone();
         wc.mode = Mode::StlDev;
         let warm = PlanarObjective::new(wc, &t)?;

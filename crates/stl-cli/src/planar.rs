@@ -203,6 +203,18 @@ impl PlanarObjective {
         Ok(obj)
     }
 
+    /// New target images `t` (standardised, `[Bt, C, H, W]`) with the
+    /// normalisation of the first ones kept: the moving targets of a
+    /// homotopy.
+    pub fn retarget(&mut self, t: &[f64]) {
+        let evals = self.evaluate_with(t, true).0;
+        self.target = evals.iter().flat_map(|e| self.features(e)).collect();
+        if self.cfg.mode == Mode::Ensemble {
+            self.target_mf = evals.iter().flat_map(|e| e.mf.concat()).collect();
+        }
+        self.target_count = evals.len();
+    }
+
     /// Coefficient plan of the ScatCov engine (order of the SC features).
     pub fn plan(&self) -> &[Coefficient] {
         self.engine.plan()

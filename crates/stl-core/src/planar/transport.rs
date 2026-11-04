@@ -158,6 +158,30 @@ pub fn down_t(y: &[f64], h: usize, w: usize) -> Vec<f64> {
     x
 }
 
+/// Pyramid bands of a plane: `G_j = (4 D^T)^j D^j x`, bands
+/// `G_j - G_(j+1)`, `j < levels`, then `G_levels`; they sum to `x`.
+pub fn bands(x: &[f64], h: usize, w: usize, levels: usize) -> Vec<Vec<f64>> {
+    let mut low = vec![x.to_vec()];
+    let mut coarse = x.to_vec();
+    let (mut hc, mut wc) = (h, w);
+    for l in 1..=levels {
+        coarse = down(&coarse, hc, wc);
+        hc /= 2;
+        wc /= 2;
+        let mut up = coarse.clone();
+        let (mut hu, mut wu) = (hc, wc);
+        for _ in 0..l {
+            up = down_t(&up, 2 * hu, 2 * wu).into_iter().map(|v| 4.0 * v).collect();
+            hu *= 2;
+            wu *= 2;
+        }
+        low.push(up);
+    }
+    let mut out: Vec<Vec<f64>> = low.windows(2).map(|p| p[0].iter().zip(&p[1]).map(|(a, b)| a - b).collect()).collect();
+    out.push(low.pop().unwrap());
+    out
+}
+
 /// `K = sum_l w_l 4^l (D^T)^l D^l` on `[h][w]` planes.
 #[derive(Clone, Debug)]
 pub struct Smoother {

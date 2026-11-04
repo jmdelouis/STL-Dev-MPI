@@ -1,7 +1,7 @@
 //! `stl_core::planar::transport`: bicubic transport, its VJP and
 //! derivative in `u`, and the multi-scale smoother.
 
-use stl_core::planar::transport::{bicubic, bicubic_du, bicubic_vjp, down, down_t, gradient, Smoother};
+use stl_core::planar::transport::{bands, bicubic, bicubic_du, bicubic_vjp, down, down_t, gradient, Smoother};
 
 const H: usize = 16;
 const W: usize = 24;
@@ -78,4 +78,18 @@ fn smoother_is_symmetric_positive_and_keeps_constants() {
     for v in k.apply(&vec![1.0; H * W]) {
         assert!((v - total).abs() < 1e-12);
     }
+}
+
+#[test]
+fn bands_sum_to_the_image() {
+    let x = field(12, 1.0);
+    let b = bands(&x, H, W, 2);
+    assert_eq!(b.len(), 3);
+    for p in 0..H * W {
+        let s: f64 = b.iter().map(|v| v[p]).sum();
+        assert!((s - x[p]).abs() < 1e-13);
+    }
+    // The coarsest band of a constant is the constant.
+    let c = bands(&vec![3.0; H * W], H, W, 2);
+    assert!(c[2].iter().all(|v| (v - 3.0).abs() < 1e-13) && c[0].iter().all(|v| v.abs() < 1e-13));
 }
