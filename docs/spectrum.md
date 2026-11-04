@@ -132,22 +132,29 @@ batch of two, auto and cross).
 ### 5.1 Against healpy
 
 `python/stl_ensemble/bench_spectrum_healpy.py`, one map (spin 0) or one `(Q, U)` pair, no mask,
-nside 256, `lmax = 511`, WSL (20 CPUs), `OMP_NUM_THREADS = STL_THREADS`, median of 3 after one
-warm-up. healpy has no gradient: its time is the forward only (`anafast`; spin `s`:
-`map2alm_spin` + three `alm2cl`).
+nside 256, `lmax = 511`, WSL (20 CPUs, i7-13800H), `OMP_NUM_THREADS = STL_THREADS`, median of 7
+after one warm-up, best of two rounds (healpy's 20-thread times vary by up to 3 times between runs);
+the one-thread runs are pinned to one core (`taskset`). healpy has no gradient: its time is the
+forward only (`anafast`; spin `s`: `map2alm_spin` + three `alm2cl`). "before" is the one-ring
+scalar recursion of the first version (`claude/spectrum`), measured in the same session.
 
-| spin | threads | healpy forward | STL forward | STL forward + VJP |
-|---|---|---|---|---|
-| 0 | 20 | 0.021 s | 0.035 s | 0.064 s |
-| 1 | 20 | 0.034 s | 0.109 s | 0.225 s |
-| 2 | 20 | 0.038 s | 0.110 s | 0.239 s |
-| 0 | 1 | 0.038 s | 0.237 s | 0.460 s |
-| 1 | 1 | 0.111 s | 0.794 s | 1.541 s |
-| 2 | 1 | 0.109 s | 0.792 s | 1.528 s |
+| spin | threads | healpy forward | STL forward | STL forward + VJP | before: forward | before: forward + VJP |
+|---|---|---|---|---|---|---|
+| 0 | 20 | 0.026 s | 0.022 s | 0.038 s | 0.037 s | 0.069 s |
+| 1 | 20 | 0.049 s | 0.034 s | 0.073 s | 0.121 s | 0.245 s |
+| 2 | 20 | 0.043 s | 0.030 s | 0.077 s | 0.124 s | 0.239 s |
+| 0 | 1 | 0.036 s | 0.073 s | 0.143 s | 0.247 s | 0.474 s |
+| 1 | 1 | 0.109 s | 0.140 s | 0.332 s | 0.819 s | 1.592 s |
+| 2 | 1 | 0.112 s | 0.140 s | 0.318 s | 0.833 s | 1.619 s |
 
-The host transforms are 1.7 (spin 0) to 3 times (spin `s`) slower than healpy's forward on 20
-threads, 6 to 7 times on one thread: healpy (libsharp/DUCC) vectorises the Legendre recursions over
-rings with SIMD, ours run one ring at a time. The VJP costs about one more forward.
+The host transforms run as libsharp/DUCC do: the Legendre and Wigner recursions on blocks of ring
+pairs (16 lanes for spin 0, 8 for spin `s`, vectorised, AVX2 when available), the rings where the
+functions of `m` stay negligible skipped, per-lane accumulators for the transposed sums, and real
+FFTs (section "Speed" of `crates/stl-core/src/sht.rs`). The results agree with the first version to
+2e-15 (relative to the largest value) at nside 16, 64 and 256. On 20 threads the STL forward is now
+faster than healpy's (1.2 times for spin 0, 1.4 times for spin `s`); on one thread it is 2 times
+slower for spin 0 and 1.3 times for spin `s` (3.4 and 6 times faster than before). The VJP costs
+about one more forward (1.3 forwards for spin `s` on one thread).
 
 ### 5.2 Masks and GPU
 
@@ -159,8 +166,10 @@ forward, 5 syntheses per VJP; 10 each with `--cross`), median of 5 evaluations a
 | T4 (garoupe), auto | 0.099 s | 0.092 s | 15 s |
 | T4 (garoupe), cross | 0.243 s | 0.189 s | 15 s |
 | garoupe CPU, 12 threads, auto | 0.381 s | 0.320 s | 0.3 s |
-| WSL CPU, 20 threads, auto | 0.204 s | 0.178 s | 0.1 s |
+| WSL CPU, 20 threads, auto | 0.097 s | 0.077 s | 0.1 s |
 
+The WSL row is the blocked recursions of 5.1 (0.168 s and 0.148 s before, same session); the garoupe
+rows and the spin-`s` times below predate them.
 The GPU setup is the CUDA context and the NVRTC compilation of the kernels, once per process.
 Host transfers (maps up, `a_lm` down, cotangents up, maps down) are included.
 
