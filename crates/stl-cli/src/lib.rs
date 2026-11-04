@@ -106,6 +106,10 @@ stl-synth --target MAP [options]
   --marginal-weight X   adds X / B sum_m (1/N) sum_i (x_m,(i) - t_(i))^2, the squared 1-D Wasserstein
                         distance between the sorted values of every member and of the target: holds
                         the pixel histogram; default 0
+  --marginal-tail-weight X adds X / B sum_m sum_i (x_m,(i) - t_(i))^2 over the K smallest and K largest
+                        ranks i, without the 1/N: holds the most extreme values, which the histogram
+                        matching puts on whatever pixels rank first; default 0 (with --gpu: --gpu-terms host)
+  --marginal-tail K     ranks at each end of that term; default 100
   --freeze-nside M      hold the means of the map over the pixels of nside M at those of the
                         initial map: only the scales finer than M move (coarse-to-fine steps)
   --history-size N      L-BFGS history (default 10)
@@ -259,6 +263,11 @@ pub struct Args {
     /// `--marginal-weight`: factor of the 1-D Wasserstein term on the pixel
     /// histogram.
     pub marginal_weight: f64,
+    /// `--marginal-tail`: ranks at each end of the tail term.
+    pub marginal_tail: usize,
+    /// `--marginal-tail-weight`: factor of the tail term (most extreme
+    /// ranks, without the 1/N).
+    pub marginal_tail_weight: f64,
     /// `--niter`: L-BFGS iterations.
     pub niter: usize,
     /// `--history-size`: L-BFGS history.
@@ -330,6 +339,8 @@ impl Args {
             minkowski_sigma: None,
             minkowski_standardise: false,
             marginal_weight: 0.0,
+            marginal_tail: 100,
+            marginal_tail_weight: 0.0,
             niter: 50,
             history_size: 10,
             precondition: None,
@@ -415,7 +426,7 @@ impl Args {
                         .map(|f| Family::parse(f.trim()).ok_or(format!("--kappa-families: unknown family '{f}'")))
                         .collect::<Result<_, _>>()?;
                 }
-                "--kappa-s3-weight" | "--kurtosis-weight" | "--minkowski-weight" => {
+                "--kappa-s3-weight" | "--kurtosis-weight" | "--minkowski-weight" | "--marginal-tail-weight" => {
                     let v: f64 = it.next().ok_or(format!("{k} needs a value"))?.parse().map_err(|_| format!("{k}: not a number"))?;
                     if !(v.is_finite() && v >= 0.0) {
                         return Err(format!("{k} must be finite and >= 0"));
@@ -423,9 +434,11 @@ impl Args {
                     match k.as_str() {
                         "--kappa-s3-weight" => a.kappa_s3_weight = v,
                         "--kurtosis-weight" => a.kurtosis_weight = v,
-                        _ => a.minkowski_weight = v,
+                        "--minkowski-weight" => a.minkowski_weight = v,
+                        _ => a.marginal_tail_weight = v,
                     }
                 }
+                "--marginal-tail" => a.marginal_tail = num(it.next(), k)?,
                 "--kappa-s3-nside" => a.kappa_s3_nside = Some(parse_nside_range(k, it.next())?),
                 "--kurtosis-nside" => a.kurtosis_nside = Some(parse_nside_range(k, it.next())?),
                 "--minkowski-nside" => a.minkowski_nside = Some(parse_nside_range(k, it.next())?),
@@ -498,6 +511,9 @@ impl Args {
         }
         if a.gpu && !cfg!(feature = "gpu") {
             return Err("--gpu: built without the feature gpu".into());
+        }
+        if a.gpu && !a.gpu_terms_host && a.marginal_tail_weight > 0.0 {
+            return Err("--marginal-tail-weight: not on the device yet, add --gpu-terms host".into());
         }
         Ok(a)
     }
@@ -825,7 +841,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
     } else {
         None
     };
-    let marginal = (args.marginal_weight > 0.0).then(|| Marginal::new(args.marginal_weight, &target, s, npix, members, gcomm));
+    let marginal = (args.marginal_weight > 0.0 || args.marginal_tail_weight > 0.0)
+        .then(|| Marginal::new(args.marginal_weight, &target, s, npix, members, gcomm).with_tail(args.marginal_tail, args.marginal_tail_weight));
     let setup_seconds = started_setup.elapsed().as_secs_f64();
     let mut x = initial;
 
@@ -1060,7 +1077,8 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         }
         _ => (0.0, serde_json::Value::Null),
     };
-    let loss_marginal = marginal.as_ref().map_or(0.0, |mg| mg.loss_and_grad(&x, e - s, s, gcomm, cross.as_ref()).0);
+    let [loss_histogram, loss_tail] = marginal.as_ref().map_or([0.0; 2], |mg| mg.parts_and_grad(&x, e - s, s, gcomm, cross.as_ref()).0);
+    let loss_marginal = loss_histogram + loss_tail;
     // Kurtosis of the details (of kappa with --kappa-table): term and every level.
     let kurtosis_x: &[f64] = kfinal.as_deref().unwrap_or(&x);
     let loss_kurtosis = kurtosis.as_ref().map_or(0.0, |ku| ku.loss_and_grad(kurtosis_x, e - s, gcomm, cross.as_ref()).0);
@@ -1275,7 +1293,13 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
         "kappa": kappa_report,
         "kurtosis": kurtosis_report,
         "minkowski": minkowski_report,
-        "marginal": {"weight": args.marginal_weight, "loss_final_term": loss_marginal},
+        "marginal": {
+            "weight": args.marginal_weight,
+            "loss_final_term": loss_marginal,
+            "tail": args.marginal_tail,
+            "tail_weight": args.marginal_tail_weight,
+            "loss_final_tail": loss_tail,
+        },
         "memory_floor_bytes": floor,
         "memory_floor_bytes_per_rank": floors,
         "memory_peak_bytes_per_rank": peaks,
