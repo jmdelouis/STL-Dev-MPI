@@ -83,7 +83,7 @@ Each run writes a JSON report (`loss_history`, `seconds_per_evaluation`, `timers
 
 | | Example | Tool |
 |---|---|---|
-| 01 | [HEALPix synthesis of one map, CPU and GPU](examples/01_healpix_synthesis) | `stl-synth` |
+| 01 | [HEALPix synthesis of one map, CPU and GPU, and the recipe for skewed fields](examples/01_healpix_synthesis) | `stl-synth` |
 | 02 | [Ensemble synthesis, 10 members, P. Campeti's method](examples/02_healpix_ensemble) | `stl-ensemble` |
 | 03 | [Statistics of maps](examples/03_statistics) | `stl-stats` |
 | 04 | [2D synthesis, 10 images of 256², CPU and GPU](examples/04_planar_synthesis) | `stl-synth2d` |

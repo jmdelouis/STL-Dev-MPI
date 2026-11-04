@@ -6,7 +6,7 @@ time).
 
 | | Example | Tool | Run time (garoupe) |
 |---|---|---|---|
-| 01 | [HEALPix synthesis of one map, CPU and GPU](01_healpix_synthesis) | `stl-synth` | 7 min CPU, 24 s GPU |
+| 01 | [HEALPix synthesis of one map, CPU and GPU, and the recipe for skewed fields](01_healpix_synthesis) | `stl-synth` | 7 min CPU, 22 s + 41 s GPU |
 | 02 | [Ensemble synthesis, 10 members, P. Campeti's method](02_healpix_ensemble) | `stl-ensemble` | 12 min GPU |
 | 03 | [Statistics of maps](03_statistics) | `stl-stats` | 25 s |
 | 04 | [2D synthesis, STL-Dev's example (10 × 256²), CPU and GPU](04_planar_synthesis) | `stl-synth2d` | 2 min CPU, 1.5 + 7 min GPU |
