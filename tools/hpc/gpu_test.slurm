@@ -1,11 +1,11 @@
 #!/bin/bash
 # Short test of stl-synth --gpu on the GPU nodes: setup time, seconds per
 # evaluation and device memory (2 L-BFGS iterations from white noise).
-#   sbatch --gres=gpu:h200:2 --ntasks=2 --export=ALL,TARGET=...,L=4 \
+#   sbatch --gres=gpu:a100:2 --ntasks=2 --export=ALL,TARGET=...,L=4 \
 #          $HOME/stl-gpu/src/tools/hpc/gpu_test.slurm
 #SBATCH --job-name=stl-gpu-test
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:h200:2
+#SBATCH --gres=gpu:a100:2
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=600G
