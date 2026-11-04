@@ -21,6 +21,15 @@
 //! together (`Y_lm(pi - theta) = (-1)^(l+m) Y_lm(theta)`); the sums over `l`
 //! run in parallel over `m`, the FFTs of the rings in parallel over rings
 //! (`STL_THREADS` host threads), every sum in a fixed order.
+//!
+//! Speed (as libsharp/DUCC): the recursions run on blocks of ring pairs at
+//! once (fixed-size lanes that LLVM vectorises, compiled for AVX2 when the
+//! CPU has it, without FMA), branch-free once every lane is in range; the
+//! rings where the functions of `m` stay below about `1e-30` up to `lmax`
+//! are skipped (libsharp's `mlim`); the transposed sums accumulate per lane
+//! and reduce once per `m`; the ring FFTs are real FFTs (complex FFTs of
+//! half length).  The results agree with the one-ring scalar recursion to
+//! a few `1e-15` relative.
 
 use crate::healpix::{order_of, ring2nest};
 use num_complex::Complex64;
@@ -63,6 +72,164 @@ pub const SCALE: f64 = 4.149515568880993e180; // 2^600
 /// `2^300`: a scaled value above this is divided by `SCALE`.
 pub const LIMIT: f64 = 2.037035976334486e90; // 2^300
 
+/// Ring pairs recursed together (the lanes of the block recursions), spin 0.
+const LANES: usize = 16;
+/// Lanes of the spin-`s` recursions (two chains per lane).
+const SPIN_LANES: usize = 8;
+
+/// Scale exponent `k <= 0` of a start value of log magnitude `log`.
+#[inline(always)]
+fn scale_exponent(log: f64) -> i32 {
+    if log > -650.0 * std::f64::consts::LN_2 {
+        0
+    } else {
+        ((log - 300.0 * std::f64::consts::LN_2) / LN_SCALE).ceil() as i32
+    }
+}
+
+/// `f()` compiled for AVX2 when the CPU has it: wider vectors for the block
+/// recursions, without FMA (Rust never contracts `a * b + c`), so the
+/// results are those of the baseline build.
+#[inline(always)]
+fn simd<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2")]
+        unsafe fn avx2<R>(f: impl FnOnce() -> R) -> R {
+            f()
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // Safety: the CPU supports AVX2.
+            return unsafe { avx2(f) };
+        }
+    }
+    f()
+}
+
+/// Width of the per-`l` accumulators of the transposed sums: the lanes
+/// are folded to `W` before they are added (fewer loads and stores per `l`).
+const W: usize = 4;
+
+/// The lanes folded to `W`, in a fixed order.
+#[inline(always)]
+fn fold<const NB: usize>(v: &[f64; NB]) -> [f64; W] {
+    let mut o: [f64; W] = std::array::from_fn(|j| v[j]);
+    for c in 1..NB / W {
+        for j in 0..W {
+            o[j] += v[c * W + j];
+        }
+    }
+    o
+}
+
+/// Sum of `W` folded lanes, in a fixed tree order.
+#[inline(always)]
+fn lane_sum(mut v: [f64; W]) -> f64 {
+    let mut w = W / 2;
+    while w > 0 {
+        for i in 0..w {
+            v[i] += v[i + w];
+        }
+        w /= 2;
+    }
+    v[0]
+}
+
+/// `e^{i sign m phi0}` for `m = 0..count`, by products re-anchored every 32 `m`.
+fn phases(phi0: f64, sign: f64, count: usize, out: &mut Vec<C64>) {
+    out.clear();
+    if phi0 == 0.0 {
+        out.resize(count, C64::new(1.0, 0.0));
+        return;
+    }
+    let step = C64::from_polar(1.0, sign * phi0);
+    let mut ph = C64::new(1.0, 0.0);
+    for m in 0..count {
+        if m % 32 == 0 {
+            ph = C64::from_polar(1.0, sign * (m as f64 * phi0));
+        }
+        out.push(ph);
+        ph *= step;
+    }
+}
+
+/// Highest `m` where a ring of `(cos, sin)` has spin-`s` functions above
+/// about `1e-30` up to `lmax` (libsharp's `sharp_get_mlim`).
+fn mlim(lmax: usize, s: usize, cos: f64, sin: f64) -> usize {
+    let ofs = (lmax as f64 * 0.01).max(100.0);
+    let b = -2.0 * s as f64 * cos.abs();
+    let t1 = lmax as f64 * sin + ofs;
+    let c = (s * s) as f64 - t1 * t1;
+    let discr = b * b - 4.0 * c;
+    if discr <= 0.0 {
+        return lmax;
+    }
+    (((-b + discr.sqrt()) / 2.0).min(lmax as f64) + 0.5) as usize
+}
+
+/// Real FFT of an even length `n` through a complex FFT of length `n / 2`.
+struct RealFft {
+    n: usize,
+    fwd: Arc<dyn Fft<f64>>,
+    inv: Arc<dyn Fft<f64>>,
+    /// `e^{-2 pi i k / n}`, `k = 0..=n/2`.
+    tw: Vec<C64>,
+}
+
+impl RealFft {
+    fn new(planner: &mut FftPlanner<f64>, n: usize) -> Self {
+        assert!(n % 2 == 0);
+        let h = n / 2;
+        let tw = (0..=h).map(|k| C64::from_polar(1.0, -2.0 * std::f64::consts::PI * k as f64 / n as f64)).collect();
+        RealFft { n, fwd: planner.plan_fft_forward(h), inv: planner.plan_fft_inverse(h), tw }
+    }
+
+    /// `F_k = sum_j x_j e^{-2 pi i j k / n}`, `k = 0..=n/2` into `out`.
+    fn forward(&self, x: impl Fn(usize) -> f64, out: &mut Vec<C64>, buf: &mut Vec<C64>) {
+        let h = self.n / 2;
+        buf.clear();
+        buf.extend((0..h).map(|j| C64::new(x(2 * j), x(2 * j + 1))));
+        self.fwd.process(buf);
+        out.clear();
+        out.extend((0..=h).map(|k| {
+            let zk = buf[k % h];
+            let zc = buf[(h - k) % h].conj();
+            let e = (zk + zc) * 0.5;
+            let o = (zk - zc) * C64::new(0.0, -0.5);
+            e + self.tw[k] * o
+        }));
+    }
+
+    /// Bin `m` (any `m >= 0`) of a real spectrum from [`forward`](Self::forward).
+    #[inline(always)]
+    fn bin(&self, f: &[C64], m: usize) -> C64 {
+        let k = m % self.n;
+        if k <= self.n / 2 {
+            f[k]
+        } else {
+            f[self.n - k].conj()
+        }
+    }
+
+    /// `x_j = Re sum_k h_k e^{2 pi i j k / n}` of a complex `h` of length `n`.
+    fn inverse_real(&self, hc: &[C64], out: &mut [f64], buf: &mut Vec<C64>) {
+        let (n, h) = (self.n, self.n / 2);
+        buf.clear();
+        buf.extend((0..h).map(|k| {
+            let a = (hc[k] + hc[(n - k) % n].conj()) * 0.5;
+            let b = (hc[k + h] + hc[h - k].conj()) * 0.5;
+            let ev = a + b;
+            let od = (a - b) * self.tw[k].conj();
+            ev + C64::new(0.0, 1.0) * od
+        }));
+        self.inv.process(buf);
+        for (j, z) in buf.iter().enumerate() {
+            out[2 * j] = z.re;
+            out[2 * j + 1] = z.im;
+        }
+    }
+}
+
 /// Spherical harmonic transforms of full-sky maps of one `nside` up to
 /// `lmax`: ring geometry, RING -> NESTED table and FFT plans.
 pub struct Sht {
@@ -80,7 +247,7 @@ pub struct Sht {
     log_mm: Vec<f64>,
     /// `ln n!`, `n = 0..=2 lmax + 1` (starts of the spin recursions).
     ln_fact: Vec<f64>,
-    fft: HashMap<usize, (Arc<dyn Fft<f64>>, Arc<dyn Fft<f64>>)>,
+    fft: HashMap<usize, RealFft>,
     threads: usize,
 }
 
@@ -175,7 +342,7 @@ impl Sht {
         let mut planner = FftPlanner::new();
         let mut fft = HashMap::new();
         for r in &rings {
-            fft.entry(r.nphi).or_insert_with(|| (planner.plan_fft_forward(r.nphi), planner.plan_fft_inverse(r.nphi)));
+            fft.entry(r.nphi).or_insert_with(|| RealFft::new(&mut planner, r.nphi));
         }
         Sht { nside, lmax, npix, rings, nest, log_mm, ln_fact, fft, threads: host_threads() }
     }
@@ -215,35 +382,85 @@ impl Sht {
         self.rings.len() / 2
     }
 
-    /// The Legendre recursion of `m` on a ring of `(cos, sin)`: `f(l, lambda_l,
-    /// sin * dlambda_l/dtheta)` for every `l` whose value is in double range
-    /// (the others are below `2^-300` and skipped).
+    /// North rows (the equator included) where the spin-`s` functions of `m`
+    /// are significant ([`mlim`]), in blocks of `NB` lanes: `(rows, count)`,
+    /// the last block padded with its last row.
+    fn blocks<const NB: usize>(&self, m: usize, s: usize) -> Vec<([usize; NB], usize)> {
+        let rows: Vec<usize> = (0..=self.pairs()).filter(|&p| m <= mlim(self.lmax, s, self.rings[p].cos, self.rings[p].sin)).collect();
+        rows.chunks(NB)
+            .map(|c| {
+                let mut r = [c[c.len() - 1]; NB];
+                r[..c.len()].copy_from_slice(c);
+                (r, c.len())
+            })
+            .collect()
+    }
+
+    /// `(cos, sin)` of the lanes of a block.
+    fn lanes<const NB: usize>(&self, rows: &[usize; NB]) -> ([f64; NB], [f64; NB]) {
+        (std::array::from_fn(|i| self.rings[rows[i]].cos), std::array::from_fn(|i| self.rings[rows[i]].sin))
+    }
+
+    /// The Legendre recursion of `m` on `NB` rings of `(cos, sin)` at once:
+    /// `f(l, lambda_l, lambda_{l-1})` for `l = m..=lmax`, the lanes whose
+    /// value is not yet in double range (below `2^-300`) set to zero.  While
+    /// a lane is scaled the recursion checks the range; afterwards it runs
+    /// without branches.
     #[inline(always)]
-    fn recurse(&self, m: usize, coef: &[(f64, f64, f64)], cos: f64, sin: f64, mut f: impl FnMut(usize, f64, f64)) {
-        let log = self.log_mm[m] + m as f64 * sin.ln();
-        let mut k: i32 = if log > -650.0 * std::f64::consts::LN_2 { 0 } else { ((log - 300.0 * std::f64::consts::LN_2) / LN_SCALE).ceil() as i32 };
-        let mut prev = 0.0;
+    fn recurse_block<const NB: usize>(&self, m: usize, coef: &[(f64, f64, f64)], cos: &[f64; NB], sin: &[f64; NB], mut f: impl FnMut(usize, &[f64; NB], &[f64; NB])) {
+        let mut cur = [0.0; NB];
+        let mut prev = [0.0; NB];
+        let mut k = [0i32; NB];
         // Condon-Shortley phase (healpy, DUCC).
-        let mut cur = (log - k as f64 * LN_SCALE).exp() * if m % 2 == 1 { -1.0 } else { 1.0 };
-        if k == 0 {
-            f(m, cur, m as f64 * cos * cur);
+        let sign = if m % 2 == 1 { -1.0 } else { 1.0 };
+        for i in 0..NB {
+            let log = self.log_mm[m] + m as f64 * sin[i].ln();
+            k[i] = scale_exponent(log);
+            cur[i] = (log - k[i] as f64 * LN_SCALE).exp() * sign;
         }
-        for l in m + 1..=self.lmax {
-            let (a, b, c) = coef[l - m];
-            let next = a * (cos * cur - b * prev);
-            prev = cur;
-            cur = next;
-            if k < 0 {
-                if cur.abs() > LIMIT {
-                    cur /= SCALE;
-                    prev /= SCALE;
-                    k += 1;
+        let mut l = m;
+        if k.iter().any(|&k| k < 0) {
+            let (mut lam, mut pre) = ([0.0; NB], [0.0; NB]);
+            loop {
+                let mut done = true;
+                for i in 0..NB {
+                    let on = if k[i] == 0 { 1.0 } else { 0.0 };
+                    lam[i] = cur[i] * on;
+                    pre[i] = prev[i] * on;
+                    done &= k[i] == 0;
                 }
-                if k < 0 {
-                    continue;
+                if done {
+                    break;
+                }
+                f(l, &lam, &pre);
+                if l == self.lmax {
+                    return;
+                }
+                l += 1;
+                let (a, b, _) = coef[l - m];
+                for i in 0..NB {
+                    let next = a * (cos[i] * cur[i] - b * prev[i]);
+                    let up = k[i] < 0 && next.abs() > LIMIT;
+                    // 2^-600: exact, as the division by SCALE.
+                    let s = if up { 1.0 / SCALE } else { 1.0 };
+                    prev[i] = cur[i] * s;
+                    cur[i] = next * s;
+                    k[i] += up as i32;
                 }
             }
-            f(l, cur, l as f64 * cos * cur - c * prev);
+        }
+        loop {
+            f(l, &cur, &prev);
+            if l == self.lmax {
+                return;
+            }
+            l += 1;
+            let (a, b, _) = coef[l - m];
+            for i in 0..NB {
+                let next = a * (cos[i] * cur[i] - b * prev[i]);
+                prev[i] = cur[i];
+                cur[i] = next;
+            }
         }
     }
 
@@ -267,44 +484,58 @@ impl Sht {
 
     /// Legendre sums `[m][ring]` of `alm` (B, C when `deriv`).
     fn legendre(&self, alm: &[C64], deriv: bool) -> Sums {
+        const NB: usize = LANES;
         assert_eq!(alm.len(), self.nalm());
         let nr = self.rings.len();
         let pairs = self.pairs();
-        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+        let per_m = par_map(self.lmax + 1, self.threads, |m| simd(|| {
             let coef = self.coefficients(m);
             let a = &alm[self.index(m, m)..self.index(m, m) + self.lmax + 1 - m];
             let (mut va, mut vb, mut vc) = (vec![C64::default(); nr], vec![C64::default(); if deriv { nr } else { 0 }], vec![C64::default(); if deriv { nr } else { 0 }]);
-            for p in 0..=pairs {
-                let ring = &self.rings[p];
-                // [even, odd] parts in l + m.
-                let mut sa = [C64::default(); 2];
-                let mut sb = [C64::default(); 2];
-                let mut sc = [C64::default(); 2];
-                self.recurse(m, &coef, ring.cos, ring.sin, |l, lam, dlam| {
+            for (rows, count) in self.blocks::<NB>(m, 0) {
+                let (cos, sin) = self.lanes(&rows);
+                // [re, im][even, odd in l + m][lane].
+                let mut sa = [[[0.0; NB]; 2]; 2];
+                let mut sb = [[[0.0; NB]; 2]; 2];
+                let mut sc = [[[0.0; NB]; 2]; 2];
+                self.recurse_block(m, &coef, &cos, &sin, |l, lam, pre| {
                     let par = (l + m) & 1;
                     let x = a[l - m];
-                    sa[par] += x * lam;
+                    for i in 0..NB {
+                        sa[0][par][i] += x.re * lam[i];
+                        sa[1][par][i] += x.im * lam[i];
+                    }
                     if deriv {
-                        sb[par] += x * (dlam / ring.sin);
-                        sc[par] += x * ((l * (l + 1)) as f64 * lam);
+                        let (c, lf, ll) = (coef[l - m].2, l as f64, (l * (l + 1)) as f64);
+                        for i in 0..NB {
+                            let d = (lf * cos[i] * lam[i] - c * pre[i]) / sin[i];
+                            let w = ll * lam[i];
+                            sb[0][par][i] += x.re * d;
+                            sb[1][par][i] += x.im * d;
+                            sc[0][par][i] += x.re * w;
+                            sc[1][par][i] += x.im * w;
+                        }
                     }
                 });
-                va[p] = sa[0] + sa[1];
-                if deriv {
-                    vb[p] = sb[0] + sb[1];
-                    vc[p] = sc[0] + sc[1];
-                }
-                if p < pairs {
-                    let s = nr - 1 - p;
-                    va[s] = sa[0] - sa[1];
+                for (i, &p) in rows[..count].iter().enumerate() {
+                    let get = |v: &[[[f64; NB]; 2]; 2], par: usize| C64::new(v[0][par][i], v[1][par][i]);
+                    va[p] = get(&sa, 0) + get(&sa, 1);
                     if deriv {
-                        vb[s] = sb[1] - sb[0];
-                        vc[s] = sc[0] - sc[1];
+                        vb[p] = get(&sb, 0) + get(&sb, 1);
+                        vc[p] = get(&sc, 0) + get(&sc, 1);
+                    }
+                    if p < pairs {
+                        let s = nr - 1 - p;
+                        va[s] = get(&sa, 0) - get(&sa, 1);
+                        if deriv {
+                            vb[s] = get(&sb, 1) - get(&sb, 0);
+                            vc[s] = get(&sc, 0) - get(&sc, 1);
+                        }
                     }
                 }
             }
             (va, vb, vc)
-        });
+        }));
         let mut sums = Sums { a: Vec::with_capacity((self.lmax + 1) * nr), b: Vec::new(), c: Vec::new() };
         for (va, vb, vc) in per_m {
             sums.a.extend(va);
@@ -317,39 +548,67 @@ impl Sht {
     /// Transpose of [`legendre`](Self::legendre): `a_lm = sum_rings lambda A +
     /// lambda' B + l (l + 1) lambda C` (B, C when present).
     fn legendre_adjoint(&self, sums: &Sums) -> Vec<C64> {
+        const NB: usize = LANES;
         let nr = self.rings.len();
         let pairs = self.pairs();
         let deriv = !sums.b.is_empty();
-        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+        let per_m = par_map(self.lmax + 1, self.threads, |m| simd(|| {
             let coef = self.coefficients(m);
-            let mut out = vec![C64::default(); self.lmax + 1 - m];
+            // [l - m][re, im][lane], summed over the lanes at the end.
+            let mut acc = vec![[[0.0; W]; 2]; self.lmax + 1 - m];
             let row = |v: &[C64], r: usize| v[m * nr + r];
-            for p in 0..=pairs {
-                let ring = &self.rings[p];
-                let s = nr - 1 - p;
-                let south = p < pairs;
-                let pick = |v: &[C64]| -> [C64; 2] {
-                    let (n, s) = (row(v, p), if south { row(v, s) } else { C64::default() });
-                    [n + s, n - s]
-                };
-                let ta = pick(&sums.a);
-                let (tb, tc) = if deriv {
-                    let (n, sv) = (row(&sums.b, p), if south { row(&sums.b, s) } else { C64::default() });
-                    ([n - sv, n + sv], pick(&sums.c))
-                } else {
-                    ([C64::default(); 2], [C64::default(); 2])
-                };
-                self.recurse(m, &coef, ring.cos, ring.sin, |l, lam, dlam| {
-                    let par = (l + m) & 1;
-                    let mut v = ta[par] * lam;
+            for (rows, count) in self.blocks::<NB>(m, 0) {
+                let (cos, sin) = self.lanes(&rows);
+                // [re, im][even, odd in l + m][lane], zero on the padding lanes.
+                let mut ta = [[[0.0; NB]; 2]; 2];
+                let mut tb = [[[0.0; NB]; 2]; 2];
+                let mut tc = [[[0.0; NB]; 2]; 2];
+                for (i, &p) in rows[..count].iter().enumerate() {
+                    let s = nr - 1 - p;
+                    let south = p < pairs;
+                    let both = |v: &[C64]| (row(v, p), if south { row(v, s) } else { C64::default() });
+                    let put = |t: &mut [[[f64; NB]; 2]; 2], v: [C64; 2]| {
+                        for par in 0..2 {
+                            t[0][par][i] = v[par].re;
+                            t[1][par][i] = v[par].im;
+                        }
+                    };
+                    let (n, sv) = both(&sums.a);
+                    put(&mut ta, [n + sv, n - sv]);
                     if deriv {
-                        v += tb[par] * (dlam / ring.sin) + tc[par] * ((l * (l + 1)) as f64 * lam);
+                        let (n, sv) = both(&sums.b);
+                        put(&mut tb, [n - sv, n + sv]);
+                        let (n, sv) = both(&sums.c);
+                        put(&mut tc, [n + sv, n - sv]);
                     }
-                    out[l - m] += v;
+                }
+                self.recurse_block(m, &coef, &cos, &sin, |l, lam, pre| {
+                    let par = (l + m) & 1;
+                    let (mut re, mut im) = ([0.0; NB], [0.0; NB]);
+                    if deriv {
+                        let (c, lf, ll) = (coef[l - m].2, l as f64, (l * (l + 1)) as f64);
+                        for i in 0..NB {
+                            let d = (lf * cos[i] * lam[i] - c * pre[i]) / sin[i];
+                            let w = ll * lam[i];
+                            re[i] = ta[0][par][i] * lam[i] + tb[0][par][i] * d + tc[0][par][i] * w;
+                            im[i] = ta[1][par][i] * lam[i] + tb[1][par][i] * d + tc[1][par][i] * w;
+                        }
+                    } else {
+                        for i in 0..NB {
+                            re[i] = ta[0][par][i] * lam[i];
+                            im[i] = ta[1][par][i] * lam[i];
+                        }
+                    }
+                    let (fr, fi) = (fold(&re), fold(&im));
+                    let [ar, ai] = &mut acc[l - m];
+                    for j in 0..W {
+                        ar[j] += fr[j];
+                        ai[j] += fi[j];
+                    }
                 });
             }
-            out
-        });
+            acc.into_iter().map(|[re, im]| C64::new(lane_sum(re), lane_sum(im))).collect::<Vec<_>>()
+        }));
         per_m.into_iter().flatten().collect()
     }
 
@@ -361,20 +620,28 @@ impl Sht {
         let per_ring = par_map(nr, self.threads, |r| {
             let ring = &self.rings[r];
             let n = ring.nphi;
+            let mut ph = Vec::new();
+            phases(ring.phi0, 1.0, self.lmax + 1, &mut ph);
             let mut h = vec![vec![C64::default(); n]; K];
             for m in 0..=self.lmax {
                 let i = m * nr + r;
                 let (b, c) = if deriv { (sums.b[i], sums.c[i]) } else { (C64::default(), C64::default()) };
                 let v = combine(ring, m, sums.a[i], b, c);
                 let w = if m == 0 { 1.0 } else { 2.0 };
-                let shift = C64::from_polar(w, m as f64 * ring.phi0);
+                let shift = ph[m] * w;
                 for k in 0..K {
                     h[k][m % n] += v[k] * shift;
                 }
             }
-            let (_, inv) = &self.fft[&n];
-            h.iter_mut().for_each(|x| inv.process(x));
-            h.into_iter().map(|x| x.into_iter().map(|z| z.re).collect::<Vec<f64>>()).collect::<Vec<_>>()
+            let rf = &self.fft[&n];
+            let mut buf = Vec::new();
+            h.iter()
+                .map(|x| {
+                    let mut v = vec![0.0; n];
+                    rf.inverse_real(x, &mut v, &mut buf);
+                    v
+                })
+                .collect::<Vec<_>>()
         });
         let mut out: [Vec<f64>; K] = std::array::from_fn(|_| vec![0.0; self.npix]);
         for (r, values) in per_ring.into_iter().enumerate() {
@@ -398,20 +665,23 @@ impl Sht {
         let per_ring = par_map(nr, self.threads, |r| {
             let ring = &self.rings[r];
             let n = ring.nphi;
-            let (fwd, _) = &self.fft[&n];
+            let rf = &self.fft[&n];
+            let mut buf = Vec::new();
             let spectra: Vec<Vec<C64>> = maps
                 .iter()
                 .map(|x| {
-                    let mut buf: Vec<C64> = (0..n).map(|j| C64::new(x[self.nest[ring.start + j] as usize], 0.0)).collect();
-                    fwd.process(&mut buf);
-                    buf
+                    let mut out = Vec::new();
+                    rf.forward(|j| x[self.nest[ring.start + j] as usize], &mut out, &mut buf);
+                    out
                 })
                 .collect();
+            let mut ph = Vec::new();
+            phases(ring.phi0, -1.0, self.lmax + 1, &mut ph);
             (0..=self.lmax)
                 .map(|m| {
                     let w = if with_mult && m > 0 { 2.0 } else { 1.0 };
-                    let shift = C64::from_polar(w, -(m as f64) * ring.phi0);
-                    let f: [C64; K] = std::array::from_fn(|k| spectra[k][m % n] * shift);
+                    let shift = ph[m] * w;
+                    let f: [C64; K] = std::array::from_fn(|k| rf.bin(&spectra[k], m) * shift);
                     split(ring, m, f)
                 })
                 .collect::<Vec<[C64; 3]>>()
@@ -491,75 +761,96 @@ impl Sht {
             .collect()
     }
 
-    /// The spin-`s` functions of `m` on a ring of `(cos, sin)` (north
-    /// hemisphere or equator): `f(l, lambda+, lambda-)` with `lambda+- =
-    /// (_s lambda_lm +- _{-s} lambda_lm) / 2`, `_s lambda_lm = (-1)^s
-    /// sqrt((2l+1)/4pi) d^l_{m,-s}`, `_{-s} lambda_lm = sqrt((2l+1)/4pi)
-    /// d^l_{m,s}` (healpy's `map2alm_spin`), for every `l` where one of them
-    /// is in double range.
+    /// The spin-`s` functions of `m` on `NB` rings of `(cos, sin)` at once
+    /// (north hemisphere or equator): `f(l, lambda+, lambda-)` for `l =
+    /// max(m, s)..=lmax` with `lambda+- = (_s lambda_lm +- _{-s} lambda_lm) /
+    /// 2`, `_s lambda_lm = (-1)^s sqrt((2l+1)/4pi) d^l_{m,-s}`, `_{-s}
+    /// lambda_lm = sqrt((2l+1)/4pi) d^l_{m,s}` (healpy's `map2alm_spin`), a
+    /// function not yet in double range counted as zero.
     #[inline(always)]
-    fn recurse_spin(&self, m: usize, s: usize, coef: &[(f64, f64, f64)], cos: f64, sin: f64, mut f: impl FnMut(usize, f64, f64)) {
+    fn recurse_spin_block<const NB: usize>(&self, m: usize, s: usize, coef: &[(f64, f64, f64)], cos: &[f64; NB], sin: &[f64; NB], mut f: impl FnMut(usize, &[f64; NB], &[f64; NB])) {
         let j = m.max(s);
-        // Half-angle cosine and sine without cancellation.
-        let (ch, sh) = if cos >= 0.0 {
-            let ch = ((1.0 + cos) / 2.0).sqrt();
-            (ch, sin / (2.0 * ch))
-        } else {
-            let sh = ((1.0 - cos) / 2.0).sqrt();
-            (sin / (2.0 * sh), sh)
-        };
-        let (lch, lsh) = (ch.ln(), sh.ln());
         let lf = |n: usize| self.ln_fact[n];
-        // d^j_{m,b} at j = max(m, s), b = -s then +s: (log magnitude, sign).
-        let start = |b: i64| -> (f64, f64) {
-            let (jj, a) = (j as i64, m as i64);
-            if m >= s {
-                let log = 0.5 * (lf(2 * j) - lf((jj + b) as usize) - lf((jj - b) as usize)) + (jj + b) as f64 * lch + (jj - b) as f64 * lsh;
-                (log, if (jj - b) % 2 == 0 { 1.0 } else { -1.0 })
+        // [b = -s, b = +s][lane]: current, previous and scale exponent.
+        let mut cur = [[0.0; NB]; 2];
+        let mut prev = [[0.0; NB]; 2];
+        let mut k = [[0i32; NB]; 2];
+        for i in 0..NB {
+            // Half-angle cosine and sine without cancellation.
+            let (ch, sh) = if cos[i] >= 0.0 {
+                let ch = ((1.0 + cos[i]) / 2.0).sqrt();
+                (ch, sin[i] / (2.0 * ch))
             } else {
-                let base = 0.5 * (lf(2 * j) - lf((jj + a) as usize) - lf((jj - a) as usize));
-                if b > 0 {
-                    (base + (jj + a) as f64 * lch + (jj - a) as f64 * lsh, 1.0)
+                let sh = ((1.0 - cos[i]) / 2.0).sqrt();
+                (sin[i] / (2.0 * sh), sh)
+            };
+            let (lch, lsh) = (ch.ln(), sh.ln());
+            // d^j_{m,b} at j = max(m, s): (log magnitude, sign).
+            let start = |b: i64| -> (f64, f64) {
+                let (jj, a) = (j as i64, m as i64);
+                if m >= s {
+                    let log = 0.5 * (lf(2 * j) - lf((jj + b) as usize) - lf((jj - b) as usize)) + (jj + b) as f64 * lch + (jj - b) as f64 * lsh;
+                    (log, if (jj - b) % 2 == 0 { 1.0 } else { -1.0 })
                 } else {
-                    (base + (jj - a) as f64 * lch + (jj + a) as f64 * lsh, if (a + jj) % 2 == 0 { 1.0 } else { -1.0 })
+                    let base = 0.5 * (lf(2 * j) - lf((jj + a) as usize) - lf((jj - a) as usize));
+                    if b > 0 {
+                        (base + (jj + a) as f64 * lch + (jj - a) as f64 * lsh, 1.0)
+                    } else {
+                        (base + (jj - a) as f64 * lch + (jj + a) as f64 * lsh, if (a + jj) % 2 == 0 { 1.0 } else { -1.0 })
+                    }
                 }
+            };
+            for (t, b) in [-(s as i64), s as i64].into_iter().enumerate() {
+                let (log, sign) = start(b);
+                k[t][i] = scale_exponent(log);
+                cur[t][i] = (log - k[t][i] as f64 * LN_SCALE).exp() * sign;
             }
-        };
-        let init = |(log, sign): (f64, f64)| -> (f64, i32) {
-            let k: i32 = if log > -650.0 * std::f64::consts::LN_2 { 0 } else { ((log - 300.0 * std::f64::consts::LN_2) / LN_SCALE).ceil() as i32 };
-            ((log - k as f64 * LN_SCALE).exp() * sign, k)
-        };
-        // [b = -s, b = +s]: current, previous and scale exponent.
-        let (c0, k0) = init(start(-(s as i64)));
-        let (c1, k1) = init(start(s as i64));
-        let mut cur = [c0, c1];
-        let mut prev = [0.0; 2];
-        let mut k = [k0, k1];
+        }
         let sgn = if s % 2 == 0 { 1.0 } else { -1.0 };
-        let norm = |l: usize| (((2 * l + 1) as f64) / (4.0 * std::f64::consts::PI)).sqrt();
-        let emit = |l: usize, cur: &[f64; 2], k: &[i32; 2], f: &mut dyn FnMut(usize, f64, f64)| {
-            if k[0] == 0 || k[1] == 0 {
-                let ls = if k[0] == 0 { sgn * cur[0] } else { 0.0 };
-                let lm = if k[1] == 0 { cur[1] } else { 0.0 };
-                let n = 0.5 * norm(l);
-                f(l, n * (ls + lm), n * (ls - lm));
-            }
-        };
-        emit(j, &cur, &k, &mut f);
-        for l in j + 1..=self.lmax {
-            let (a, b, c) = coef[l - 1 - j];
-            for t in 0..2 {
-                let bt = if t == 0 { -b } else { b };
-                let next = a * (cos - bt) * cur[t] - c * prev[t];
-                prev[t] = cur[t];
-                cur[t] = next;
-                if k[t] < 0 && cur[t].abs() > LIMIT {
-                    cur[t] /= SCALE;
-                    prev[t] /= SCALE;
-                    k[t] += 1;
+        let (mut lp, mut lm) = ([0.0; NB], [0.0; NB]);
+        let mut scaled = k.iter().flatten().any(|&k| k < 0);
+        let mut l = j;
+        loop {
+            let n = 0.5 * (((2 * l + 1) as f64) / (4.0 * std::f64::consts::PI)).sqrt();
+            if scaled {
+                let mut done = true;
+                for i in 0..NB {
+                    let ls = if k[0][i] == 0 { sgn * cur[0][i] } else { 0.0 };
+                    let lv = if k[1][i] == 0 { cur[1][i] } else { 0.0 };
+                    lp[i] = n * (ls + lv);
+                    lm[i] = n * (ls - lv);
+                    done &= k[0][i] == 0 && k[1][i] == 0;
+                }
+                scaled = !done;
+            } else {
+                for i in 0..NB {
+                    let (ls, lv) = (sgn * cur[0][i], cur[1][i]);
+                    lp[i] = n * (ls + lv);
+                    lm[i] = n * (ls - lv);
                 }
             }
-            emit(l, &cur, &k, &mut f);
+            f(l, &lp, &lm);
+            if l == self.lmax {
+                return;
+            }
+            l += 1;
+            let (a, b, c) = coef[l - 1 - j];
+            for (t, bt) in [-b, b].into_iter().enumerate() {
+                for i in 0..NB {
+                    let next = a * (cos[i] - bt) * cur[t][i] - c * prev[t][i];
+                    if scaled {
+                        let up = k[t][i] < 0 && next.abs() > LIMIT;
+                        // 2^-600: exact, as the division by SCALE.
+                        let sc = if up { 1.0 / SCALE } else { 1.0 };
+                        prev[t][i] = cur[t][i] * sc;
+                        cur[t][i] = next * sc;
+                        k[t][i] += up as i32;
+                    } else {
+                        prev[t][i] = cur[t][i];
+                        cur[t][i] = next;
+                    }
+                }
+            }
         }
     }
 
@@ -569,6 +860,7 @@ impl Sht {
     /// the `a_lm` with `l < s` are zero.  The recursions are shared by the
     /// pairs.
     pub fn analysis_spin(&self, s: usize, maps: &[(&[f64], &[f64])]) -> Vec<(Vec<C64>, Vec<C64>)> {
+        const NB: usize = SPIN_LANES;
         assert!(s >= 1 && s <= self.lmax, "spin must be in 1..=lmax (spin 0: analysis)");
         maps.iter().for_each(|(q, u)| assert!(q.len() == self.npix && u.len() == self.npix));
         let nr = self.rings.len();
@@ -577,51 +869,65 @@ impl Sht {
         // Ring spectra [ring][m][map] of Q and U (phase of the first pixel included).
         let spectra = par_map(nr, self.threads, |r| {
             let ring = &self.rings[r];
-            let n = ring.nphi;
-            let (fwd, _) = &self.fft[&n];
+            let rf = &self.fft[&ring.nphi];
+            let (mut buf, mut fq, mut fu, mut ph) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            phases(ring.phi0, -1.0, self.lmax + 1, &mut ph);
             let mut out = vec![(C64::default(), C64::default()); (self.lmax + 1) * nm];
             for (i, (q, u)) in maps.iter().enumerate() {
-                let f = |x: &[f64]| {
-                    let mut buf: Vec<C64> = (0..n).map(|j| C64::new(x[self.nest[ring.start + j] as usize], 0.0)).collect();
-                    fwd.process(&mut buf);
-                    buf
-                };
-                let (fq, fu) = (f(q), f(u));
+                rf.forward(|j| q[self.nest[ring.start + j] as usize], &mut fq, &mut buf);
+                rf.forward(|j| u[self.nest[ring.start + j] as usize], &mut fu, &mut buf);
                 for m in 0..=self.lmax {
-                    let shift = C64::from_polar(1.0, -(m as f64) * ring.phi0);
-                    out[m * nm + i] = (fq[m % n] * shift, fu[m % n] * shift);
+                    out[m * nm + i] = (rf.bin(&fq, m) * ph[m], rf.bin(&fu, m) * ph[m]);
                 }
             }
             out
         });
         let area = self.area();
-        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+        let per_m = par_map(self.lmax + 1, self.threads, |m| simd(|| {
             let coef = self.spin_coefficients(m, s);
             let len = self.lmax + 1 - m;
-            let mut e = vec![C64::default(); nm * len];
-            let mut b = vec![C64::default(); nm * len];
-            // [map][Q even, Q odd, U even, U odd] of the ring pair.
-            let mut x = vec![[C64::default(); 4]; nm];
-            for p in 0..=pairs {
-                let ring = &self.rings[p];
-                let south = nr - 1 - p;
-                for (i, v) in x.iter_mut().enumerate() {
-                    let (qn, un) = spectra[p][m * nm + i];
-                    let (qs, us) = if p < pairs { spectra[south][m * nm + i] } else { (C64::default(), C64::default()) };
-                    *v = [qn + qs, qn - qs, un + us, un - us];
+            // [map, l - m][E re, E im, B re, B im][lane], summed over the lanes at the end.
+            let mut acc = vec![[[0.0; W]; 4]; nm * len];
+            // [map][Q even, Q odd, U even, U odd][re, im][lane] of the ring pairs.
+            let mut x = vec![[[[0.0; NB]; 2]; 4]; nm];
+            for (rows, count) in self.blocks::<NB>(m, s) {
+                let (cos, sin) = self.lanes(&rows);
+                x.iter_mut().for_each(|v| *v = [[[0.0; NB]; 2]; 4]);
+                for (lane, &p) in rows[..count].iter().enumerate() {
+                    for (i, v) in x.iter_mut().enumerate() {
+                        let (qn, un) = spectra[p][m * nm + i];
+                        let (qs, us) = if p < pairs { spectra[nr - 1 - p][m * nm + i] } else { (C64::default(), C64::default()) };
+                        for (t, z) in [qn + qs, qn - qs, un + us, un - us].into_iter().enumerate() {
+                            v[t][0][lane] = z.re;
+                            v[t][1][lane] = z.im;
+                        }
+                    }
                 }
-                self.recurse_spin(m, s, &coef, ring.cos, ring.sin, |l, lp, lm| {
+                self.recurse_spin_block(m, s, &coef, &cos, &sin, |l, lp, lm| {
                     // lambda+ is even in l + m + s about the equator, lambda- odd.
                     let par = (l + m + s) & 1;
                     for (i, v) in x.iter().enumerate() {
-                        let o = i * len + l - m;
-                        e[o] -= v[par] * lp + C64::new(0.0, lm) * v[3 - par];
-                        b[o] -= v[2 + par] * lp - C64::new(0.0, lm) * v[1 - par];
+                        // e -= v[par] lp + i lm v[3 - par], b -= v[2 + par] lp - i lm v[1 - par].
+                        let mut t = [[0.0; NB]; 4];
+                        for k in 0..NB {
+                            t[0][k] = v[par][0][k] * lp[k] - lm[k] * v[3 - par][1][k];
+                            t[1][k] = v[par][1][k] * lp[k] + lm[k] * v[3 - par][0][k];
+                            t[2][k] = v[2 + par][0][k] * lp[k] + lm[k] * v[1 - par][1][k];
+                            t[3][k] = v[2 + par][1][k] * lp[k] - lm[k] * v[1 - par][0][k];
+                        }
+                        let a = &mut acc[i * len + l - m];
+                        for c in 0..4 {
+                            let f = fold(&t[c]);
+                            for j in 0..W {
+                                a[c][j] -= f[j];
+                            }
+                        }
                     }
                 });
             }
-            (e, b)
-        });
+            let sum = |r: usize, i: usize| C64::new(lane_sum(acc[r][i]), lane_sum(acc[r][i + 1]));
+            ((0..nm * len).map(|r| sum(r, 0)).collect::<Vec<_>>(), (0..nm * len).map(|r| sum(r, 2)).collect::<Vec<_>>())
+        }));
         (0..nm)
             .map(|i| {
                 let mut e = Vec::with_capacity(self.nalm());
@@ -639,61 +945,82 @@ impl Sht {
     /// Map cotangents `(Q, U)` of [`analysis_spin`](Self::analysis_spin) from
     /// the cotangents of `(E, B)` (each coefficient counted once).
     pub fn analysis_spin_vjp(&self, s: usize, cots: &[(&[C64], &[C64])]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        const NB: usize = SPIN_LANES;
         assert!(s >= 1 && s <= self.lmax, "spin must be in 1..=lmax (spin 0: analysis_vjp)");
         cots.iter().for_each(|(e, b)| assert!(e.len() == self.nalm() && b.len() == self.nalm()));
         let nr = self.rings.len();
         let nm = cots.len();
         let pairs = self.pairs();
         // Per m: [ring][map] sums G^Q, G^U.
-        let per_m = par_map(self.lmax + 1, self.threads, |m| {
+        let per_m = par_map(self.lmax + 1, self.threads, |m| simd(|| {
             let coef = self.spin_coefficients(m, s);
             let base = self.index(m, m);
             let mut g = vec![(C64::default(), C64::default()); nr * nm];
-            // [map][parity]: sum cE l+, i cB l-, cB l+, -i cE l-.
-            let mut acc = vec![[[C64::default(); 4]; 2]; nm];
-            for p in 0..=pairs {
-                let ring = &self.rings[p];
-                acc.iter_mut().for_each(|a| *a = [[C64::default(); 4]; 2]);
-                self.recurse_spin(m, s, &coef, ring.cos, ring.sin, |l, lp, lm| {
+            // [map][parity][cE l+, cB l-, cB l+, cE l-][re, im][lane].
+            let mut acc = vec![[[[[0.0; NB]; 2]; 4]; 2]; nm];
+            for (rows, count) in self.blocks::<NB>(m, s) {
+                let (cos, sin) = self.lanes(&rows);
+                acc.iter_mut().for_each(|a| *a = [[[[0.0; NB]; 2]; 4]; 2]);
+                self.recurse_spin_block(m, s, &coef, &cos, &sin, |l, lp, lm| {
                     let par = (l + m + s) & 1;
                     for (i, (ce, cb)) in cots.iter().enumerate() {
                         let (e, b) = (ce[base + l - m], cb[base + l - m]);
                         let a = &mut acc[i][par];
-                        a[0] += e * lp;
-                        a[1] += C64::new(0.0, lm) * b;
-                        a[2] += b * lp;
-                        a[3] -= C64::new(0.0, lm) * e;
+                        for k in 0..NB {
+                            a[0][0][k] += e.re * lp[k];
+                            a[0][1][k] += e.im * lp[k];
+                            a[1][0][k] += b.re * lm[k];
+                            a[1][1][k] += b.im * lm[k];
+                            a[2][0][k] += b.re * lp[k];
+                            a[2][1][k] += b.im * lp[k];
+                            a[3][0][k] += e.re * lm[k];
+                            a[3][1][k] += e.im * lm[k];
+                        }
                     }
                 });
-                for (i, a) in acc.iter().enumerate() {
-                    let north = |t: usize| a[0][t] + a[1][t];
-                    g[p * nm + i] = (north(0) + north(1), north(2) + north(3));
-                    if p < pairs {
-                        // South ring: lambda+ times (-1)^(l+m+s), lambda- times -(-1)^(l+m+s).
-                        let south = |t: usize| a[0][t] - a[0][t + 1] - a[1][t] + a[1][t + 1];
-                        g[(nr - 1 - p) * nm + i] = (south(0), south(2));
+                for (lane, &p) in rows[..count].iter().enumerate() {
+                    for (i, a) in acc.iter().enumerate() {
+                        // The terms cE l+, i cB l-, cB l+, -i cE l- of a parity.
+                        let term = |par: usize, t: usize| {
+                            let z = C64::new(a[par][t][0][lane], a[par][t][1][lane]);
+                            match t {
+                                1 => C64::new(-z.im, z.re),
+                                3 => C64::new(z.im, -z.re),
+                                _ => z,
+                            }
+                        };
+                        let north = |t: usize| term(0, t) + term(1, t);
+                        g[p * nm + i] = (north(0) + north(1), north(2) + north(3));
+                        if p < pairs {
+                            // South ring: lambda+ times (-1)^(l+m+s), lambda- times -(-1)^(l+m+s).
+                            let south = |t: usize| term(0, t) - term(0, t + 1) - term(1, t) + term(1, t + 1);
+                            g[(nr - 1 - p) * nm + i] = (south(0), south(2));
+                        }
                     }
                 }
             }
             g
-        });
+        }));
         let area = self.area();
         let per_ring = par_map(nr, self.threads, |r| {
             let ring = &self.rings[r];
             let n = ring.nphi;
-            let (_, inv) = &self.fft[&n];
+            let rf = &self.fft[&n];
+            let (mut buf, mut ph) = (Vec::new(), Vec::new());
+            phases(ring.phi0, 1.0, self.lmax + 1, &mut ph);
             (0..nm)
                 .map(|i| {
                     let (mut hq, mut hu) = (vec![C64::default(); n], vec![C64::default(); n]);
                     for (m, g) in per_m.iter().enumerate() {
-                        let shift = C64::from_polar(1.0, m as f64 * ring.phi0);
                         let (q, u) = g[r * nm + i];
-                        hq[m % n] += q * shift;
-                        hu[m % n] += u * shift;
+                        hq[m % n] += q * ph[m];
+                        hu[m % n] += u * ph[m];
                     }
-                    inv.process(&mut hq);
-                    inv.process(&mut hu);
-                    (hq.into_iter().map(|z| -area * z.re).collect::<Vec<f64>>(), hu.into_iter().map(|z| -area * z.re).collect::<Vec<f64>>())
+                    let (mut q, mut u) = (vec![0.0; n], vec![0.0; n]);
+                    rf.inverse_real(&hq, &mut q, &mut buf);
+                    rf.inverse_real(&hu, &mut u, &mut buf);
+                    q.iter_mut().chain(u.iter_mut()).for_each(|v| *v *= -area);
+                    (q, u)
                 })
                 .collect::<Vec<_>>()
         });
@@ -903,19 +1230,26 @@ mod tests {
     #[test]
     fn scaled_recursion() {
         let sht = Sht::new(64, 1000);
-        let ring = &sht.rings[3];
+        const NB: usize = LANES;
+        // Lanes of mixed latitudes: a polar ring (scaled at high m) and nearer the equator.
+        let rows: [usize; NB] = std::array::from_fn(|i| 3 + 8 * i);
+        let (cos, sin) = sht.lanes(&rows);
         for m in [0usize, 10, 200, 999] {
             let coef = sht.coefficients(m);
-            let mut first = None;
-            sht.recurse(m, &coef, ring.cos, ring.sin, |l, lam, _| {
-                if first.is_none() {
-                    first = Some((l, lam));
+            let mut first = [None; NB];
+            sht.recurse_block(m, &coef, &cos, &sin, |l, lam, _| {
+                for i in 0..NB {
+                    if first[i].is_none() && lam[i] != 0.0 {
+                        first[i] = Some((l, lam[i]));
+                    }
                 }
             });
-            if let Some((l, lam)) = first {
-                if l == m {
-                    let expect = (sht.log_mm[m] + m as f64 * ring.sin.ln()).exp();
-                    assert!((lam.abs() - expect).abs() <= 1e-12 * expect, "m {m}");
+            for i in 0..NB {
+                if let Some((l, lam)) = first[i] {
+                    if l == m {
+                        let expect = (sht.log_mm[m] + m as f64 * sin[i].ln()).exp();
+                        assert!((lam.abs() - expect).abs() <= 1e-12 * expect, "m {m} lane {i}");
+                    }
                 }
             }
         }
