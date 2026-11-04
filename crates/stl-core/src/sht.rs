@@ -453,6 +453,23 @@ impl Sht {
         self.lm().iter().zip(alm).map(|(&(l, m), a)| a * (2.0 * if m == 0 { 1.0 } else { 2.0 } * dcl[l] / (2 * l + 1) as f64)).collect()
     }
 
+    /// Cross spectrum `C_l = sum_m mult Re(a_lm conj(b_lm)) / (2 l + 1)`.
+    pub fn cross_power(&self, a: &[C64], b: &[C64]) -> Vec<f64> {
+        let mut cl = vec![0.0; self.lmax + 1];
+        for (&(l, m), (x, y)) in self.lm().iter().zip(a.iter().zip(b)) {
+            cl[l] += if m == 0 { 1.0 } else { 2.0 } * (x * y.conj()).re;
+        }
+        cl.iter_mut().enumerate().for_each(|(l, v)| *v /= (2 * l + 1) as f64);
+        cl
+    }
+
+    /// Cotangents of `a` and `b` from that of their cross `C_l`:
+    /// `mult dcl b / (2 l + 1)` and `mult dcl a / (2 l + 1)`.
+    pub fn cross_power_vjp(&self, a: &[C64], b: &[C64], dcl: &[f64]) -> (Vec<C64>, Vec<C64>) {
+        let f: Vec<f64> = self.lm().iter().map(|&(l, m)| if m == 0 { 1.0 } else { 2.0 } * dcl[l] / (2 * l + 1) as f64).collect();
+        (b.iter().zip(&f).map(|(y, s)| y * s).collect(), a.iter().zip(&f).map(|(x, s)| x * s).collect())
+    }
+
     /// First and second covariant derivatives of the map of `alm` in the
     /// orthonormal `(theta, phi)` frame: `d_theta f`, `d_phi f / sin`,
     /// `H_theta_theta`, `H_phi_phi`, `H_theta_phi` (`derivative_maps` of the
