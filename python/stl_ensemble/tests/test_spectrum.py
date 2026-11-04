@@ -89,6 +89,60 @@ def test_gradients():
                 _check_fd(f, x, g, rng)
 
 
+def test_spin_against_healpy():
+    if hp is None:
+        print("healpy missing: skipped")
+        return
+    nside, lmax, batch = 16, 40, 2
+    npix = 12 * nside**2
+    rng = np.random.default_rng(5)
+    w = _weights(nside)
+    r = lambda m: hp.reorder(m, n2r=True)
+    for spin in (1, 2, 3):
+        a = rng.normal(size=(batch, 2, npix))
+        b = rng.normal(size=(batch, 2, npix))
+        with SpectrumEngine(nside, lmax, batch=batch, spin=spin, masks=w) as auto, \
+                SpectrumEngine(nside, lmax, batch=batch, spin=spin, masks=w, cross=True) as cross:
+            assert auto.components == ["EE", "BB", "EB"] and cross.components == ["EE", "BB", "EB", "BE"]
+            cl = auto.forward(a)
+            xl = cross.forward_cross(a, b)
+            assert cl.shape == (batch, 2, 3, lmax + 1) and xl.shape == (batch, 2, 4, lmax + 1)
+            for i in range(batch):
+                for k in range(2):
+                    ea, ba = hp.map2alm_spin([r(w[k] * a[i, 0]), r(w[k] * a[i, 1])], spin, lmax=lmax)
+                    eb, bb = hp.map2alm_spin([r(w[k] * b[i, 0]), r(w[k] * b[i, 1])], spin, lmax=lmax)
+                    ref = [hp.alm2cl(ea), hp.alm2cl(ba), hp.alm2cl(ea, ba)]
+                    refx = [hp.alm2cl(ea, eb), hp.alm2cl(ba, bb), hp.alm2cl(ea, bb), hp.alm2cl(ba, eb)]
+                    for got, want in ((cl[i, k], ref), (xl[i, k], refx)):
+                        want = np.array(want)
+                        err = np.abs(got - want).max() / np.abs(want).max()
+                        assert err <= 1e-12, (spin, err)
+    # Spin 2 against anafast(pol=True, iter=0): EE, BB, EB.
+    q, u = rng.normal(size=(2, npix))
+    with SpectrumEngine(nside, lmax, spin=2) as e:
+        cl = e.forward(np.stack([q, u]))[0]
+    ref = hp.anafast([np.zeros(npix), r(q), r(u)], lmax=lmax, iter=0, pol=True)
+    np.testing.assert_allclose(cl, ref[[1, 2, 4]], rtol=1e-11, atol=1e-13 * ref[1].max())
+
+
+def test_spin_gradients():
+    nside, lmax = 8, 20
+    rng = np.random.default_rng(6)
+    w = _weights(nside)
+    for spin in (1, 2):
+        for cross in (False, True):
+            for masks in (None, w):
+                with SpectrumEngine(nside, lmax, batch=2, cross=cross, masks=masks, spin=spin) as e:
+                    shape = (2, 2, 2, e.npix) if cross else (2, 2, e.npix)
+                    x = rng.normal(size=shape)
+                    cl = e.forward(x, generation=1)
+                    cot = rng.normal(size=cl.shape)
+                    g = e.vjp(cot, generation=1)
+                    assert g.shape == shape
+                    f = lambda y: float(np.sum(cot * e.forward(y, generation=3)))
+                    _check_fd(f, x, g, rng)
+
+
 def test_gpu_matches_cpu():
     if os.environ.get("STL_TEST_GPU") != "1":
         print("STL_TEST_GPU unset: skipped")
@@ -115,5 +169,7 @@ def test_gpu_matches_cpu():
 if __name__ == "__main__":
     test_against_healpy()
     test_gradients()
+    test_spin_against_healpy()
+    test_spin_gradients()
     test_gpu_matches_cpu()
     print("spectrum tests passed")

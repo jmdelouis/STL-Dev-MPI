@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-06-v5"
+SCRIPT_VERSION = "2026-11-06-v6"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -332,11 +332,17 @@ class SpectrumEngine:
     not divided by f_sky; self.fsky gives mean(w^2) per mask).
     cross=True: maps [batch, 2, npix] and the cross spectra
     sum_m mult Re(a_lm conj(b_lm)) / (2l + 1) only (forward_cross(a, b)).
+    spin=s >= 1: every field is a pair (Q, U) of a spin-s field, maps
+    [batch, 2, npix] ([batch, 2, 2, npix] with cross), E and B as healpy's
+    map2alm_spin (spin 2: anafast(pol=True)); C_l [batch, (K,) 3, lmax + 1]
+    for EE, BB, EB, with cross [.., 4, ..] for E1E2, B1B2, E1B2, B1E2
+    (self.components). The masks multiply Q and U alike. Spin >= 1 uses the
+    host transforms with either backend.
     vjp(cotangents shaped like C_l, generation) -> map gradients shaped like
     maps, after the forward of the same (generation, member, objective).
     """
     def __init__(self, nside, lmax=None, batch=1, backend="cpu", device=0, cross=False,
-                 masks=None, library=None):
+                 masks=None, library=None, spin=0):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -350,11 +356,15 @@ class SpectrumEngine:
         self.npix = 12 * self.nside**2
         self.backend, self.cross = backend, bool(cross)
         self.channels = 2 if self.cross else 1
+        if isinstance(spin, bool) or int(spin) != spin or int(spin) < 0:
+            raise ValueError("spin must be a nonnegative integer")
+        self.spin = int(spin)
         self.config = dict(nside=self.nside, lmax=self.lmax, batch=self.batch, backend=backend,
-                           device=int(device), cross=self.cross)
+                           device=int(device), cross=self.cross, spin=self.spin)
         self._handle = self._lib.stlp_spec_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
+        self.components = self.info()["components"]
         self._current_key = None
         self.nmasks, self.fsky = 0, None
         if masks is not None:
@@ -403,11 +413,12 @@ class SpectrumEngine:
             self.fsky = np.mean(w**2, axis=1) if self.nmasks else None
 
     def _shape(self):
-        nl = self.lmax + 1
-        return (self.batch, self.nmasks, nl) if self.nmasks else (self.batch, nl)
+        inner = (self.lmax + 1,) if self.spin == 0 else (len(self.components), self.lmax + 1)
+        return (self.batch, self.nmasks) + inner if self.nmasks else (self.batch,) + inner
 
     def _map_shape(self):
-        return (self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix)
+        field = (self.npix,) if self.spin == 0 else (2, self.npix)
+        return (self.batch,) + ((2,) if self.cross else ()) + field
 
     def forward(self, maps, generation=0, member=0, objective="cl"):
         with self._lock:
@@ -448,15 +459,17 @@ class SpectrumEngine:
             return grad
 
     def forward_cross(self, a, b, generation=0, member=0, objective="cl"):
-        """Cross spectra of the pairs a, b [batch, npix] (cross=True)."""
+        """Cross spectra of the pairs a, b [batch, npix] ([batch, 2, npix]
+        (Q, U) with spin >= 1) (cross=True)."""
         if not self.cross:
             raise RuntimeError("forward_cross needs SpectrumEngine(..., cross=True)")
-        a = np.asarray(a, dtype=np.float64).reshape(self.batch, self.npix)
-        b = np.asarray(b, dtype=np.float64).reshape(self.batch, self.npix)
+        field = self._map_shape()[2:]
+        a = np.asarray(a, dtype=np.float64).reshape((self.batch,) + field)
+        b = np.asarray(b, dtype=np.float64).reshape((self.batch,) + field)
         return self.forward(np.stack([a, b], 1), generation, member, objective)
 
     def vjp_cross(self, cotangents, generation=0, member=0, objective="cl"):
-        """(grad_a, grad_b), each [batch, npix], after forward_cross."""
+        """(grad_a, grad_b), each shaped like a, after forward_cross."""
         g = self.vjp(cotangents, generation, member, objective)
         return g[:, 0], g[:, 1]
 

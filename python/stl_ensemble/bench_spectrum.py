@@ -40,4 +40,4 @@ for i in range(a.repeat + 1):
 print(json.dumps(dict(backend=a.backend, nside=a.nside, lmax=lmax, batch=a.batch, masks=a.masks, cross=a.cross,
                       transforms=a.batch * max(a.masks, 1) * (2 if a.cross else 1), setup_seconds=setup,
                       forward_seconds=float(np.median(fwd)), vjp_seconds=float(np.median(bwd)),
-                      info={k: v for k, v in e.info().items() if k in ("version", "backend")})))
+                      info={k: v for k, v in e.info().items() if k in ("version", "transforms", "spin")})))
