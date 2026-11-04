@@ -631,6 +631,14 @@ prototype. It reaches loss 1.29 at 110 equivalent 256² evaluations
 (prototype: 0.315) after 491 equivalent evaluations in total. The wall time
 is 311 s: 101 s for the coarse levels, 195 s for the 256² level.
 
+**1000 iterations at the last level** (`benchmarks/lagrangian/step5/{c2f1000,pix1000}.json`, same settings, `--niter 1000`).
+The conditional chain ends at 0.114 after 1111 equivalent evaluations (595 s). Pixel L-BFGS with `--warm 100` and 1000 iterations ends at 0.737 after 1299 (620 s). At equal cost the chain's loss is 6–8 times lower all along:
+
+| equivalent evals | 200 | 400 | 600 | 800 | 1000 |
+|---|---|---|---|---|---|
+| conditional c2f | 0.57 | 0.31 | 0.21 | 0.15 | 0.12 |
+| pixel, `--warm 100` | 4.8 | 2.2 | 1.5 | 1.1 | 0.86 |
+
 **Diversity check** (`tools/lagrangian/diversity.py`,
 `benchmarks/lagrangian/step5/diversity.{json,png}`). Two runs, seeds 26 and
 27 (final losses 0.254 and 0.583). The correlation of each synthesis with
