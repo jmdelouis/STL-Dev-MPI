@@ -21,6 +21,7 @@ use stl_mpi::Comm;
 
 #[cfg(feature = "gpu")]
 mod device_terms;
+pub mod conditional;
 mod kappa;
 mod kurtosis;
 mod level_power;
@@ -44,7 +45,10 @@ stl-synth --target MAP [options]
                         e.g. prev_m{m}_synthesis_nested.npy)
   --init-units U        'target' (default: standardised like the target) or 'standardized'
   --init-noise X        noise std added to --init: 'auto' (default, RMS of the target's
-                        missing small scales when the init nside is lower), a number, 0
+                        missing small scales when the init nside is lower), a number, 0,
+                        or 'conditional': details drawn from the target's, per bin of the
+                        parent's value and local variation (docs/lagrangian_synthesis.md)
+  --init-bins Q         quantile bins per feature of --init-noise conditional (default 8)
   --seed N              white-noise seed (default 11)
   --J N                 scales (default log2(nside) - 1)
   --L N                 orientations (default 4; L = 2 leaves anisotropic, blobby syntheses)
@@ -181,6 +185,10 @@ pub struct Args {
     /// `--init-noise`: noise std added to `--init` (`None`: `auto`, the RMS
     /// of the target's missing small scales).
     pub init_noise: Option<f64>,
+    /// `--init-noise conditional`: details drawn conditionally on the
+    /// coarse init ([`conditional::Conditional`]), `--init-bins` bins.
+    pub init_conditional: bool,
+    pub init_bins: usize,
     /// `--seed`: white-noise seed (member `m` uses `seed + m`).
     pub seed: u64,
     /// `--J`: number of scales (`None`: `log2(nside) - 1`).
@@ -293,6 +301,8 @@ impl Args {
             init: None,
             init_standardized: false,
             init_noise: None,
+            init_conditional: false,
+            init_bins: 8,
             seed: 11,
             j: None,
             l: 4,
@@ -342,6 +352,7 @@ impl Args {
             match k.as_str() {
                 "--target" => a.target = it.next().ok_or("--target needs a path")?.into(),
                 "--init" => a.init = Some(it.next().ok_or("--init needs a path")?.into()),
+                "--init-bins" => a.init_bins = num(it.next(), k)?,
                 "--init-units" => {
                     a.init_standardized = match it.next().map(String::as_str) {
                         Some("target") => false,
@@ -351,7 +362,8 @@ impl Args {
                 }
                 "--init-noise" => {
                     let v = it.next().ok_or("--init-noise needs a value")?;
-                    a.init_noise = if v == "auto" { None } else { Some(v.parse().map_err(|_| "--init-noise: not a number")?) };
+                    a.init_conditional = v == "conditional";
+                    a.init_noise = if v == "auto" || a.init_conditional { None } else { Some(v.parse().map_err(|_| "--init-noise: not a number")?) };
                 }
                 "--seed" => a.seed = num(it.next(), k)? as u64,
                 "--J" => a.j = Some(num(it.next(), k)?),
@@ -664,15 +676,31 @@ pub fn run<C: Comm>(args: &Args, comm: &C) -> Result<Option<serde_json::Value>, 
                 }
                 None => 0.0,
             };
-            if members > 1 && !per_member && noise_std <= 0.0 {
+            if args.init_conditional {
+                if factor == 1 {
+                    return Err("--init-noise conditional needs an --init at a lower nside".into());
+                }
+                let cond = conditional::Conditional::new(gcomm, &target, s, factor, nside_init as i64, args.init_bins);
+                init_info = serde_json::json!({"file": path, "per_member": per_member, "nside": nside_init, "noise": "conditional", "bins": args.init_bins});
+                for m in first_member..first_member + local_members {
+                    let mut full = read_map_range(&member_path(m), 0, n_init)?;
+                    if !args.init_standardized {
+                        full.iter_mut().for_each(|v| *v = (*v - mean) / std);
+                    }
+                    initial.extend(cond.draw(&full, s, e, args.seed + m as u64));
+                }
+            }
+            if !args.init_conditional && members > 1 && !per_member && noise_std <= 0.0 {
                 return Err("--ensemble from one --init needs a noise (--init-noise > 0 or auto below the target nside), or one init per member ({m} in the path): identical members stay identical".into());
             }
-            init_info = serde_json::json!({"file": path, "per_member": per_member, "nside": nside_init, "noise_std": noise_std});
-            for (k, m) in (first_member..first_member + local_members).enumerate() {
-                initial.extend((s..e).map(|p| {
-                    let b = coarse[k][p / factor - s / factor];
-                    if noise_std > 0.0 { b + noise_std * pixel_normal(args.seed + m as u64, p as i64) } else { b }
-                }));
+            if !args.init_conditional {
+                init_info = serde_json::json!({"file": path, "per_member": per_member, "nside": nside_init, "noise_std": noise_std});
+                for (k, m) in (first_member..first_member + local_members).enumerate() {
+                    initial.extend((s..e).map(|p| {
+                        let b = coarse[k][p / factor - s / factor];
+                        if noise_std > 0.0 { b + noise_std * pixel_normal(args.seed + m as u64, p as i64) } else { b }
+                    }));
+                }
             }
         }
     }
