@@ -51,6 +51,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use stl_core::engine::{EngineConfig, Evaluator, Exchange, Partition};
 use stl_core::local::LocalGeometry;
+use stl_core::mask::Masks;
 use stl_core::plan::{Coefficient, Family};
 
 /// Pixels per partial sum of a coefficient (then summed in chunk order).
@@ -406,6 +407,8 @@ pub(crate) struct ForwardItem {
     pub(crate) pad: i32,
     pub(crate) a: Operand,
     pub(crate) b: Operand,
+    /// Mask indicator at the first pixel (0: every pixel).
+    pub(crate) mask: u64,
 }
 
 #[repr(C)]
@@ -418,6 +421,8 @@ pub(crate) struct Contrib {
     pub(crate) g_re: f64,
     pub(crate) g_im: f64,
     pub(crate) n_total: f64,
+    /// Mask indicator at the first pixel (0: every pixel).
+    pub(crate) mask: u64,
 }
 
 #[repr(C)]
@@ -538,6 +543,9 @@ pub struct GpuEngine<'a> {
     holder: usize,
     /// Synchronise at the end of every phase (`STL_GPU_PHASE_SYNC`, default 1).
     phase_sync: bool,
+    /// Masks of the averages ([`set_masks`](Self::set_masks)): pixel counts
+    /// `[K][level]` and indicators `[K][level]` (full-sky NESTED).
+    masks: Option<(Vec<Vec<usize>>, Vec<Vec<CudaSlice<f64>>>)>,
 }
 
 impl<'a> GpuEngine<'a> {
@@ -677,6 +685,32 @@ impl<'a> GpuEngine<'a> {
             peak_used: 0,
             holder: 0,
             phase_sync: std::env::var("STL_GPU_PHASE_SYNC").map_or(true, |v| v != "0"),
+            masks: None,
+        }
+    }
+
+    /// Averages over the masks `masks` ([`stl_core::mask`]: values,
+    /// variances and cotangents `[B, K, len(plan)]`), or over the whole sky
+    /// (`None`).  The indicators of every level are uploaded (`8 K 4 N / 3`
+    /// bytes).
+    pub fn set_masks(&mut self, masks: Option<&Masks>) {
+        self.masks = masks.map(|m| {
+            assert!(m.counts.iter().all(|c| c.len() == self.levels()), "mask levels");
+            (m.counts.clone(), m.weights.iter().map(|w| w.iter().map(|l| self.gpu.upload(l)).collect()).collect())
+        });
+    }
+
+    /// Number of averages per coefficient: `K` masks, or 1.
+    pub fn mask_count(&self) -> usize {
+        self.masks.as_ref().map_or(1, |m| m.0.len())
+    }
+
+    /// Indicator address of mask `k` at the NESTED id `id` of level `n`, and
+    /// the mask's pixel count there (none: the whole sky, `0`).
+    fn mask_at(&self, k: usize, n: usize, id: i64) -> (u64, f64) {
+        match &self.masks {
+            None => (0, self.geo.pixels(n) as f64),
+            Some((counts, w)) => (self.gpu.ptr(&w[k][n]) + 8 * id as u64, counts[k][n] as f64),
         }
     }
 
@@ -1251,10 +1285,10 @@ impl<'a> GpuEngine<'a> {
 
     // -- forward --------------------------------------------------------------------
 
-    /// Coefficient values `[B, len(plan)]` (summed over the processes) and,
-    /// with `moments`, the spatial variance of their terms; requires
-    /// [`load`](Self::load).  Fills, for a plan with S3 or S4, the stored
-    /// moduli, and with `Keep`, `z` and `|z|`.
+    /// Coefficient values `[B, len(plan)]` (`[B, K, len(plan)]` with masks,
+    /// summed over the processes) and, with `moments`, the spatial variance
+    /// of their terms; requires [`load`](Self::load).  Fills, for a plan
+    /// with S3 or S4, the stored moduli, and with `Keep`, `z` and `|z|`.
     pub fn forward(&mut self, ex: &dyn Exchange, plan: &[Coefficient], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
         let started = Instant::now();
         let levels = self.levels();
@@ -1263,8 +1297,9 @@ impl<'a> GpuEngine<'a> {
         let groups = Self::groups(plan);
         let moduli = Self::needs_moduli(plan);
         let keep = self.fields == FieldStore::Keep;
-        let mut values = vec![Complex64::new(0.0, 0.0); self.batch * plan.len()];
-        let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
+        let (k_count, np) = (self.mask_count(), plan.len());
+        let mut values = vec![Complex64::new(0.0, 0.0); self.batch * k_count * np];
+        let mut second = vec![0.0; if moments { self.batch * k_count * np } else { 0 }];
         // Level fields.
         if keep && self.z.len() != levels {
             self.z = (0..levels).map(|n| self.gpu.zeros::<f64>(rows * 2 * self.held(n))).collect();
@@ -1284,14 +1319,13 @@ impl<'a> GpuEngine<'a> {
             let ln = self.held(n);
             let idx: Vec<usize> = groups.get(&n).cloned().unwrap_or_default();
             let which = self.branch_levels(plan, &idx);
-            let n_total = self.geo.pixels(n) as f64;
             if moduli && !keep {
                 self.absz[n] = self.gpu.zeros::<f64>(rows * ln);
             }
             for b in 0..self.topo.levels[n].blocks.len() {
                 let geom = self.take_geometry(n, b);
                 let blk = &self.topo.levels[n].blocks[b];
-                let (na1, nf, f0) = (blk.a1.len(), blk.len, blk.f0);
+                let (na1, nf, f0, start) = (blk.a1.len(), blk.len, blk.f0, blk.start);
                 let lvn = &self.topo.levels[n];
                 let posf_n = lvn.own_pos0 + (blk.start - lvn.owned.0) as usize;
                 let t = Instant::now();
@@ -1331,7 +1365,9 @@ impl<'a> GpuEngine<'a> {
                 self.tick("gpu_forward_conv", t);
                 let t = Instant::now();
                 if !idx.is_empty() && nf > 0 {
-                    let mut items = Vec::with_capacity(idx.len() * self.batch);
+                    // Items in (coefficient, mask, batch) order.
+                    let masks: Vec<(u64, f64)> = (0..k_count).map(|k| self.mask_at(k, n, start)).collect();
+                    let mut items = Vec::with_capacity(idx.len() * k_count * self.batch);
                     for &i in &idx {
                         let c = &plan[i];
                         let kind = match c.family {
@@ -1342,19 +1378,23 @@ impl<'a> GpuEngine<'a> {
                             Family::S1 => F_S1X,
                             _ => F_PROD,
                         };
-                        for bi in 0..self.batch {
-                            let (a, bo) = self.operands(n, b, c, bi, &branch, zf, af);
-                            items.push(ForwardItem { kind, pad: 0, a, b: bo });
+                        for &(mask, _) in &masks {
+                            for bi in 0..self.batch {
+                                let (a, bo) = self.operands(n, b, c, bi, &branch, zf, af);
+                                items.push(ForwardItem { kind, pad: 0, a, b: bo, mask });
+                            }
                         }
                     }
                     *self.timers.entry("gpu_host_lists").or_default() += t.elapsed().as_secs_f64();
                     let sums = self.partial_sums(&items, nf, moments);
-                    for (k, &i) in idx.iter().enumerate() {
-                        for bi in 0..self.batch {
-                            let (re, im, sq) = sums[k * self.batch + bi];
-                            values[bi * plan.len() + i] += Complex64::new(re, im) / n_total;
-                            if moments {
-                                second[bi * plan.len() + i] += sq / n_total;
+                    for (q, &i) in idx.iter().enumerate() {
+                        for (k, &(_, n_total)) in masks.iter().enumerate() {
+                            for bi in 0..self.batch {
+                                let (re, im, sq) = sums[(q * k_count + k) * self.batch + bi];
+                                values[(bi * k_count + k) * np + i] += Complex64::new(re, im) / n_total;
+                                if moments {
+                                    second[(bi * k_count + k) * np + i] += sq / n_total;
+                                }
                             }
                         }
                     }
@@ -1440,13 +1480,14 @@ impl<'a> GpuEngine<'a> {
     // -- reverse --------------------------------------------------------------------
 
     /// Map cotangents of every level on the device (owned cells valid, halo
-    /// zero) for the coefficient cotangent `gradient` `[B, len(plan)]`;
-    /// requires [`forward`](Self::forward).
+    /// zero) for the coefficient cotangent `gradient` `[B, len(plan)]`
+    /// (`[B, K, len(plan)]` with masks); requires [`forward`](Self::forward).
     pub fn reverse(&mut self, ex: &dyn Exchange, plan: &[Coefficient], gradient: &[Complex64]) -> Vec<CudaSlice<f64>> {
         let started = Instant::now();
-        assert_eq!(gradient.len(), self.batch * plan.len());
+        let (k_count, np) = (self.mask_count(), plan.len());
+        assert_eq!(gradient.len(), self.batch * k_count * np);
         let zero = Complex64::new(0.0, 0.0);
-        let active: Vec<bool> = (0..plan.len()).map(|i| (0..self.batch).any(|b| gradient[b * plan.len() + i] != zero)).collect();
+        let active: Vec<bool> = (0..np).map(|i| (0..self.batch * k_count).any(|r| gradient[r * np + i] != zero)).collect();
         let groups = Self::groups(plan);
         let moduli = Self::needs_moduli(plan);
         let keep = self.fields == FieldStore::Keep;
@@ -1468,10 +1509,10 @@ impl<'a> GpuEngine<'a> {
             self.tick("gpu_reverse_chain", t);
             let idx: Vec<usize> = groups.get(&n).map(|v| v.iter().copied().filter(|&i| active[i]).collect()).unwrap_or_default();
             let which = self.branch_levels(plan, &idx);
-            let n_total = self.geo.pixels(n) as f64;
             for b in 0..self.topo.levels[n].blocks.len() {
                 let geom = self.take_geometry(n, b);
                 let blk = self.topo.levels[n].blocks[b].clone();
+                let masks: Vec<(u64, f64)> = (0..k_count).map(|k| self.mask_at(k, n, blk.start)).collect();
                 let (na1, nf) = (blk.a1.len(), blk.len);
                 let lvn = &self.topo.levels[n];
                 let posf_n = lvn.own_pos0 + (blk.start - lvn.owned.0) as usize;
@@ -1543,8 +1584,12 @@ impl<'a> GpuEngine<'a> {
                     if c.family == Family::S4 && self.cfg.fewer {
                         gmod.entry(dg[c.j1.unwrap()]).or_insert_with(|| self.gpu.zeros::<f64>(rows * na1));
                     }
-                    for bi in 0..self.batch {
-                        let g = gradient[bi * plan.len() + i];
+                    for (bi, k) in (0..self.batch).flat_map(|bi| (0..k_count).map(move |k| (bi, k))) {
+                        let g = gradient[(bi * k_count + k) * np + i];
+                        if k_count > 1 && g == zero {
+                            continue;
+                        }
+                        let (mask, n_total) = masks[k];
                         let (a, bo) = self.operands(n, b, &c, bi, &branch, zf, af);
                         let tz = |cc: usize, li: usize| -> (u64, i64) {
                             (self.gpu.ptr(&gz) + ((((bi * ch + cc) * l + li) * 2 * na1 + blk.f0) as u64) * f64s, na1 as i64)
@@ -1557,7 +1602,7 @@ impl<'a> GpuEngine<'a> {
                             let p = lv.own_pos0 + (blk.start - lv.owned.0) as usize;
                             (self.gpu.ptr(&mg[level]) + (((bi * ch + cc) * self.held(level) + p) as u64) * f64s, -1)
                         };
-                        let contrib = |kind: i32| Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, n_total };
+                        let contrib = |kind: i32| Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, n_total, mask };
                         let mut push = |(ptr, im): (u64, i64), kind: i32| {
                             let at = *index.entry(ptr).or_insert_with(|| {
                                 targets.push((ptr, im, Vec::new()));

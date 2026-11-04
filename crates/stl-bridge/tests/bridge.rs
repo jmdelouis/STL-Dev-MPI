@@ -48,9 +48,19 @@ impl H {
         self.info()["plan"].as_array().unwrap().len()
     }
 
+    /// Averages per coefficient (masks, or 1).
+    fn averages(&self) -> usize {
+        self.info()["masks"].as_u64().unwrap().max(1) as usize
+    }
+
+    /// Masks of the `k` indicators `w` (`[k, 12 nside^2]`).
+    fn set_masks(&self, w: &[f64], k: usize) {
+        assert_eq!(unsafe { stlp_set_masks(self.0, w.as_ptr(), k) }, 0, "{}", error());
+    }
+
     /// Interleaved values and spatial variances.
     fn forward(&self, x: &[f64], generation: u64, member: u64, objective: u64) -> (Vec<f64>, Vec<f64>) {
-        let n = self.ncoeff() * x.len() / self.npix();
+        let n = self.ncoeff() * self.averages() * x.len() / self.npix();
         let (mut out, mut var) = (vec![0.0; 2 * n], vec![0.0; n]);
         let s = unsafe { stlp_forward(self.0, x.as_ptr(), x.len(), generation, member, objective, true, out.as_mut_ptr(), var.as_mut_ptr()) };
         assert_eq!(s, 0, "{}", error());
@@ -58,7 +68,7 @@ impl H {
     }
 
     fn vjp(&self, cot: &[f64], generation: u64, member: u64, objective: u64) -> Result<Vec<f64>, String> {
-        let batch = cot.len() / (2 * self.ncoeff());
+        let batch = cot.len() / (2 * self.ncoeff() * self.averages());
         let mut g = vec![0.0; batch * self.npix()];
         let s = unsafe { stlp_vjp(self.0, cot.as_ptr(), cot.len() / 2, generation, member, objective, g.as_mut_ptr()) };
         if s == 0 {
@@ -356,9 +366,103 @@ fn patch_full_disc_matches_the_full_sky_handle() {
     }
 }
 
+/// Indicators `[3, 12 nside^2]` of the full sky and of `|z| > sin 20` and
+/// `|z| > sin 45` degrees (latitude cuts).
+fn latitude_masks(nside: usize) -> Vec<f64> {
+    let npix = 12 * nside * nside;
+    let ids: Vec<i64> = (0..npix as i64).collect();
+    let mut v = vec![0.0; 3 * npix];
+    assert_eq!(unsafe { stlp_pixel_vectors(nside, ids.as_ptr(), npix, v.as_mut_ptr()) }, 0, "{}", error());
+    let z: Vec<f64> = v.chunks(3).map(|u| u[2].abs()).collect();
+    let mut w = vec![1.0; npix];
+    for b in [20f64, 45.0] {
+        w.extend(z.iter().map(|&z| if z > b.to_radians().sin() { 1.0 } else { 0.0 }));
+    }
+    w
+}
+
+/// Masked averages (three masks, batch of two, auto and cross): the
+/// full-sky mask is the unmasked handle, every mask that of a handle with
+/// this mask alone (values, variances to the bit), the gradient the sum of
+/// theirs; the pixel counts of the averages.
+#[test]
+fn cpu_masks_match_single_masks() {
+    let nside = 16usize;
+    let npix = 12 * nside * nside;
+    let w = latitude_masks(nside);
+    for cross in [false, true] {
+        let channels = if cross { 2 } else { 1 };
+        let cfg = format!(r#"{{"nside": {nside}, "j": 3, "batch": 2, "block_pixels": 256, "cross": {cross}}}"#);
+        let (h, single) = (H::new(&cfg).unwrap(), H::new(&cfg).unwrap());
+        let nc = h.ncoeff();
+        let x = noise(2 * channels * npix, 41);
+        let (v0, s0) = single.forward(&x, 1, 0, 0);
+        h.set_masks(&w, 3);
+        assert_eq!(h.averages(), 3);
+        let (v, s) = h.forward(&x, 1, 0, 0);
+        let cot = noise(v.len(), 42);
+        let g = h.vjp(&cot, 1, 0, 0).unwrap();
+        let mut g_sum = vec![0.0; g.len()];
+        let mut pixels = vec![0usize; 3 * nc];
+        assert_eq!(unsafe { stlp_native_pixels(h.0, pixels.as_mut_ptr()) }, 0, "{}", error());
+        for k in 0..3 {
+            single.set_masks(&w[k * npix..(k + 1) * npix], 1);
+            let (vk, sk) = single.forward(&x, 1, 0, 0);
+            let pick = |a: &[f64], width: usize| -> Vec<f64> { (0..2).flat_map(|b| a[((b * 3 + k) * nc) * width..][..nc * width].to_vec()).collect() };
+            assert_eq!(pick(&v, 2), vk, "values of mask {k}");
+            assert_eq!(pick(&s, 1), sk, "variances of mask {k}");
+            if k == 0 {
+                assert!(max_rel(&vk, &v0) <= 1e-14 && max_rel(&sk, &s0) <= 1e-13, "full-sky mask against no mask");
+            }
+            let ck: Vec<f64> = pick(&cot, 2);
+            let gk = single.vjp(&ck, 1, 0, 0).unwrap();
+            g_sum.iter_mut().zip(&gk).for_each(|(a, b)| *a += b);
+            let mut pk = vec![0usize; nc];
+            assert_eq!(unsafe { stlp_native_pixels(single.0, pk.as_mut_ptr()) }, 0);
+            assert_eq!(pk, pixels[k * nc..(k + 1) * nc]);
+        }
+        let plan = h.info()["plan"].clone();
+        for (i, c) in plan.as_array().unwrap().iter().enumerate() {
+            let n = c["native_dg"].as_u64().unwrap() as usize;
+            assert_eq!(pixels[i], 12 * (nside >> n) * (nside >> n), "full-sky pixels");
+        }
+        let eg = max_rel(&g, &g_sum);
+        eprintln!("masks cross {cross}: gradient against the sum of single masks {eg:e}");
+        assert!(eg <= 1e-13);
+        // Back to the whole sky.
+        h.set_masks(&[], 0);
+        assert_eq!(h.forward(&x, 1, 0, 0), (v0, s0));
+    }
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
+
+    /// Masked averages (three masks, auto and cross, batch of two): device
+    /// against CPU.
+    #[test]
+    fn device_masks_match_cpu() {
+        let w = latitude_masks(32);
+        for cross in [false, true] {
+            let cpu = H::new(&format!(r#"{{"nside": 32, "j": 4, "batch": 2, "block_pixels": 256, "cross": {cross}}}"#)).unwrap();
+            cpu.set_masks(&w, 3);
+            let x = noise(2 * cpu.npix(), 51);
+            let (vc, sc) = cpu.forward(&x, 1, 0, 0);
+            let cot = noise(vc.len(), 52);
+            let gc = cpu.vjp(&cot, 1, 0, 0).unwrap();
+            for (conv, fields) in [("dia", "keep"), ("stencils", "recompute")] {
+                let cfg = config(2, conv, fields).replace("\"backend\"", &format!("\"cross\": {cross}, \"backend\""));
+                let Some(h) = H::new(&cfg) else { return };
+                h.set_masks(&w, 3);
+                let (v, s) = h.forward(&x, 1, 0, 0);
+                let g = h.vjp(&cot, 1, 0, 0).unwrap();
+                let (ev, es, eg) = (max_rel(&v, &vc), max_rel(&s, &sc), max_rel(&g, &gc));
+                eprintln!("masks cross {cross} {conv}/{fields}: values {ev:e}, variances {es:e}, gradient {eg:e}");
+                assert!(ev <= 1e-13 && es <= 1e-12 && eg <= 1e-11);
+            }
+        }
+    }
 
     fn config(batch: usize, conv: &str, fields: &str) -> String {
         format!(r#"{{"nside": 32, "j": 4, "batch": {batch}, "block_pixels": 256, "backend": "gpu", "conv": "{conv}", "fields": "{fields}", "cache_bytes": 0}}"#)

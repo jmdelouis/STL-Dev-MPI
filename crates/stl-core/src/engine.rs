@@ -21,9 +21,14 @@
 //!
 //! Summation order: each partial sum adds the pixels of a block in id
 //! order, blocks in id order, levels ascending.
+//!
+//! Masks ([`crate::mask`], [`LocalEngine::set_masks`]): the coefficients
+//! are averaged over each mask of their native level instead of the whole
+//! sky; values, variances and cotangents are then `[B, K, len(plan)]`.
 
 use crate::conv::ConvPlan;
 use crate::local::{modulus_vjp, positions, LocalGeometry};
+use crate::mask::Masks;
 use crate::neighbours::{children, dilate_fine, parents};
 use crate::plan::{Coefficient, Family};
 use num_complex::Complex64;
@@ -285,6 +290,8 @@ pub struct LocalEngine<'a> {
     /// Stored decimated moduli `m[d][n] = D^(n-d) |z_d|`, `[B, C, L, |layout n|]`, `d < n`.
     pub m: BTreeMap<(usize, usize), Vec<f64>>,
     gm: BTreeMap<(usize, usize), Vec<f64>>,
+    /// Masks of the averages (none: the whole sky).
+    pub masks: Option<Masks>,
 }
 
 impl<'a> LocalEngine<'a> {
@@ -318,7 +325,7 @@ impl<'a> LocalEngine<'a> {
                 m.insert((d, n), vec![0.0; rows * part.layouts[n].len()]);
             }
         }
-        let mut engine = LocalEngine { geo, cfg, part, ex, batch, channels, maps: vec![x], m, gm: BTreeMap::new() };
+        let mut engine = LocalEngine { geo, cfg, part, ex, batch, channels, maps: vec![x], m, gm: BTreeMap::new(), masks: None };
         engine.decimate_levels();
         engine
     }
@@ -358,6 +365,20 @@ impl<'a> LocalEngine<'a> {
     /// Number of pyramid levels.
     pub fn levels(&self) -> usize {
         self.maps.len()
+    }
+
+    /// Averages over the masks `masks` (on the levels of this engine), or
+    /// over the whole sky (`None`).
+    pub fn set_masks(&mut self, masks: Option<Masks>) {
+        if let Some(m) = &masks {
+            assert!(m.counts.iter().all(|c| c.len() == self.levels()), "mask levels");
+        }
+        self.masks = masks;
+    }
+
+    /// Number of averages per coefficient: `K` masks, or 1.
+    pub fn mask_count(&self) -> usize {
+        self.masks.as_ref().map_or(1, Masks::len)
     }
 
     /// `field[r, ids]` for every row: `[R, |layout|] -> [R, |ids|]`.
@@ -437,8 +458,8 @@ impl<'a> LocalEngine<'a> {
         g
     }
 
-    /// Coefficient values `[B, len(plan)]` (summed over the processes);
-    /// fills the stored moduli.
+    /// Coefficient values `[B, len(plan)]`, `[B, K, len(plan)]` with masks
+    /// (summed over the processes); fills the stored moduli.
     pub fn forward(&mut self, plan: &[Coefficient]) -> Vec<Complex64> {
         self.forward_impl(plan, false).0
     }
@@ -456,26 +477,51 @@ impl<'a> LocalEngine<'a> {
 
     fn forward_impl(&mut self, plan: &[Coefficient], moments: bool) -> (Vec<Complex64>, Vec<f64>) {
         let groups = Self::groups(plan);
-        let mut values = vec![ZERO; self.batch * plan.len()];
-        let mut second = vec![0.0; if moments { self.batch * plan.len() } else { 0 }];
+        let (k_count, np) = (self.mask_count(), plan.len());
+        let mut values = vec![ZERO; self.batch * k_count * np];
+        let mut second = vec![0.0; if moments { self.batch * k_count * np } else { 0 }];
         let rows = self.batch * self.channels * self.geo.l;
         let coarse = self.part.coarse_level();
+        let masks = self.masks.take();
         for n in 0..self.levels() {
             let counted = self.part.blocks[n].iter().map(|b| (b.clone(), true));
             let halo = self.part.halo_blocks[n].iter().map(|b| (b.clone(), false));
             let work: Vec<(Vec<i64>, bool)> = counted.chain(halo).collect();
             for (block, counted) in work {
                 let mut fields = Block::new(self, n, &block);
+                let picks: Vec<Vec<usize>> = match &masks {
+                    Some(m) if counted => (0..k_count).map(|k| m.pick(k, n, &block)).collect(),
+                    _ => Vec::new(),
+                };
                 if counted {
                     for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
                         let (a, b) = fields.operands(self, &plan[i]);
-                        let p = fields.partial(self, &plan[i], &a, &b);
-                        for (bi, v) in p.into_iter().enumerate() {
-                            values[bi * plan.len() + i] += v;
-                        }
-                        if moments {
-                            for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
-                                second[bi * plan.len() + i] += v;
+                        let Some(m) = &masks else {
+                            let p = fields.partial(self, &plan[i], &a, &b);
+                            for (bi, v) in p.into_iter().enumerate() {
+                                values[bi * np + i] += v;
+                            }
+                            if moments {
+                                for (bi, v) in fields.partial_second(self, &plan[i], &a, &b).into_iter().enumerate() {
+                                    second[bi * np + i] += v;
+                                }
+                            }
+                            continue;
+                        };
+                        let nf = fields.nf();
+                        for (k, pos) in picks.iter().enumerate() {
+                            if pos.is_empty() {
+                                continue;
+                            }
+                            let (ak, bk) = (pick_cols(&a, nf, pos), pick_cols(&b, nf, pos));
+                            let total = m.counts[k][n] as f64;
+                            for (bi, v) in term_sums(&plan[i], &ak, &bk, self.batch, pos.len(), total).into_iter().enumerate() {
+                                values[(bi * k_count + k) * np + i] += v;
+                            }
+                            if moments {
+                                for (bi, v) in term_second_sums(&plan[i], &ak, &bk, self.batch, pos.len(), total).into_iter().enumerate() {
+                                    second[(bi * k_count + k) * np + i] += v;
+                                }
                             }
                         }
                     }
@@ -524,6 +570,7 @@ impl<'a> LocalEngine<'a> {
                 Some(_) => {}
             }
         }
+        self.masks = masks;
         let mut flat: Vec<f64> = values.iter().flat_map(|v| [v.re, v.im]).collect();
         self.ex.allreduce(&mut flat);
         if moments {
@@ -533,14 +580,16 @@ impl<'a> LocalEngine<'a> {
     }
 
     /// Map cotangents of every level (owned cells valid, halo zero) for the
-    /// coefficient cotangent `gradient` `[B, len(plan)]` (of
+    /// coefficient cotangent `gradient` `[B, len(plan)]` (`[B, K, len(plan)]`
+    /// with masks) (of
     /// `Re sum(conj(gradient) * values)`); requires a previous
     /// [`forward`](Self::forward).  Coefficients whose cotangent is zero for
     /// every batch are skipped.
     pub fn reverse(&mut self, plan: &[Coefficient], gradient: &[Complex64]) -> Vec<Vec<f64>> {
-        assert_eq!(gradient.len(), self.batch * plan.len());
-        let active: Vec<bool> =
-            (0..plan.len()).map(|i| (0..self.batch).any(|b| gradient[b * plan.len() + i] != ZERO)).collect();
+        let (k_count, np) = (self.mask_count(), plan.len());
+        assert_eq!(gradient.len(), self.batch * k_count * np);
+        let active: Vec<bool> = (0..np).map(|i| (0..self.batch * k_count).any(|r| gradient[r * np + i] != ZERO)).collect();
+        let masks = self.masks.take();
         let groups = Self::groups(plan);
         let (bc, rows) = (self.batch * self.channels, self.batch * self.channels * self.geo.l);
         self.gm = self.m.iter().map(|(&k, v)| (k, vec![0.0; v.len()])).collect();
@@ -552,14 +601,41 @@ impl<'a> LocalEngine<'a> {
             let work: Vec<(Vec<i64>, bool)> = counted.chain(halo).collect();
             for (block, counted) in work {
                 let mut fields = Block::new(self, n, &block);
+                let picks: Vec<Vec<usize>> = match &masks {
+                    Some(m) if counted => (0..k_count).map(|k| m.pick(k, n, &block)).collect(),
+                    _ => Vec::new(),
+                };
                 if counted {
                     for &i in groups.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
                         if !active[i] {
                             continue;
                         }
-                        let g: Vec<Complex64> = (0..self.batch).map(|b| gradient[b * plan.len() + i]).collect();
                         let (a, b) = fields.operands(self, &plan[i]);
-                        fields.reverse_coefficient(self, &plan[i], &a, &b, &g, &mut maps_gradient);
+                        let Some(m) = &masks else {
+                            let g: Vec<Complex64> = (0..self.batch).map(|b| gradient[b * np + i]).collect();
+                            fields.reverse_coefficient(self, &plan[i], &a, &b, &g, &mut maps_gradient);
+                            continue;
+                        };
+                        // Operand cotangents of every mask, added on the block.
+                        let nf = fields.nf();
+                        let (mut ga, mut gb) = (vec![ZERO; self.batch * nf], Vec::new());
+                        for (k, pos) in picks.iter().enumerate() {
+                            let g: Vec<Complex64> = (0..self.batch).map(|b| gradient[(b * k_count + k) * np + i]).collect();
+                            if pos.is_empty() || g.iter().all(|&v| v == ZERO) {
+                                continue;
+                            }
+                            let (ak, bk) = (pick_cols(&a, nf, pos), pick_cols(&b, nf, pos));
+                            let (gak, gbk) = operand_cotangents(&plan[i], &ak, &bk, &g, self.batch, pos.len(), m.counts[k][n] as f64);
+                            add_cols(&mut ga, nf, pos, &gak);
+                            if !gbk.is_empty() {
+                                gb.resize(self.batch * nf, ZERO);
+                                add_cols(&mut gb, nf, pos, &gbk);
+                            }
+                        }
+                        if !b.is_empty() && gb.is_empty() {
+                            gb = vec![ZERO; self.batch * nf];
+                        }
+                        fields.apply_cotangents(self, &plan[i], &ga, &gb, &mut maps_gradient);
                     }
                 }
                 let top = if counted { self.levels() } else { coarse };
@@ -621,6 +697,7 @@ impl<'a> LocalEngine<'a> {
             }
         }
         self.gm.clear();
+        self.masks = masks;
         maps_gradient
     }
 
@@ -969,8 +1046,14 @@ impl Block {
         g: &[Complex64],
         maps_gradient: &mut [Vec<f64>],
     ) {
-        let dg = &engine.cfg.j_to_dg;
         let (ga, gb) = operand_cotangents(c, a, b, g, engine.batch, self.nf(), engine.geo.pixels(self.n) as f64);
+        self.apply_cotangents(engine, c, &ga, &gb, maps_gradient);
+    }
+
+    /// Adds the operand cotangents `ga`, `gb` `[B, |F|]` of the coefficient
+    /// `c` ([`operand_cotangents`]) to the block's field cotangents.
+    fn apply_cotangents(&mut self, engine: &LocalEngine, c: &Coefficient, ga: &[Complex64], gb: &[Complex64], maps_gradient: &mut [Vec<f64>]) {
+        let dg = &engine.cfg.j_to_dg;
         match c.family {
             Family::Mean | Family::Var => {
                 let re: Vec<f64> = ga.iter().map(|v| v.re).collect();
@@ -978,9 +1061,9 @@ impl Block {
             }
             Family::S1 | Family::S2 => {
                 let l1 = c.l1.unwrap();
-                self.add_z(engine, c.c1, l1, &ga);
+                self.add_z(engine, c.c1, l1, ga);
                 if c.c1 != c.c2 {
-                    self.add_z(engine, c.c2, l1, &gb);
+                    self.add_z(engine, c.c2, l1, gb);
                 }
             }
             Family::S3 | Family::S4 => {
@@ -990,18 +1073,18 @@ impl Block {
                     if engine.cfg.fewer {
                         let re: Vec<f64> = ga.iter().map(|v| v.re).collect();
                         self.add_map(engine, &mut maps_gradient[self.n], self.n, c.c1, &re);
-                        self.add_branch(engine, d1, c.c2, l1, l3, &gb);
+                        self.add_branch(engine, d1, c.c2, l1, l3, gb);
                     } else {
-                        self.add_branch(engine, d1, c.c1, l1, l3, &ga);
-                        self.add_z(engine, c.c2, l3, &gb);
+                        self.add_branch(engine, d1, c.c1, l1, l3, ga);
+                        self.add_z(engine, c.c2, l3, gb);
                     }
                 } else {
                     if engine.cfg.fewer {
-                        self.add_modulus_core(engine, d1, c.c1, l1, &ga);
+                        self.add_modulus_core(engine, d1, c.c1, l1, ga);
                     } else {
-                        self.add_branch(engine, d1, c.c1, l1, l3, &ga);
+                        self.add_branch(engine, d1, c.c1, l1, l3, ga);
                     }
-                    self.add_branch(engine, dg[c.j2.unwrap()], c.c2, c.l2.unwrap(), l3, &gb);
+                    self.add_branch(engine, dg[c.j2.unwrap()], c.c2, c.l2.unwrap(), l3, gb);
                 }
             }
         }
@@ -1066,6 +1149,20 @@ impl Block {
         let gx = self.conv.adjoint(&geo.kernel, &packed, bc);
         debug_assert_eq!(gx.len(), bc * kd);
         engine.scatter_add(n, &mut maps_gradient[n], &self.domain, &gx);
+    }
+}
+
+/// Columns `pos` of the rows of `nf` values of `x` (empty stays empty).
+fn pick_cols(x: &[Complex64], nf: usize, pos: &[usize]) -> Vec<Complex64> {
+    x.chunks(nf).flat_map(|row| pos.iter().map(move |&p| row[p])).collect()
+}
+
+/// `out[r, pos[j]] += v[r, j]`, rows of `nf` values in `out`.
+fn add_cols(out: &mut [Complex64], nf: usize, pos: &[usize], v: &[Complex64]) {
+    for (row, src) in out.chunks_mut(nf).zip(v.chunks(pos.len())) {
+        for (&p, &s) in pos.iter().zip(src) {
+            row[p] += s;
+        }
     }
 }
 
