@@ -21,6 +21,19 @@ of constant size with their halos: nside 2048 × 10 maps fit on one A100, nside 
 CPU cores in 10 s per evaluation, and the same synthesis at nside 128 is 11.6× faster with 21×
 less GPU memory than STL-Dev on the same A100.
 
+## Features
+
+| | |
+|---|---|
+| **Statistics** | the full ScatCov plan on HEALPix (NESTED) and periodic 2D grids, 1 or several channels, both S3/S4 definitions; geometry computed on the fly per block, never stored for the full sky |
+| **Synthesis** | L-BFGS with strong Wolfe line search (transcribed from `torch.optim.LBFGS`), the map as variable, white-noise or coarse-to-fine starts, ergodic (reduced χ²) weights |
+| **Ensembles** | `B` members whose mean (and scatter) of statistics match a target; P. Campeti's method (ScatCov of `g` and `kappa`, C_ℓ, PDF, Minkowski functionals) in `stl-ensemble`; extra terms for level power, histograms, kurtosis, Minkowski functionals |
+| **Bounded memory** | blocks of constant size with halos; maps, stored moduli and L-BFGS history sliced by rank; blocks sized from the free device memory on GPUs |
+| **MPI** | contiguous NESTED ranges per rank, point-to-point halos, additive ghost cells, reductions in rank order (deterministic); groups of ranks per ensemble member |
+| **CUDA** | one GPU per rank, `f64`, kernels compiled at run time by NVRTC (no toolkit to build), deterministic; DIA convolution, geometry cache on the device or in pinned host memory, objective terms on the device |
+| **Differentiable Python API** | `stl_port.native`: statistics of full-sky maps (`NativeEngine`), averaged over `K` masks in one sweep, of disc patches (`PatchEngine`), auto and cross `S(a, b)`, and pseudo-`C_ℓ` of spin 0 and spin `s` fields (`SpectrumEngine`, anafast conventions), each with its exact VJP on CPU or GPU, for torch losses ([guide](user-guide/differentiable.md), [tutorial](tutorials/differentiable.md)) |
+| **Validation** | every operation and every statistic tested against fixtures dumped from STL-Dev; synthesis trajectories reproduce STL-Dev's losses at the printed digits |
+
 ## Where to go next
 
 ::::{grid} 1 1 2 2
@@ -35,15 +48,15 @@ Build the binaries with cargo, with or without MPI and CUDA.
 :::{grid-item-card} Tutorials
 :link: tutorials/index
 :link-type: doc
-Five worked examples that run in minutes: HEALPix synthesis on CPU and GPU, ensembles,
-statistics, 2D images, MPI.
+Six worked examples that run in minutes: HEALPix synthesis on CPU and GPU, ensembles,
+statistics, 2D images, MPI, differentiable losses in Python.
 :::
 
 :::{grid-item-card} User Guide
 :link: user-guide/index
 :link-type: doc
 The model (pyramid, blocks and halos, stored moduli, explicit VJP), the command-line tools,
-GPUs and MPI.
+GPUs, MPI, and the differentiable Python engines.
 :::
 
 :::{grid-item-card} API Reference

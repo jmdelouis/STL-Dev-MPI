@@ -1,7 +1,7 @@
 # Tutorials
 
-Five worked examples, each a script in `examples/` that runs in 1 to 12 minutes on a
-workstation with one GPU. They were run on garoupe (12 Xeon cores, Tesla T4s, shared with other
+Six worked examples, each a script in `examples/` that runs in 1 to 12 minutes on a
+workstation with one GPU (the sixth on a laptop CPU). They were run on garoupe (12 Xeon cores, Tesla T4s, shared with other
 jobs at the time), and the figures and timings below come from those runs.
 
 ```bash
@@ -15,7 +15,7 @@ bash examples/01_healpix_synthesis/run.sh
 :::{grid-item-card} HEALPix synthesis
 :link: healpix_synthesis
 :link-type: doc
-One map from the WebSky kappa map at nside 64, on CPU threads and on a GPU, with `stl-synth`.
+One map from the Takahashi weak-lensing map at nside 64, on CPU threads and on a GPU, with `stl-synth`.
 :::
 
 :::{grid-item-card} Ensemble synthesis
@@ -42,6 +42,13 @@ STL-Dev's 2D example, 10 images of 256², with `stl-synth2d` on CPU and GPU.
 The same synthesis on 1, 2 and 4 MPI ranks (and one GPU per rank); `stl-mpi-check`.
 :::
 
+:::{grid-item-card} Differentiable losses in Python
+:link: differentiable
+:link-type: doc
+torch wrappers of `NativeEngine`, `PatchEngine` and `SpectrumEngine`: masked synthesis, patch
+synthesis and denoising with cross statistics, on a laptop CPU.
+:::
+
 ::::
 
 Every script takes its paths from the environment: `STL_BIN` (the binaries, default
@@ -57,4 +64,5 @@ healpix_ensemble
 statistics
 planar_synthesis
 mpi
+differentiable
 ```

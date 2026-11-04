@@ -11,6 +11,7 @@ time).
 | 03 | [Statistics of maps](03_statistics) | `stl-stats` | 25 s |
 | 04 | [2D synthesis, STL-Dev's example (10 × 256²), CPU and GPU](04_planar_synthesis) | `stl-synth2d` | 2 min CPU, 1.5 + 7 min GPU |
 | 05 | [Multi-rank runs under MPI](05_mpi) | `mpirun stl-synth`, `stl-mpi-check` | 7 min |
+| 06 | [Differentiable losses in Python: masks, patches, cross statistics, C_ℓ](06_differentiable_python) | `stl_port.native` + torch | 2 min on a laptop CPU (WSL) |
 
 ```bash
 cargo build --release -p stl-cli --features gpu          # 01-04 (no feature and GPU=0 without a device)
@@ -19,6 +20,7 @@ bash examples/03_statistics/run.sh                         # uses the synthesis 
 REFS="$(ls /data/r00?_nside256_nested.npy)" bash examples/02_healpix_ensemble/run.sh
 TURB=/path/to/STL-Dev/data/test/Turb_6.npy bash examples/04_planar_synthesis/run.sh
 MPIRUN="mpirun --bind-to none" GPUS=3 bash examples/05_mpi/run.sh   # binaries built with mpi (see 05)
+cargo build --release -p stl-bridge && bash examples/06_differentiable_python/run.sh   # Python with torch
 ```
 
 Environment of every script (`common.sh`):
@@ -34,6 +36,8 @@ Environment of every script (`common.sh`):
 `plotting.py` draws the figures: Mollweide views and base faces of NESTED maps, loss curves,
 `stl-stats` statistics, and one-line summaries of the run reports.
 
-Data: examples 01, 03 and 05 use the WebSky κ map at nside 64 shipped in `fixtures/`. Example 02
+Data: examples 01, 03, 05 and 06 use the weak-lensing convergence of Takahashi et al. (2017)
+(realisation r000, source redshift zs1) block-averaged to nside 64, shipped in
+`fixtures/takahashi/`. Example 02
 needs ten reference maps (the Takahashi et al. 2017 full-sky convergence realisations were used).
 Example 04 needs `data/test/Turb_6.npy` from the STL-Dev repository.

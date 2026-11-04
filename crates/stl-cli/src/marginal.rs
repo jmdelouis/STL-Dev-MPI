@@ -87,6 +87,7 @@ impl Marginal {
 
     /// [`matched`](Self::matched) from the row's local order: `perm` lists its
     /// positions by (value, position), as the device sort gives them.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn matched_sorted<C: Comm>(&self, row: &[f64], perm: &[u32], start: usize, comm: &C) -> Vec<f64> {
         let local: Vec<(f64, i64)> = perm.iter().map(|&q| (row[q as usize], (start + q as usize) as i64)).collect();
         let (mine, first) = distribute(local, comm);

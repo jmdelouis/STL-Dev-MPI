@@ -1,5 +1,5 @@
 #!/bin/bash
-# Synthesis of one HEALPix map from a target map (WebSky kappa, nside 64),
+# Synthesis of one HEALPix map from a target map (Takahashi weak-lensing kappa, nside 64),
 # on the CPU (thread ranks) and on a GPU, then the figures.
 HERE=$(cd "$(dirname "$0")" && pwd)
 source "$HERE/../common.sh"
