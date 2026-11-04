@@ -19,7 +19,8 @@
 //! buffer in the order and layouts of the torch `state_dict`
 //! ([`UNet::params`]).
 //!
-//! Host threads: `STL_THREADS` (else every CPU); every sum has a fixed order.
+//! Host threads: `STL_THREADS` (else every CPU); every sum has a fixed
+//! order, the long ones (convolutions, cotangents) in double precision.
 
 use crate::healpix::{interp_weights_nested, nest2xyf, order_of, xyf2ang};
 use crate::stencil::{apply, local_kernel_grid, rotation_matrices, Gauge};
@@ -156,7 +157,7 @@ pub fn conv_forward(st: &SphereStencil, x: &[f32], cin: usize, cout: usize, w: &
         taps(st, x, cin, i, &mut g);
         for (o, v) in yi.iter_mut().enumerate() {
             let wo = &w[o * pc..(o + 1) * pc];
-            *v = b[o] + wo.iter().zip(&g).map(|(a, c)| a * c).sum::<f32>();
+            *v = (b[o] as f64 + wo.iter().zip(&g).map(|(&a, &c)| a as f64 * c as f64).sum::<f64>()) as f32;
         }
     });
     y
@@ -168,49 +169,58 @@ pub fn conv_forward(st: &SphereStencil, x: &[f32], cin: usize, cout: usize, w: &
 pub fn conv_backward(st: &SphereStencil, x: &[f32], cin: usize, cout: usize, w: &[f32], dy: &[f32], dw: &mut [f32], db: &mut [f32]) -> Vec<f32> {
     let pc = st.p * cin;
     let n = st.n;
-    // Tap cotangents [n, pc] = dy W.
+    // Tap cotangents [n, pc] = dy W (double accumulation).
     let mut dg = vec![0f32; n * pc];
     par_rows(&mut dg, pc, |i, gi| {
+        let mut acc = vec![0f64; pc];
         for o in 0..cout {
-            let d = dy[i * cout + o];
+            let d = dy[i * cout + o] as f64;
             if d != 0.0 {
-                for (a, &v) in gi.iter_mut().zip(&w[o * pc..(o + 1) * pc]) {
-                    *a += d * v;
+                for (a, &v) in acc.iter_mut().zip(&w[o * pc..(o + 1) * pc]) {
+                    *a += d * v as f64;
                 }
             }
         }
+        gi.iter_mut().zip(&acc).for_each(|(a, &v)| *a = v as f32);
     });
-    // Weight and bias cotangents: partial sums per chunk of pixels, added in chunk order.
+    // Weight and bias cotangents: double partial sums per chunk of pixels,
+    // added in chunk order (long sums with cancellations: single precision
+    // would lose about three digits at nside 64).
     let parts = par_map_chunks(n, threads(), |range| {
-        let (mut pw, mut pb) = (vec![0f32; cout * pc], vec![0f32; cout]);
+        let (mut pw, mut pb) = (vec![0f64; cout * pc], vec![0f64; cout]);
         let mut g = vec![0f32; pc];
         for i in range {
             taps(st, x, cin, i, &mut g);
             for o in 0..cout {
-                let d = dy[i * cout + o];
+                let d = dy[i * cout + o] as f64;
                 pb[o] += d;
                 for (a, &v) in pw[o * pc..(o + 1) * pc].iter_mut().zip(&g) {
-                    *a += d * v;
+                    *a += d * v as f64;
                 }
             }
         }
         (pw, pb)
     });
+    let (mut sw, mut sb) = (vec![0f64; cout * pc], vec![0f64; cout]);
     for (pw, pb) in parts {
-        dw.iter_mut().zip(&pw).for_each(|(a, b)| *a += b);
-        db.iter_mut().zip(&pb).for_each(|(a, b)| *a += b);
+        sw.iter_mut().zip(&pw).for_each(|(a, b)| *a += b);
+        sb.iter_mut().zip(&pb).for_each(|(a, b)| *a += b);
     }
+    dw.iter_mut().zip(&sw).for_each(|(a, &b)| *a += b as f32);
+    db.iter_mut().zip(&sb).for_each(|(a, &b)| *a += b as f32);
     // Input cotangent through the transposed stencil.
     let mut dx = vec![0f32; n * cin];
     par_rows(&mut dx, cin, |j, xj| {
+        let mut acc = vec![0f64; cin];
         for e in st.t_ptr[j] as usize..st.t_ptr[j + 1] as usize {
             let row = st.t_row[e] as usize;
             let (i, t) = (row / st.p, row % st.p);
-            let wt = st.t_w[e];
-            for (a, &v) in xj.iter_mut().zip(&dg[i * pc + t * cin..i * pc + (t + 1) * cin]) {
-                *a += wt * v;
+            let wt = st.t_w[e] as f64;
+            for (a, &v) in acc.iter_mut().zip(&dg[i * pc + t * cin..i * pc + (t + 1) * cin]) {
+                *a += wt * v as f64;
             }
         }
+        xj.iter_mut().zip(&acc).for_each(|(a, &v)| *a = v as f32);
     });
     dx
 }

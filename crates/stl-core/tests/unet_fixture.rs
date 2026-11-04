@@ -47,7 +47,11 @@ pub fn load(d: &PathBuf) -> (UNet, Vec<f32>, serde_json::Value) {
 }
 
 fn check(name: &str) {
-    let d = dir(name);
+    check_at(name, dir(name), 1e-4);
+}
+
+/// Output, gradients (tolerance `tol`) and Adam step of the fixture `d`.
+fn check_at(name: &str, d: PathBuf, tol: f64) {
     let (net, w, _) = load(&d);
     let (dm, _) = npy::<f64>(&d, "d");
     let (cond, cshape) = npy::<f32>(&d, "cond");
@@ -99,7 +103,7 @@ fn check(name: &str) {
     }
     eprintln!("{name}: correction {er:e}, gradients {eg:e}, Adam step {ea:e}");
     assert!(er <= 1e-5, "{name} correction {er:e}");
-    assert!(eg <= 1e-4, "{name} gradients {eg:e}");
+    assert!(eg <= tol, "{name} gradients {eg:e}");
     assert!(ea <= 1e-7, "{name} Adam {ea:e}");
 }
 
@@ -111,4 +115,14 @@ fn unet_matches_torch_phi() {
 #[test]
 fn unet_matches_torch_cosmo() {
     check("n16_cosmo");
+}
+
+/// The fixture in `STL_UNET_FIXTURE` (e.g. nside 64, four levels, from
+/// `tools/dump_unet_reference.py`), if set: gradients to 1e-2 (f32 on both
+/// sides, through four GroupNorm levels).
+#[test]
+fn unet_matches_torch_extra() {
+    if let Ok(p) = std::env::var("STL_UNET_FIXTURE") {
+        check_at("extra", PathBuf::from(p), 1e-2);
+    }
 }

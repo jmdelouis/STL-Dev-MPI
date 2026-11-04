@@ -14,6 +14,7 @@ pub mod disc;
 pub mod engine;
 pub mod geometry;
 pub mod harmonic;
+pub mod nn;
 pub mod planar;
 pub mod terms;
 pub mod topology;
