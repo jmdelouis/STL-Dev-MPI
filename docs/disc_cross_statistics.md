@@ -3,7 +3,7 @@
 Two additions to the Python bridge (`stl_port.native`, C ABI of `crates/stl-bridge`) for
 training networks whose loss is made of STL statistics (Healpix-STL-IA): the statistics of a map
 known only on a **disc patch** of the sphere, and the **cross statistics** `S(a, b)` of two maps,
-both with exact gradients, on the CPU or on a GPU (section 2.4); averages of the full-sky statistics over masks are in `docs/masked_statistics.md`. Branch `claude/disc-cross-stats`,
+both with exact gradients, on the CPU or on a GPU (section 2.4); averages of the full-sky statistics over masks are in `docs/masked_statistics.md`; differentiable pseudo-spectra with the same masks in `docs/spectrum.md`. Branch `claude/disc-cross-stats`,
 bridge version `2026-11-05-v4`.
 
 ## 1. Definitions
