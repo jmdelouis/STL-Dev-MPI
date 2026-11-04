@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"), include_str!("nn.cu"));
 
-const KERNELS: [&str; 112] = [
+const KERNELS: [&str; 113] = [
     "disc_terms",
     "disc_terms_rev",
     "ring_thetas",
@@ -126,6 +126,7 @@ const KERNELS: [&str; 112] = [
     "nn_output_back",
     "nn_add_f64",
     "nn_adam",
+    "nn_axpy",
 ];
 
 /// Compiles the kernels to a native binary for the device (`sm_XY`): a

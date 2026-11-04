@@ -229,6 +229,13 @@ extern "C" __global__ void nn_output_back(const double* du, double scale, long l
     dr[i] = (float)(-scale * du[i]);
 }
 
+// dst[i] = a[i] + s b[i] (b null: dst = a); in place when dst == a.
+extern "C" __global__ void nn_axpy(double* dst, const double* a, const double* b, double s, long long n) {
+    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = b ? a[i] + s * b[i] : a[i];
+}
+
 // dst[k] += (float) src[k].
 extern "C" __global__ void nn_add_f64(const double* src, long long n, float* dst) {
     long long k = blockIdx.x * (long long)blockDim.x + threadIdx.x;

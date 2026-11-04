@@ -13,10 +13,13 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-06-v6"
+SCRIPT_VERSION = "2026-11-07-v7"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
+_FLOAT = C.POINTER(C.c_float)
+_UINT32 = C.POINTER(C.c_uint32)
+_UINT64 = C.POINTER(C.c_uint64)
 _INT64 = C.POINTER(C.c_int64)
 _SIZE = C.POINTER(C.c_size_t)
 _VOID = C.c_void_p
@@ -80,6 +83,24 @@ def _library(path=None):
         "stlp_spec_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
         "stlp_spec_forward": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
         "stlp_spec_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
+        "stlp_unet_new": ([C.c_char_p], _VOID),
+        "stlp_unet_free": ([_VOID], None),
+        "stlp_unet_info": ([_VOID], _VOID),
+        "stlp_unet_get_params": ([_VOID, _FLOAT], C.c_int),
+        "stlp_unet_set_params": ([_VOID, _FLOAT, C.c_size_t], C.c_int),
+        "stlp_unet_get_grads": ([_VOID, _FLOAT], C.c_int),
+        "stlp_unet_zero_grad": ([_VOID], C.c_int),
+        "stlp_unet_adam": ([_VOID, C.c_double], C.c_int),
+        "stlp_unet_set_cond": ([_VOID, _FLOAT, C.c_size_t], C.c_int),
+        "stlp_unet_apply": ([_VOID, _DOUBLE, C.c_size_t, C.c_double, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_train_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_train_set_common": ([_VOID, _DOUBLE], C.c_int),
+        "stlp_train_set_field": ([_VOID, C.c_uint32, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE,
+                                  C.c_size_t, C.c_double], C.c_int),
+        "stlp_train_bias": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_train_loss": ([_VOID, C.c_uint32, C.c_bool, _DOUBLE], C.c_int),
+        "stlp_train_step": ([_VOID, C.c_uint32, C.c_double, _DOUBLE], C.c_int),
+        "stlp_train_lbfgs": ([_VOID, _UINT32, C.c_size_t, C.c_char_p], _VOID),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -476,6 +497,264 @@ class SpectrumEngine:
     def close(self):
         if getattr(self, "_handle", None):
             self._lib.stlp_spec_free(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+class NativeUNet:
+    """The spherical U-Net of Healpix-STL-IA (stlia.unet.UNet, conv="sphere",
+    norm="group") in Rust, on the CPU or one GPU, with its training by the
+    scattering losses on that device (frozen noise biases).
+
+    Network: d [B, npix] NESTED (float64) -> u = d - scale r(d / scale), r
+    the float32 network; scale = std(d) (unbiased) unless given. Parameters:
+    one float32 buffer in the order and shapes of the torch state_dict
+    (state_dict(), load_state_dict() exchange with stlia.unet.UNet).
+
+    Training (j, loss weights): set_common(T857), set_field(name, d, d1, d2,
+    noise, noise1, noise2) upload the observations and noise pools once;
+    estimate_bias(name, sims, signs) freezes the biases at the current u;
+    step(name, lr) is one Adam step (torch's Adam); lbfgs(names, options)
+    the native strong-Wolfe L-BFGS on the parameters for the frozen-bias
+    loss of the fields; loss(name) the terms without update. Terms: total,
+    data, l1, l2, l3 (stlia train_denoise.py frozen_losses).
+    """
+    TERMS = ("total", "data", "l1", "l2", "l3")
+
+    def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
+                 backend="cpu", device=0, j=None, loss=None, bias_batch=8, block_pixels=4096, library=None):
+        self._lib = _library(library)
+        self.library_sha256 = self._lib._stlp_binary_sha256
+        self._handle = None
+        self._lock = threading.RLock()
+        if backend not in ("cpu", "gpu"):
+            raise ValueError("backend must be cpu or gpu")
+        self.nside, self.npix, self.cond = int(nside), 12 * int(nside)**2, int(cond)
+        self.config = dict(nside=self.nside, channels=[int(c) for c in channels], ksz=int(ksz), gauge=gauge,
+                           slope=float(slope), cond=self.cond, scale=None if scale is None else float(scale),
+                           seed=int(seed), backend=backend, device=int(device), bias_batch=int(bias_batch),
+                           block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()})
+        if j is not None:
+            self.config["j"] = int(j)
+        self._handle = self._lib.stlp_unet_new(json.dumps(self.config).encode())
+        if not self._handle:
+            raise _error(self._lib)
+        info = self.info()
+        self.params, self.size = info["params"], info["size"]
+        self._fields = {}
+
+    def _open(self):
+        if not self._handle:
+            raise RuntimeError("native U-Net is closed")
+
+    def _check(self, status):
+        if status:
+            raise _error(self._lib)
+
+    def info(self):
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_unet_info(self._handle)
+            if not p:
+                raise _error(self._lib)
+            try:
+                result = json.loads(C.string_at(p))
+                result["library_sha256"] = self.library_sha256
+                return result
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def get_params(self):
+        with self._lock:
+            self._open()
+            w = np.empty(self.size, dtype=np.float32)
+            self._check(self._lib.stlp_unet_get_params(self._handle, w.ctypes.data_as(_FLOAT)))
+            return w
+
+    def set_params(self, w):
+        with self._lock:
+            self._open()
+            w = np.ascontiguousarray(w, dtype=np.float32).ravel()
+            self._check(self._lib.stlp_unet_set_params(self._handle, w.ctypes.data_as(_FLOAT), w.size))
+
+    def grads(self):
+        """Accumulated parameter cotangents (flat float32)."""
+        with self._lock:
+            self._open()
+            g = np.empty(self.size, dtype=np.float32)
+            self._check(self._lib.stlp_unet_get_grads(self._handle, g.ctypes.data_as(_FLOAT)))
+            return g
+
+    def _unflatten(self, flat):
+        return {s["name"]: flat[s["offset"]:s["offset"] + s["len"]].reshape(s["shape"]).copy() for s in self.params}
+
+    def state_dict(self):
+        """{name: float32 array} with the names and shapes of the torch state_dict."""
+        return self._unflatten(self.get_params())
+
+    def grads_dict(self):
+        return self._unflatten(self.grads())
+
+    def load_state_dict(self, state):
+        """From a torch state_dict (tensors or arrays) of stlia.unet.UNet."""
+        w = np.empty(self.size, dtype=np.float32)
+        for s in self.params:
+            v = state[s["name"]]
+            v = v.detach().cpu().numpy() if hasattr(v, "detach") else np.asarray(v)
+            if tuple(v.shape) != tuple(s["shape"]):
+                raise ValueError(f"{s['name']}: shape {tuple(v.shape)} != {tuple(s['shape'])}")
+            w[s["offset"]:s["offset"] + s["len"]] = v.ravel()
+        self.set_params(w)
+
+    def zero_grad(self):
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_zero_grad(self._handle))
+
+    def adam_step(self, lr):
+        """One Adam step from the accumulated cotangents (torch's Adam)."""
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_adam(self._handle, float(lr)))
+
+    def reset_adam(self):
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_adam(self._handle, -1.0))
+
+    def set_cond(self, cond):
+        """Conditioning maps [cond, npix] (NESTED, float32 after the caller's standardisation)."""
+        with self._lock:
+            self._open()
+            c = np.ascontiguousarray(cond, dtype=np.float32).reshape(-1)
+            if c.size != self.cond * self.npix:
+                raise ValueError(f"expected {self.cond} conditioning maps of {self.npix} pixels")
+            self._check(self._lib.stlp_unet_set_cond(self._handle, c.ctypes.data_as(_FLOAT), c.size))
+
+    def apply(self, d, scale=None, cot=None):
+        """u = d - scale r(d / scale) of d [B, npix] or [npix]; with cot (same
+        shape), the parameter cotangents of sum(cot * u) are added (see grads)."""
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(d, dtype=np.float64)
+            single = x.ndim == 1
+            x = x.reshape(-1, self.npix)
+            if not np.isfinite(x).all():
+                raise ValueError("non-finite input map")
+            c = None if cot is None else np.ascontiguousarray(cot, dtype=np.float64).reshape(x.shape)
+            u = np.empty_like(x)
+            self._check(self._lib.stlp_unet_apply(self._handle, _pointer(x), x.shape[0],
+                                                  0.0 if scale is None else float(scale),
+                                                  None if c is None else _pointer(c), _pointer(u)))
+            return u[0] if single else u
+
+    __call__ = apply
+
+    # -- training ------------------------------------------------------------
+
+    def _field_id(self, name):
+        if name not in self._fields:
+            self._fields[name] = len(self._fields)
+        return self._fields[name]
+
+    def set_masks(self, masks):
+        """Statistics averaged over masks ([K, npix] indicators or NESTED id
+        lists, as NativeEngine.set_masks); None: the whole sky."""
+        with self._lock:
+            self._open()
+            if masks is None:
+                w = np.zeros((0, self.npix))
+            elif isinstance(masks, np.ndarray) and masks.dtype != object and masks.shape[-1] == self.npix:
+                w = np.ascontiguousarray(np.atleast_2d(masks), dtype=np.float64)
+            else:
+                w = np.zeros((len(masks), self.npix))
+                for k, ids in enumerate(masks):
+                    w[k, np.asarray(ids, dtype=np.int64)] = 1.0
+            self._check(self._lib.stlp_train_set_masks(self._handle, _pointer(w), w.shape[0]))
+
+    def set_common(self, t857):
+        """The 857 GHz map of the l terms (NESTED, float64)."""
+        with self._lock:
+            self._open()
+            t = np.ascontiguousarray(t857, dtype=np.float64).reshape(self.npix)
+            self._check(self._lib.stlp_train_set_common(self._handle, _pointer(t)))
+
+    def set_field(self, name, d, d1=None, d2=None, noise=None, noise1=None, noise2=None, scale=None):
+        """Observation d, half missions d1, d2 and noise pools [S, npix]
+        (full mission; half missions of the same simulations), uploaded once."""
+        with self._lock:
+            self._open()
+            arr = lambda a, shape: None if a is None else np.ascontiguousarray(a, dtype=np.float64).reshape(shape)
+            pools = [arr(p, (-1, self.npix)) for p in (noise, noise1, noise2)]
+            sims = 0 if pools[0] is None else pools[0].shape[0]
+            if any(p is not None and p.shape[0] != sims for p in pools):
+                raise ValueError("noise pools of different sizes")
+            maps = [arr(m, self.npix) for m in (d, d1, d2)]
+            ptr = lambda a: None if a is None else _pointer(a)
+            self._check(self._lib.stlp_train_set_field(self._handle, self._field_id(name), *[ptr(m) for m in maps],
+                                                       *[ptr(p) for p in pools], sims,
+                                                       0.0 if scale is None else float(scale)))
+
+    def estimate_bias(self, name, sims, signs):
+        """Frozen noise biases of field `name` at the current network output,
+        from the draws (simulation index, sign) of its pools."""
+        with self._lock:
+            self._open()
+            s = np.ascontiguousarray(sims, dtype=np.uint64)
+            g = np.ascontiguousarray(signs, dtype=np.float64)
+            if s.shape != g.shape or s.ndim != 1:
+                raise ValueError("sims and signs: two arrays of the same length")
+            self._check(self._lib.stlp_train_bias(self._handle, self._field_id(name), s.ctypes.data_as(_UINT64),
+                                                  _pointer(g), s.size))
+
+    def _terms(self, out):
+        return dict(zip(self.TERMS, map(float, out)))
+
+    def loss(self, name, backward=False):
+        """Loss terms of field `name` (frozen biases); with backward, their
+        parameter cotangents are added to grads()."""
+        with self._lock:
+            self._open()
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_loss(self._handle, self._field_id(name), bool(backward), _pointer(out)))
+            return self._terms(out)
+
+    def step(self, name, lr):
+        """One Adam step on field `name`; returns the terms before the update."""
+        with self._lock:
+            self._open()
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_step(self._handle, self._field_id(name), float(lr), _pointer(out)))
+            return self._terms(out)
+
+    def lbfgs(self, names, options=None):
+        """Native strong-Wolfe L-BFGS on the parameters for the sum of the
+        frozen-bias losses of the fields `names` (one round: refresh the
+        biases with estimate_bias before). options: lr, max_iter, max_eval,
+        tolerance_grad, tolerance_change, history_size."""
+        with self._lock:
+            self._open()
+            ids = np.array([self._field_id(n) for n in ([names] if isinstance(names, str) else names)], dtype=np.uint32)
+            p = self._lib.stlp_train_lbfgs(self._handle, ids.ctypes.data_as(_UINT32), ids.size,
+                                           json.dumps(options or {}).encode())
+            if not p:
+                raise _error(self._lib)
+            try:
+                return json.loads(C.string_at(p))
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def close(self):
+        if getattr(self, "_handle", None):
+            self._lib.stlp_unet_free(self._handle)
             self._handle = None
 
     def __del__(self):

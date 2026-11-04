@@ -24,6 +24,10 @@
 //! full-sky maps (anafast, `iter = 0`; spin 0, or EE/BB/EB of spin-`s`
 //! fields) and their VJP.
 //!
+//! A U-Net handle (`stlp_unet_*`, `stlp_train_*`, [`unet`]) holds the
+//! native spherical U-Net of Healpix-STL-IA and trains it on one device
+//! with the scattering losses.
+//!
 //! A patch handle (`stlp_patch_*`) evaluates the same statistics on disc
 //! patches ([`stl_core::disc`]): a batch of discs with their own centres,
 //! each map holding only its disc's pixels.
@@ -52,7 +56,7 @@ use stl_core::engine::{Partition, Serial};
 use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, GpuSht, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-11-06-v7";
+pub const VERSION: &str = "2026-11-07-v8";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -937,6 +941,8 @@ pub unsafe extern "C" fn stlp_patch_vjp_device(p: *mut PatchHandle, cot: *const 
         panic!("device output needs a GPU patch handle (backend gpu)")
     })
 }
+
+pub mod unet;
 
 // -- pseudo-spectra ---------------------------------------------------------------
 
