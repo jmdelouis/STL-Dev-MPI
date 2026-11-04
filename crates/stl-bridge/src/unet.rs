@@ -240,6 +240,8 @@ struct GpuBack {
     net: stl_gpu::nn::GpuUNet,
     cond: Vec<stl_gpu::CudaSlice<f32>>,
     gpu: Arc<Gpu>,
+    /// Options of the statistics engines (`stlp_new`'s defaults).
+    opts: GpuOptions,
     stats: Stats,
 }
 
@@ -251,7 +253,7 @@ impl GpuBack {
             let ev = base.unwrap_or_else(|| {
                 let (geo, cfg) = unsafe { self.stats.refs() };
                 let channels = if kind == Kind::Cross { 2 } else { 1 };
-                let opts = GpuOptions { block_rows: geo.block_pixels, ..GpuOptions::default() };
+                let opts = self.opts.clone();
                 let mut e = GpuEngine::new(self.gpu.clone(), geo, cfg, Partition::serial(geo, cfg.levels()), batch, channels, &opts);
                 e.set_masks(self.stats.masks.as_ref());
                 stl_gpu::GpuEvaluator::new(e, self.stats.plan(kind))
@@ -418,7 +420,8 @@ struct Trainer<B: Backend> {
     weights: Weights,
     t857: Option<B::Map>,
     fields: HashMap<u32, Field<B::Map>>,
-    /// Draws per statistics call of the bias estimates.
+    /// Draws per statistics call of the bias estimates (`bias_batch` maps,
+    /// or `3 bias_batch` pairs).
     bias_batch: usize,
 }
 
@@ -542,7 +545,7 @@ impl<B: Backend> Trainer<B> {
             let h = phi.len() / 2;
             let (uu, tu) = (&phi[..h], &phi[h..]);
             let mut acc = [vec![C64::default(); h], vec![C64::default(); h], vec![C64::default(); h]];
-            for chunk in draws.chunks(bb.div_ceil(3).max(1)) {
+            for chunk in draws.chunks(bb) {
                 let mut rows: Vec<Row<B::Map>> = Vec::new();
                 for &(s, sg) in chunk {
                     rows.push((&u, 0, Some((n1, s * n, sg))));
@@ -676,8 +679,11 @@ pub struct UNetHandle {
 /// (0), `scale` (null: the standard deviation of the input), `seed` (0, of
 /// torch's initialisation scheme); `backend` (`cpu` | `gpu`), `device` (0);
 /// training: `j` (scales, `log2(nside) - 1`), `loss` (`{"data", "l1", "l2",
-/// "l3"}` weights, 0 by default), `bias_batch` (8, draws per statistics
-/// call of a bias estimate), `block_pixels` (4096).  Null on failure.
+/// "l3"}` weights, 0 by default), `bias_batch` (5, draws per statistics
+/// call of a bias estimate: 5 maps, 15 pairs, as `train_denoise.py` with
+/// `B = 4`), `block_pixels` (4096); GPU engines: `cache`
+/// (`transposition`), `cache_bytes` (1 GiB), `threads` (1), `conv`,
+/// `fields` (as `stlp_new`).  Null on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle {
     guard(std::ptr::null_mut(), || {
@@ -705,7 +711,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
         let levels = stats.cfg.levels();
         let l = &v["loss"];
         let weights = Weights { data: real(l, "data", 0.0), l1: real(l, "l1", 0.0), l2: real(l, "l2", 0.0), l3: real(l, "l3", 0.0) };
-        let bias_batch = integer(&v, "bias_batch", 8);
+        let bias_batch = integer(&v, "bias_batch", 5);
         let backend = v["backend"].as_str().unwrap_or("cpu");
         let inner = match backend {
             "cpu" => AnyTrainer::Cpu(Trainer {
@@ -719,7 +725,20 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
             "gpu" => {
                 let gpu = Arc::new(Gpu::new(integer(&v, "device", 0)).expect("CUDA initialisation"));
                 let dev = stl_gpu::nn::GpuUNet::new(gpu.clone(), net, &w).expect("device network");
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, stats }, weights, t857: None, fields: HashMap::new(), bias_batch })
+                let mut opts = GpuOptions {
+                    block_rows: stats.geo.block_pixels,
+                    cache: GeometryCache::parse(v["cache"].as_str().unwrap_or("transposition")).expect("geometry cache mode"),
+                    cache_bytes: integer(&v, "cache_bytes", 1 << 30),
+                    threads: integer(&v, "threads", 1),
+                    ..GpuOptions::default()
+                };
+                if let Some(s) = v["conv"].as_str() {
+                    opts.conv = ConvForm::parse(s).expect("conv: dia or stencils");
+                }
+                if let Some(s) = v["fields"].as_str() {
+                    opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
+                }
+                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), bias_batch })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),

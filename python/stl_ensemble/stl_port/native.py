@@ -530,7 +530,10 @@ class NativeUNet:
     TERMS = ("total", "data", "l1", "l2", "l3")
 
     def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
-                 backend="cpu", device=0, j=None, loss=None, bias_batch=8, block_pixels=4096, library=None):
+                 backend="cpu", device=0, j=None, loss=None, bias_batch=5, block_pixels=4096, library=None,
+                 engine=None):
+        """engine: options of the GPU statistics engines (cache, cache_bytes,
+        threads, conv, fields; as NativeEngine)."""
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -544,6 +547,7 @@ class NativeUNet:
                            block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()})
         if j is not None:
             self.config["j"] = int(j)
+        self.config.update(engine or {})
         self._handle = self._lib.stlp_unet_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
