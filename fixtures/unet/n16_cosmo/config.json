@@ -1,0 +1,201 @@
+{
+ "nside": 16,
+ "levels": 3,
+ "channels": [
+  8,
+  16,
+  24
+ ],
+ "conv": "sphere",
+ "gauge": "cosmo",
+ "ksz": 3,
+ "norm": "group",
+ "scale": null,
+ "cond": 1,
+ "maps": 1,
+ "batch": 2,
+ "params": [
+  "enc.0.c1.weight",
+  "enc.0.c1.bias",
+  "enc.0.c2.weight",
+  "enc.0.c2.bias",
+  "enc.0.n1.weight",
+  "enc.0.n1.bias",
+  "enc.0.n2.weight",
+  "enc.0.n2.bias",
+  "enc.1.c1.weight",
+  "enc.1.c1.bias",
+  "enc.1.c2.weight",
+  "enc.1.c2.bias",
+  "enc.1.n1.weight",
+  "enc.1.n1.bias",
+  "enc.1.n2.weight",
+  "enc.1.n2.bias",
+  "enc.2.c1.weight",
+  "enc.2.c1.bias",
+  "enc.2.c2.weight",
+  "enc.2.c2.bias",
+  "enc.2.n1.weight",
+  "enc.2.n1.bias",
+  "enc.2.n2.weight",
+  "enc.2.n2.bias",
+  "dec.0.c1.weight",
+  "dec.0.c1.bias",
+  "dec.0.c2.weight",
+  "dec.0.c2.bias",
+  "dec.0.n1.weight",
+  "dec.0.n1.bias",
+  "dec.0.n2.weight",
+  "dec.0.n2.bias",
+  "dec.1.c1.weight",
+  "dec.1.c1.bias",
+  "dec.1.c2.weight",
+  "dec.1.c2.bias",
+  "dec.1.n1.weight",
+  "dec.1.n1.bias",
+  "dec.1.n2.weight",
+  "dec.1.n2.bias",
+  "head.weight",
+  "head.bias"
+ ],
+ "shapes": {
+  "enc.0.c1.weight": [
+   8,
+   18
+  ],
+  "enc.0.c1.bias": [
+   8
+  ],
+  "enc.0.c2.weight": [
+   8,
+   72
+  ],
+  "enc.0.c2.bias": [
+   8
+  ],
+  "enc.0.n1.weight": [
+   8
+  ],
+  "enc.0.n1.bias": [
+   8
+  ],
+  "enc.0.n2.weight": [
+   8
+  ],
+  "enc.0.n2.bias": [
+   8
+  ],
+  "enc.1.c1.weight": [
+   16,
+   72
+  ],
+  "enc.1.c1.bias": [
+   16
+  ],
+  "enc.1.c2.weight": [
+   16,
+   144
+  ],
+  "enc.1.c2.bias": [
+   16
+  ],
+  "enc.1.n1.weight": [
+   16
+  ],
+  "enc.1.n1.bias": [
+   16
+  ],
+  "enc.1.n2.weight": [
+   16
+  ],
+  "enc.1.n2.bias": [
+   16
+  ],
+  "enc.2.c1.weight": [
+   24,
+   144
+  ],
+  "enc.2.c1.bias": [
+   24
+  ],
+  "enc.2.c2.weight": [
+   24,
+   216
+  ],
+  "enc.2.c2.bias": [
+   24
+  ],
+  "enc.2.n1.weight": [
+   24
+  ],
+  "enc.2.n1.bias": [
+   24
+  ],
+  "enc.2.n2.weight": [
+   24
+  ],
+  "enc.2.n2.bias": [
+   24
+  ],
+  "dec.0.c1.weight": [
+   16,
+   369
+  ],
+  "dec.0.c1.bias": [
+   16
+  ],
+  "dec.0.c2.weight": [
+   16,
+   144
+  ],
+  "dec.0.c2.bias": [
+   16
+  ],
+  "dec.0.n1.weight": [
+   16
+  ],
+  "dec.0.n1.bias": [
+   16
+  ],
+  "dec.0.n2.weight": [
+   16
+  ],
+  "dec.0.n2.bias": [
+   16
+  ],
+  "dec.1.c1.weight": [
+   8,
+   225
+  ],
+  "dec.1.c1.bias": [
+   8
+  ],
+  "dec.1.c2.weight": [
+   8,
+   72
+  ],
+  "dec.1.c2.bias": [
+   8
+  ],
+  "dec.1.n1.weight": [
+   8
+  ],
+  "dec.1.n1.bias": [
+   8
+  ],
+  "dec.1.n2.weight": [
+   8
+  ],
+  "dec.1.n2.bias": [
+   8
+  ],
+  "head.weight": [
+   1,
+   8,
+   1
+  ],
+  "head.bias": [
+   1
+  ]
+ }
+}
