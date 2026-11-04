@@ -17,7 +17,7 @@ On the built site it is under <a href="rust/stl_core/index.html"><code>rust/</co
 | `stl-mpi` | decomposition into NESTED ranges, halo exchange and ghost accumulation, the distributed objective (`Objective`, `Ensemble`), npy / FITS I/O, the threads and MPI backends of `Comm` | `stl-core`, `rsmpi` (feature `mpi`) |
 | `stl-gpu` | the sweeps on a CUDA device per rank (`GpuEngine`), device geometry (DIA or bound stencils), the objective's extra terms and harmonic transforms on the device, the planar engine on the device | `stl-core`, `cudarc` (driver and NVRTC loaded at run time) |
 | `stl-cli` | the command-line tools and their objectives (ensemble, kappa, kurtosis, level power, marginal, Minkowski terms; `stl-ensemble`; planar) | the three above |
-| `stl-bridge` | C ABI over the engines and L-BFGS for P. Campeti's Python driver (`ctypes`) | `stl-core`, `stl-gpu` |
+| `stl-bridge` | C ABI over the engines and L-BFGS for Python (`ctypes`): P. Campeti's driver, and the differentiable full-sky, masked, patch and spectrum engines of `stl_port.native` | `stl-core`, `stl-gpu` |
 
 ## Main types and functions
 
@@ -81,6 +81,16 @@ The synthesis driver is `stl_cli::run` (behind `stl-synth`); the ensemble method
 ## Python
 
 `stl-bridge` exposes the engines through a C ABI used by P. Campeti's Python package
-(`python/stl_ensemble`); see [the merge report](campeti_merge.md), section 2.
-Disc patches (`PatchEngine`, `stlp_patch_*`) and cross statistics (`cross=True`): see
-[Disc patches and cross statistics](disc_cross_statistics.md).
+(`python/stl_ensemble`); see [the merge report](campeti_merge.md), section 2. The module
+`stl_port.native` wraps it with three differentiable engines (forward and exact VJP, CPU or GPU),
+introduced in the user guide's page [Differentiable statistics in Python](user-guide/differentiable.md):
+
+| Python class | C ABI | What it computes | Reference |
+|---|---|---|---|
+| `NativeEngine` | `stlp_new`, `stlp_forward`, `stlp_vjp`, `stlp_set_masks`, `stlp_native_pixels` | full-sky statistics of `B` maps, auto or cross (`cross=True`), averaged over the whole sky or over `K` masks | [Masked statistics](masked_statistics.md), [cross statistics](disc_cross_statistics.md) (section 1.2) |
+| `PatchEngine` | `stlp_patch_new`, `stlp_patch_select`, `stlp_patch_forward`, `stlp_patch_vjp`, `stlp_patch_forward_device`, `stlp_patch_vjp_device` | statistics of disc patches (support radius `R`, averaging core `r`), auto or cross | [Disc patches](disc_cross_statistics.md) |
+| `SpectrumEngine` | `stlp_spec_new`, `stlp_spec_set_masks`, `stlp_spec_forward`, `stlp_spec_vjp` | pseudo-`C_ℓ` (anafast, `iter=0`), spin 0 or spin `s` (`EE`, `BB`, `EB`), auto or cross, `K` masks | [Differentiable pseudo-spectra](spectrum.md) |
+
+Also in `stl_port.native`: `delouis_transform` and `delouis_transform_vjp` (the
+`sign · sqrt|·|` post-transform of Delouis et al. 2022), and `native_lbfgs` (the Rust L-BFGS
+driven by a Python callback).

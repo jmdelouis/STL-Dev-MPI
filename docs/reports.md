@@ -28,6 +28,8 @@ its setup (machine, commit, job) so that it can be reproduced.
 | [Production at nside 1024](campeti_production_1024.md) | step by step: calibration, Slurm job on one A100, monitoring and restart, results against the ten Takahashi realisations |
 | [Kappa power spectrum](kappa_power_spectrum.md) | the C_ℓ deficit of Gaussianised syntheses and its correction (`--kappa-table`, level power) |
 | [Disc patches and cross statistics](disc_cross_statistics.md) | `stl-bridge` / `stl_port.native`: statistics on random disc patches (`PatchEngine`) and cross statistics `S(a, b)` (`cross=True`), exact VJPs, for networks trained with STL losses |
+| [Masked statistics](masked_statistics.md) | the full-sky statistics averaged over `K` masks in one sweep (`NativeEngine(masks=...)`), CPU and GPU, exact VJP; T4 timings |
+| [Differentiable pseudo-spectra](spectrum.md) | anafast with its VJP (`SpectrumEngine`): spin 0 and spin `s` (`EE`, `BB`, `EB`), auto and cross, `K` masks, CPU and GPU; validation against healpy, timings |
 
 ## Research notes
 
@@ -50,5 +52,7 @@ campeti_merge
 campeti_production_1024
 kappa_power_spectrum
 disc_cross_statistics
+masked_statistics
+spectrum
 diffusion_design
 ```

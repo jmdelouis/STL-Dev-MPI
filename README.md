@@ -27,6 +27,7 @@ give the same statistics to 1e-15.
 | **Bounded memory** | blocks of constant size with halos; maps, stored moduli and L-BFGS history sliced by rank; blocks sized from the free device memory on GPUs |
 | **MPI** | contiguous NESTED ranges per rank, point-to-point halos, additive ghost cells, reductions in rank order (deterministic); groups of ranks per ensemble member |
 | **CUDA** | one GPU per rank, `f64`, kernels compiled at run time by NVRTC (no toolkit to build), deterministic; DIA convolution, geometry cache on the device or in pinned host memory, objective terms on the device |
+| **Differentiable Python API** | `stl_port.native`: statistics of full-sky maps (`NativeEngine`), averaged over `K` masks in one sweep, of disc patches (`PatchEngine`), auto and cross `S(a, b)`, and pseudo-`C_ℓ` of spin 0 and spin `s` fields (`SpectrumEngine`, anafast conventions), each with its exact VJP on CPU or GPU, for torch losses ([guide](docs/user-guide/differentiable.md), [example 06](examples/06_differentiable_python)) |
 | **Validation** | every operation and every statistic tested against fixtures dumped from STL-Dev; synthesis trajectories reproduce STL-Dev's losses at the printed digits |
 
 ## Installation
@@ -87,6 +88,7 @@ Each run writes a JSON report (`loss_history`, `seconds_per_evaluation`, `timers
 | 03 | [Statistics of maps](examples/03_statistics) | `stl-stats` |
 | 04 | [2D synthesis, 10 images of 256², CPU and GPU](examples/04_planar_synthesis) | `stl-synth2d` |
 | 05 | [Multi-rank runs under MPI](examples/05_mpi) | `mpirun`, `stl-mpi-check` |
+| 06 | [Differentiable losses in Python: masks, patches, cross statistics, C_ℓ](examples/06_differentiable_python) | `stl_port.native` + torch |
 
 ## Performance
 

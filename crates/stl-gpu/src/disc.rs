@@ -6,7 +6,7 @@
 //! The patches of a batch are grouped by disc: the members of a group
 //! share the operators of their disc and run as the rows of one launch
 //! (`[members, C, ...]`, pixel axis last).  The operators of a disc live on
-//! the device ([`DiscOps`]): the convolution geometry of every level built
+//! the device (`DiscOps`): the convolution geometry of every level built
 //! by the device kernels on the support (`bind_support` renormalisation,
 //! [`DeviceGeometry`]), once for the support rows and once for the core
 //! rows (second wavelets, which are only read on the core), and the

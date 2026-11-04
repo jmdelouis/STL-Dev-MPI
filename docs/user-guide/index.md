@@ -63,6 +63,13 @@ One device per rank: fields, geometry cache, extra terms, measured speeds.
 Decomposition, rank counts, groups for ensembles, batch systems.
 :::
 
+:::{grid-item-card} Differentiable statistics in Python
+:link: differentiable
+:link-type: doc
+`NativeEngine`, `PatchEngine`, `SpectrumEngine`: statistics and pseudo-spectra with exact VJPs,
+full sky, masks, discs and cross terms, as torch losses.
+:::
+
 :::{grid-item-card} Computing centres
 :link: ../USAGE
 :link-type: doc
@@ -79,5 +86,6 @@ concepts
 cli
 gpu
 mpi
+differentiable
 ../USAGE
 ```
