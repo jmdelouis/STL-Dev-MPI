@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use stl_cli::planar::{nyquist_filter, standardize, white_noise, Config, Mode, PlanarObjective};
 use stl_cli::proc_memory;
-use stl_core::lbfgs::{minimize_preconditioned, LbfgsOptions, Local, Preconditioner};
+use stl_core::lbfgs::{minimize, minimize_preconditioned, LbfgsOptions, Local, Preconditioner};
 use stl_core::planar::cascade::{resample, ConditionalDetail, SplitMix};
 use stl_core::planar::transport::{bicubic, gradient, Smoother};
 use stl_core::planar::warp::{reproject, Flow, Warp, WarpState};
@@ -509,6 +509,7 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         minimize_preconditioned(u, &opts, &Local, &mut f, pre)
     };
     let mut warm_history = Vec::new();
+    let mut transport_times: Vec<f64> = Vec::new();
     let mut evals = 0;
     if a.warm > 0 && cfg.mode != Mode::StlDev && a.c2f.is_empty() {
         let mut wc = cfg.clone();
@@ -557,16 +558,15 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         }
         report["transport_precond"] = serde_json::json!({"sigma2": s2, "refresh": a.transport_refresh, "refreshes": refreshes, "weights": k.weights});
     } else if a.transport {
-        drop(lbfgs);
         let k = Smoother::new(h, w, a.transport_levels, a.transport_slope);
-        let r = transport(&obj, &k, &mut u, a.niter, a.transport_step, &mut history, &mut times);
+        let r = transport(&obj, &k, &mut u, a.niter, a.transport_step, &mut history, &mut transport_times);
         evals += history.len();
         report["transport"] = serde_json::json!({"weights": k.weights, "first_step_pixels": a.transport_step, "steps": r.0, "taus": r.1, "max_displacements": r.2});
     } else {
         evals += lbfgs(&obj, a.niter, &mut u, &mut history, evals, None, None);
     }
-    #[allow(dropping_references)]
     drop(lbfgs);
+    times.extend(transport_times);
     let seconds = t1.elapsed().as_secs_f64();
     let (f_final, m_final) = obj.batch_features(&u);
     report["evaluations"] = serde_json::json!(evals);
