@@ -335,8 +335,10 @@ def delouis_transform_vjp(values, cotangents, eps=0.0):
 class PatchEngine:
     """Statistics on disc patches, CPU (the patches of a batch on host threads)
     or GPU (backend="gpu": the patches of a batch grouped by disc, the disc
-    geometries cached on the device within cache_bytes, default half the free
-    device memory; same definitions and API).
+    geometries cached on the device while it keeps reserve_bytes free (2 GiB,
+    the free memory read when a disc is built, so that a network on the same
+    GPU is accounted for), optionally capped at cache_bytes; same definitions
+    and API).
 
     Same plan and formulas as NativeEngine (cross=True: the cross terms of
     two maps), averaged over a spherical disc. The support is every NESTED
@@ -358,7 +360,8 @@ class PatchEngine:
     native_pixels [B, ncoeff]: number of pixels each coefficient averages.
     """
     def __init__(self, nside, j, kernel=5, orientations=4, cross=False,
-                 threads=0, cache=256, library=None, backend="cpu", device=0, cache_bytes=None):
+                 threads=0, cache=256, library=None, backend="cpu", device=0, cache_bytes=None,
+                 reserve_bytes=None):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -371,6 +374,8 @@ class PatchEngine:
             self.config["device"] = int(device)
             if cache_bytes is not None:
                 self.config["cache_bytes"] = int(cache_bytes)
+            if reserve_bytes is not None:
+                self.config["reserve_bytes"] = int(reserve_bytes)
         self._handle = self._lib.stlp_patch_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)

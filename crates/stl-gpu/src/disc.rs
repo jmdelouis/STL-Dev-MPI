@@ -12,7 +12,12 @@
 //! rows (second wavelets, which are only read on the core), and the
 //! decimations of the host [`DiscSupport`] (forward and transposed CSR, so
 //! that the adjoint is a gather in the order of the CPU).  They are kept in
-//! a cache of `budget` bytes, least recently used out first.
+//! a cache, least recently used out first: before a disc is built, discs
+//! are evicted until the device has `reserve` bytes free beyond it (the
+//! free memory is read then, so that other users of the device, e.g. a
+//! network on the same GPU, are accounted for), and the cache never holds
+//! more than the optional `budget` bytes.  The discs of the current batch
+//! are never evicted.
 //!
 //! The terms read fields restricted to the core of their level (one buffer
 //! per group and slot, see `disc.cu`); their sums run in one launch per
@@ -231,7 +236,8 @@ pub struct GpuDiscEngine {
     channels: usize,
     ker: CudaSlice<f64>,
     cache: HashMap<DiscKey, DiscOps>,
-    budget: usize,
+    budget: Option<usize>,
+    reserve: usize,
     clock: u64,
     /// Geometry cache hits and misses (discs of the batches).
     pub hits: u64,
@@ -243,8 +249,9 @@ pub struct GpuDiscEngine {
 
 impl GpuDiscEngine {
     /// Engine of `channels` channels; the device operators of the discs are
-    /// kept within `budget` bytes (those of the current batch always).
-    pub fn new(gpu: Arc<Gpu>, geo: &LocalGeometry, cfg: &EngineConfig, channels: usize, budget: usize) -> Self {
+    /// cached while the device keeps `reserve` bytes free, within `budget`
+    /// bytes if given (those of the current batch always).
+    pub fn new(gpu: Arc<Gpu>, geo: &LocalGeometry, cfg: &EngineConfig, channels: usize, budget: Option<usize>, reserve: usize) -> Self {
         assert!(channels >= 1);
         let ker = gpu.upload(&geo.kernel.w);
         GpuDiscEngine {
@@ -255,6 +262,7 @@ impl GpuDiscEngine {
             ker,
             cache: HashMap::new(),
             budget,
+            reserve,
             clock: 0,
             hits: 0,
             misses: 0,
@@ -268,9 +276,9 @@ impl GpuDiscEngine {
         &self.gpu
     }
 
-    /// Discs cached on the device, their bytes and the budget.
-    pub fn cache_info(&self) -> (usize, usize, usize) {
-        (self.cache.len(), self.cache.values().map(|o| o.bytes).sum(), self.budget)
+    /// Discs cached on the device, their bytes, the budget and the reserve.
+    pub fn cache_info(&self) -> (usize, usize, Option<usize>, usize) {
+        (self.cache.len(), self.cache.values().map(|o| o.bytes).sum(), self.budget, self.reserve)
     }
 
     /// Accumulated wall-clock seconds by phase.
@@ -362,30 +370,49 @@ impl GpuDiscEngine {
         (br, md)
     }
 
-    /// Makes the operators of `discs` resident (building the missing ones),
-    /// then evicts least recently used discs beyond the budget.
+    /// Evicts the least recently used disc not in the current batch; false
+    /// if there is none.
+    fn evict_one(&mut self) -> bool {
+        let old = self.cache.iter().filter(|(_, o)| o.last_use != self.clock).min_by_key(|(_, o)| o.last_use).map(|(k, _)| *k);
+        old.map(|k| self.cache.remove(&k)).is_some()
+    }
+
+    /// Makes the operators of `discs` resident (building the missing ones,
+    /// after evicting least recently used discs until the device keeps
+    /// `reserve` bytes free beyond the new one), then evicts beyond `budget`.
     fn prepare(&mut self, discs: &[(DiscKey, &DiscSupport)]) {
         let t = Instant::now();
         self.clock += 1;
+        let mut missing: Vec<(DiscKey, &DiscSupport)> = Vec::new();
         for &(k, s) in discs {
             if let Some(o) = self.cache.get_mut(&k) {
                 if o.last_use != self.clock {
                     self.hits += 1;
                 }
                 o.last_use = self.clock;
-                continue;
+            } else if !missing.iter().any(|(m, _)| *m == k) {
+                assert_eq!(s.levels(), self.cfg.levels(), "disc support levels");
+                missing.push((k, s));
             }
-            assert_eq!(s.levels(), self.cfg.levels(), "disc support levels");
+        }
+        for (k, s) in missing {
             self.misses += 1;
+            if !self.cache.is_empty() {
+                let est = self.cache.values().map(|o| o.bytes).sum::<usize>() / self.cache.len();
+                loop {
+                    // Freed buffers return to the device at a synchronisation.
+                    self.gpu.sync();
+                    if self.gpu.memory().0 >= self.reserve + est || !self.evict_one() {
+                        break;
+                    }
+                }
+            }
             let mut o = DiscOps::new(&self.gpu, &self.geo, s);
             o.last_use = self.clock;
             self.cache.insert(k, o);
         }
-        let mut used: usize = self.cache.values().map(|o| o.bytes).sum();
-        while used > self.budget {
-            let old = self.cache.iter().filter(|(_, o)| o.last_use != self.clock).min_by_key(|(_, o)| o.last_use).map(|(k, _)| *k);
-            let Some(k) = old else { break };
-            used -= self.cache.remove(&k).unwrap().bytes;
+        if let Some(budget) = self.budget {
+            while self.cache.values().map(|o| o.bytes).sum::<usize>() > budget && self.evict_one() {}
         }
         self.tick("geometry", t);
     }

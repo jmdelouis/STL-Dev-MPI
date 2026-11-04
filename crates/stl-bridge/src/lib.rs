@@ -534,8 +534,10 @@ impl PatchHandle {
 /// New patch handle from a JSON configuration: `nside`, `j`, `kernel` (5),
 /// `orientations` (4), `cross` (false), `threads` (0: `STL_THREADS`, else
 /// every CPU), `cache` (256 discs), `backend` (`cpu` | `gpu`); GPU only:
-/// `device` (0), `cache_bytes` (device bytes for the disc geometries;
-/// default half the free device memory).  Null on failure.
+/// `device` (0), `reserve_bytes` (2 GiB: disc geometries are evicted
+/// before a new one is built until the device keeps this much free beyond
+/// it, the free memory read at that time), `cache_bytes` (optional cap of
+/// the cached geometries).  Null on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHandle {
     guard(std::ptr::null_mut(), || {
@@ -560,8 +562,9 @@ pub unsafe extern "C" fn stlp_patch_new(config: *const c_char) -> *mut PatchHand
         let device = match v["backend"].as_str().unwrap_or("cpu") {
             "gpu" => {
                 let gpu = Arc::new(Gpu::new(integer(&v, "device", 0)).expect("CUDA initialisation"));
-                let budget = integer(&v, "cache_bytes", gpu.memory().0 / 2);
-                Some(GpuDiscEngine::new(gpu, &geo, &cfg, channels, budget))
+                let budget = v["cache_bytes"].as_u64().map(|b| b as usize);
+                let reserve = integer(&v, "reserve_bytes", 2 << 30);
+                Some(GpuDiscEngine::new(gpu, &geo, &cfg, channels, budget, reserve))
             }
             "cpu" => None,
             other => panic!("backend must be cpu or gpu, not {other:?}"),
@@ -615,10 +618,10 @@ pub unsafe extern "C" fn stlp_patch_info(p: *mut PatchHandle) -> *mut c_char {
         let info = {
             let mut info = info;
             if let Some(e) = &h.device {
-                let (entries, used, budget) = e.cache_info();
+                let (entries, used, budget, reserve) = e.cache_info();
                 let (free, total) = e.gpu().memory();
                 info["device"] = json!({"name": e.gpu().name, "ordinal": e.gpu().ordinal(), "free": free, "total": total,
-                    "cache": {"entries": entries, "bytes": used, "budget": budget, "hits": e.hits, "misses": e.misses},
+                    "cache": {"entries": entries, "bytes": used, "budget": budget, "reserve": reserve, "hits": e.hits, "misses": e.misses},
                     "timers": e.timers()});
             }
             info

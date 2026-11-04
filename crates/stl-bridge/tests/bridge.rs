@@ -409,7 +409,8 @@ mod gpu {
 
     /// Device patch handle against the CPU one: several patches per disc
     /// (groups of different sizes), with and without a core, auto and
-    /// cross, the device cache below one disc (only the batch kept).
+    /// cross, the device cache capped below one disc or a reserve above the
+    /// device memory (only the batch kept).
     #[test]
     fn device_patches_match_cpu() {
         let deg = std::f64::consts::PI / 180.0;
@@ -419,7 +420,7 @@ mod gpu {
             let channels = if cross { 2 } else { 1 };
             let base = format!(r#""nside": 32, "j": 4, "cross": {cross}, "threads": 2"#);
             let cpu = P::new(&format!("{{{base}}}")).unwrap();
-            for (gpu_cfg, core) in [(r#""cache_bytes": 0"#, 25.0 * deg), (r#""cache": 2"#, 0.0)] {
+            for (gpu_cfg, core) in [(r#""cache_bytes": 0"#, 25.0 * deg), (r#""cache": 2, "reserve_bytes": 1000000000000000"#, 0.0)] {
                 let Some(dev) = P::new(&format!(r#"{{{base}, "backend": "gpu", {gpu_cfg}}}"#)) else { return };
                 let counts = cpu.select(&centres, 40.0 * deg, core);
                 for _ in 0..2 {

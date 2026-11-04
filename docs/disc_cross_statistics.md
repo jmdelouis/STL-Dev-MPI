@@ -132,7 +132,7 @@ in `a`, `b`; both orders are in the plan).
 ### 2.4 GPU patch engine
 
 ```python
-pe = PatchEngine(nside, j, cross=True, backend="gpu", device=0, cache=800, cache_bytes=None)
+pe = PatchEngine(nside, j, cross=True, backend="gpu", device=0, cache=800, reserve_bytes=None, cache_bytes=None)
 # same select / gather / forward / vjp / forward_cross / vjp_cross / native_pixels
 values, var = pe.forward_device(x)    # x: contiguous float64 CUDA tensor on the engine's device,
                                       # the selected patches concatenated (cross: [2, n_i] flattened)
@@ -148,9 +148,11 @@ Same definitions and plan as the CPU engine (`stl_gpu::disc::GpuDiscEngine`, C A
   (the bound stencils of `stl_gpu::geometry`, renormalised as on the CPU), once for the support
   rows and once for the core rows (the second wavelets are only read on the core); the restricted
   decimations come from the host support (`stl_core::disc::DiscSupport`, built on `threads` host
-  threads, the last `cache` kept). The device geometries are kept within `cache_bytes` (default:
-  half the free device memory at creation), least recently used out first; the discs of the
-  current batch always stay.
+  threads, the last `cache` kept). The device geometries are cached, least recently used out first:
+  before a disc is built, discs are evicted until the device keeps `reserve_bytes` (2 GiB) free
+  beyond it, the free memory being read at that time (a network allocating on the same GPU is
+  accounted for); `cache_bytes` optionally caps the cache. The discs of the current batch always
+  stay.
 - The term sums run in one launch per level for every (coefficient, patch), the cotangents in
   one launch per level for every (operand row, patch, core pixel), contributions in plan order.
 - `forward_device` / `vjp_device` read the patches from and write the gradient to device memory
