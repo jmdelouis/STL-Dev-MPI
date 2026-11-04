@@ -1,0 +1,101 @@
+%======================================================================
+\section{Coarse-to-fine starts with conditional details (preliminary)}
+\label{app:c2f}
+
+This appendix describes a start for the syntheses that cuts the number of L-BFGS iterations several-fold on planar turbulence. It is written so that it can be reimplemented without the code. It was tested on the planar engine of STL-Dev-MPI and, more briefly, on the sphere (Sect.~\ref{app:c2f_healpix}). The details, the scripts and all the raw numbers are in \texttt{docs/lagrangian\_synthesis.md} of the repository.
+
+\subsection{Why the syntheses are slow}
+
+The test case is the planar example of STL-Dev: ten $256\times256$ images of two-dimensional turbulence (the first ten maps of \texttt{Turb\_6}), $J=6$, $L=4$, double precision, ten images synthesised together, periodic boundaries. The ensemble objective (scattering covariance, power spectrum and Minkowski functionals, batch means and variances compared with the scatter of the targets, Sect.~\ref{sec:ensembles}) is minimised by L-BFGS on the pixels. From white noise it stalls: after 1000 iterations the loss is 54.7, against 1.3 when the first 100 iterations use the simpler loss of STL-Dev (\texttt{--warm 100}). The residuals of the coefficients along the run show what L-BFGS is doing during those iterations. The images keep too much power at the small scales ($S_2$ at $j=0$ too high by 78\% after 1000 iterations, 27 times too high after 30) and too little at the large scales (the first bin of the spectrum 70\% short). The structures (voids, ridges, filaments) never form. The variance has to move from the small scales to the large ones, and in the Euclidean geometry of the pixel values this takes many small steps. In the ensemble loss the large-scale coefficients also weigh little, since their target scatter is large.
+
+A first idea was to deform the field instead of changing its pixels (a Lagrangian synthesis, $x = x_0\circ\phi$ with a smooth displacement $\phi$, \citealt{zeldovich1970}). It fails here, for three reasons:
+\begin{enumerate}
+\item A smooth displacement of a white field stays white at every scale larger than the displacement's own, so it cannot build large-scale power.
+\item The loss is only continuous, not differentiable, in the displacement when the warp interpolates bilinearly, which defeats the L-BFGS line search.
+\item Imposing the target histogram during the run breaks the multi-scale statistics.
+\end{enumerate}
+All the deformation variants we tried were 2 to 10 times slower than pixel L-BFGS. What works is to build the large scales first, and to place the new small scales where they belong.
+
+\subsection{The method}
+
+Let the image side be $N$ and the levels $n_0 < n_1 < \dots < n_K = N$, with $n_{k+1} = 2n_k$ (for example $32, 64, 128, 256$). Define, for a periodic $n\times n$ image, the Fourier resampling $R_{n\to m}$: compute the discrete Fourier transform, keep the modes with $|k_r|, |k_c| \le \min(n,m)/2 - 1$ (the Nyquist rows of the smaller grid are dropped), and invert on the $m\times m$ grid with the factor $(m/n)^2$, so that pixel means are kept. For $m<n$ it is an ideal low-pass and decimation; for $m>n$ it is band-limited interpolation, and $R_{2n\to n}R_{n\to 2n}$ is the identity.
+
+\emph{Targets per level.} The targets of level $k$ are $t_k = R_{N\to n_k}\,t$; each level has its own loss, the same objective with $J=\log_2 n_k - 2$ scales and its own standardisation.
+
+\emph{Coarsest level.} The images of level 0 are synthesised as usual, by L-BFGS on the pixels from white noise (here 100 iterations of STL-Dev's loss, then 300 of the ensemble loss). At $32\times32$ an evaluation costs $1/64$ of one at $256\times256$.
+
+\emph{From level $k$ to $k+1$.} Let $x_k$ be the synthesis of level $k$ and $u = R_{n_k\to n_{k+1}}x_k$ its upsampling. The detail is drawn conditionally on the coarse field in three steps:
+\begin{enumerate}
+\item The targets give, for every pixel $p$ of level $k+1$, a coarse field $c = R_{n_k\to n_{k+1}}t_k$, its detail $\delta_t = t_{k+1} - c$, and two features of the coarse field: the value $c(p)$ and the modulus of its centred gradient, $|\nabla c|(p) = |(c_{r+1}-c_{r-1},\,c_{c+1}-c_{c-1})|$.
+\item Each feature is cut into $q$ quantile bins over all the target pixels (here $q=8$), which gives $q^2$ joint bins and, in every bin $b$, the pool of the target details $\{\delta_t(p) : b(p) = b\}$.
+\item For the synthesis, the bin of each pixel is computed from the features of $u$ with the targets' bin edges, and its detail $\delta(p)$ is drawn uniformly from the pool of that bin (from all target details if the bin is empty).
+\end{enumerate}
+The start of level $k+1$ is $u + \delta$, standardised, and L-BFGS on the pixels follows (here 200 iterations at 64 and 128, then the final count at 256).
+
+\emph{Cost.} An evaluation at level $k$ costs about $(n_k/N)^2$ of one at full resolution. The cost of the chain, in equivalent full-resolution evaluations, is therefore $\sum_k E_k (n_k/N)^2$, with $E_k$ the evaluations of level $k$.
+
+\emph{What the draw does.} It samples the details from their empirical law conditional on two local features of the coarse field: the details are large where the coarse field is bright or steep, on the edges of voids and along the ridges, and small inside smooth regions. This is a crude, non-learned approximation of the conditional laws $p(\delta_k\mid x_{k+1})$ of wavelet renormalisation models \citep{marchand2022,kadkhodaie2023}, and of the heteroscedastic small scales of multiplicative cascades \citep{mandelbrot1974}. Within a bin the draws are independent from pixel to pixel; the spatial correlations of the details, their orientation and their phase alignment with the coarse structures are left to L-BFGS at that level. Each level starts close to its solution, because the structures of the coarser levels are already in place and the new details already have the right amplitude where they should.
+
+\subsection{Results on planar turbulence}
+
+\begin{table}
+\caption{Ensemble loss of the planar example ($10\times256^2$, $L=4$): equivalent $256^2$ evaluations to reach the final loss of pixel L-BFGS with \texttt{--warm 100} (1.29), final loss and total cost.}
+\label{tab:c2f}
+\centering
+\begin{tabular}{lccc}
+\hline\hline
+start & to 1.29 & final loss & total \\
+\hline
+white noise, pixel L-BFGS & -- & 54.7 & 1043 \\
+\texttt{--warm 100}, pixel L-BFGS & 731 & 1.29 & 731 \\
+coarse-to-fine, white details & 128 & 0.41 & 499 \\
+coarse-to-fine, conditional details & 110 & 0.25 & 491 \\
+\hline
+\end{tabular}
+\tablefoot{Final level: 400 iterations. The white details have the rms of the targets' details at each level. One T4: the conditional chain takes 311\,s (101\,s for the levels 32 to 128), the warm pixel run about 7\,min. Values of the Rust implementation, seed 26; a prototype in Python gave 111 and 0.32.}
+\end{table}
+
+Table~\ref{tab:c2f} compares the starts.
+\begin{itemize}
+\item The conditional coarse-to-fine chain reaches the final loss of the warm pixel run after the equivalent of 110 full-resolution evaluations instead of 731, about 6.6 times sooner, and ends lower (0.25 against 1.29) for a smaller total.
+\item The conditional details do better than white details of the same rms, with a 1.6 times lower final loss.
+\item At the start of the last level the loss is already 8.1, and voids and ridges are in place from its first evaluation.
+\end{itemize}
+With 1000 iterations at the last level, the gap stays: the conditional chain ends at 0.114 after 1111 equivalent evaluations (595\,s), the warm pixel run with 1000 iterations at 0.737 after 1299 (620\,s). At equal cost the chain is 6 to 8 times lower all along: 0.57 against 4.8 after 200 equivalent evaluations, 0.21 against 1.53 after 600, 0.12 against 0.86 after 1000. It passes the final loss of the 1000-iteration pixel run after about 200 equivalent evaluations.
+
+The syntheses are not copies of the targets. The correlation of each synthesis with each target, maximised over periodic translations, averages 0.38 (at most 0.46); the same measure between the targets themselves averages 0.47 (at most 0.58). Two syntheses have a zero-shift correlation of 0.07 (at most 0.17), and a second seed gives new images (0.09, at most 0.27, with the first). The values are the same at every level (Fig.~\ref{fig:c2f}).
+
+\begin{figure}
+\centering
+\figfile{figures/c2f_turb.png}{\columnwidth}
+\caption{Coarse-to-fine synthesis with conditional details of the planar turbulence (top, four of the ten images) and four targets (bottom), on the same colour scale.}
+\label{fig:c2f}
+\end{figure}
+
+\subsection{Implementation and use}
+
+In STL-Dev-MPI the chain is an option of the planar synthesis, on the CPU and GPU engines:
+\begin{verbatim}
+stl-synth2d --target Turb_6.npy --mode ensemble --gpu \
+  --c2f 32,64,128 --c2f-iter 300,200,200 \
+  --warm 100 --niter 400 --out run
+\end{verbatim}
+\texttt{--c2f} lists the coarse levels (the image side is implied), \texttt{--c2f-iter} their iteration counts, \texttt{--warm} applies to the coarsest level, \texttt{--c2f-detail white} replaces the conditional draw, and \texttt{--c2f-bins} sets $q$. The draws are reproducible from \texttt{--seed}, and the maps of every level are written next to the final ones. The tests check that every drawn detail comes from the pool of its own bin, with the target's conditional mean, and that the draws are deterministic.
+
+\subsection{On the sphere}
+\label{app:c2f_healpix}
+
+On HEALPix the chain is driven by successive runs of \texttt{stl-synth}, each started from the synthesis of the nside below (\texttt{--init}), whose values are copied on the four children of every pixel, with \texttt{--init-noise conditional}.
+\begin{itemize}
+\item \emph{The bins.} The detail of a child is drawn from the target's details (a pixel minus the mean of its parent) in the same joint bin of two features of the parent: its value and its local variation $\big(\frac{1}{8}\sum_{q}(x_q-x_p)^2\big)^{1/2}$ over its eight neighbours, the sphere's form of the gradient modulus.
+\item \emph{Independence from the ranks.} The bin edges and the histograms of the details per bin (4096 cells each) are reduced over all the ranks, and the draw of a pixel depends only on the seed and its NESTED index, so the result does not depend on the number of ranks.
+\end{itemize}
+
+On the convergence map r000 of \citet{takahashi2017} at $\nside=128$ (single-map loss of \texttt{stl-synth}, $L=4$, one T4), the chain $32\to64\to128$ (300, 200 and 1000 iterations) starts the last level at a loss of $9.4\times10^{-4}$, against $1.9\times10^{-2}$ with white details. At the same cost it is ahead of pixel L-BFGS from white noise, with losses 2.6 and 2 times lower after 200 and 400 equivalent evaluations. All the runs end on the same floor ($6$--$8\times10^{-8}$), because this single-map loss has no slow phase from white noise. The syntheses from white noise, directly or with white details, keep a pixel-scale checkerboard that the target does not have, and the conditional one does not (Fig.~\ref{fig:c2f_kappa}). The ensemble objective with several references (Sect.~\ref{sec:ensembles}), whose slow convergence motivated the method, has not been tested yet.
+
+\begin{figure*}
+\centering
+\figfile{figures/c2f_kappa128.png}{\textwidth}
+\caption{Gnomonic views (centre $(30^\circ, 30^\circ)$, histogram-equalised colours on one scale) of the convergence map r000 at $\nside=128$ and of three syntheses after 1000 iterations at that nside: pixel L-BFGS from white noise, and the coarse-to-fine chain with white and with conditional details.}
+\label{fig:c2f_kappa}
+\end{figure*}
