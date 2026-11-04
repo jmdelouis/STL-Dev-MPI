@@ -85,5 +85,5 @@ fn harmonic_upsampling_keeps_low_multipoles() {
     let up = stl_cli::conditional::upsample(&f(8), 8, 16);
     let want = f(16);
     let err = up.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-    assert!(err < 1e-3, "max error {err}");
+    assert!(err < 1e-7, "max error {err}");
 }

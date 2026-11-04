@@ -190,11 +190,22 @@ impl Conditional {
     }
 }
 
+/// Jacobi iterations of the analysis in [`upsample`] (the pixel sum alone
+/// leaks 40 % of a dipole into high l at `lmax = 2 nside`; 10 iterations
+/// bring it to 1e-9).
+const ANALYSIS_ITERATIONS: usize = 10;
+
 /// Harmonic upsampling of a NESTED map from `nside_c` to `nside`: its
-/// `a_lm` up to `l = 2 nside_c` (analysis at `nside_c`) synthesised at `nside`.
+/// `a_lm` up to `l = 2 nside_c` (iterated analysis at `nside_c`) synthesised at `nside`.
 pub fn upsample(coarse: &[f64], nside_c: usize, nside: usize) -> Vec<f64> {
     let lmax = 2 * nside_c;
-    let alm = stl_core::sht::Sht::new(nside_c, lmax).analysis(coarse);
+    let sht = stl_core::sht::Sht::new(nside_c, lmax);
+    let mut alm = sht.analysis(coarse);
+    for _ in 0..ANALYSIS_ITERATIONS {
+        let back = sht.synthesis(&alm);
+        let residual: Vec<f64> = coarse.iter().zip(&back).map(|(x, y)| x - y).collect();
+        alm.iter_mut().zip(sht.analysis(&residual)).for_each(|(a, d)| *a += d);
+    }
     stl_core::sht::Sht::new(nside, lmax).synthesis(&alm)
 }
 
