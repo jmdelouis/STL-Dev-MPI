@@ -696,4 +696,81 @@ Results:
 - The conditional draw starts the nside-128 level at 9.4e-4, against 1.9e-2 with white details. It is ahead of pixel L-BFGS from 200 to 600 equivalent evaluations (2.6 and 2 times lower at 200 and 400).
 - All three end on the same floor (6–8e-8). This single-map loss has no slow phase from white noise (4.5e-2 to 7.7e-6 in 100 evaluations), unlike the planar ensemble loss.
 - Visually (`hpcmp_maps.png`, gnomonic views with `norm='hist'`, one scale), the pixel and white-detail syntheses keep a pixel-scale checkerboard that the target does not have; the conditional one does not.
-- The case that motivated the method, the ensemble objective of `stl-ensemble` (2500 iterations at nside 1024), has not been tested yet: its `--init` works on the Gaussianised field `g`.
+- The ensemble objective of `stl-ensemble` is tested in 6.7.
+
+### 6.7 HEALPix ensemble: `stl-ensemble --init-noise conditional` (Takahashi r000-r009, nside 128)
+
+`stl-ensemble run --init C_m{m}_..._nested.npy --init-noise conditional` takes the members of a coarser run, puts them on the children and adds details drawn from the ten references (`Conditional::pooled`: the parents and details of all references pooled, bins of the parent's value and local variation, 8 x 8 bins). Calibrations at nside 32, 64 and 128 from the same ten maps (`--ps-variance-upper` 95, 191, 383). Chain: 32 (300 iterations from the default Gaussian fields) → 64 (200) → 128 (600); reference: the default start at 128 (600 iterations). Ten members, one T4 per run. Data in `benchmarks/lagrangian/ensemble128/`.
+
+Where the draw is made matters:
+
+| variant (`--init-space`, `--init-upsample`) | first loss at nside 64 | first loss at nside 128 |
+|---|---|---|
+| physical κ, children copied | 116 | 2718 |
+| physical κ, harmonic upsampling (a_lm up to 2 nside_c, iterated analysis) | 4243 | 26485 |
+| g, children copied (default) | **11.4** | 68 (21 after the g chain) |
+| g, harmonic upsampling | 226 | 80 |
+| default Gaussian fields of the calibration's C_l | – | 61.8 |
+
+- κ is very skewed: the details drawn in κ and Gaussianised afterwards give a g field with wrong statistics (the SC term of g alone is 13 300 at the first nside-128 evaluation). The smooth upsampling overshoots around the peaks and is worse. In g (the optimised variable), with the coarse g matched to the histogram of the references' parent means in g, the start is sound.
+- The harmonic upsampling needs an iterated analysis: the HEALPix pixel sum leaks 40 % of a dipole into high l at `lmax = 2 nside`; 10 Jacobi iterations bring it to 1e-9 (`conditional::upsample`).
+
+Loss at equal cost (equivalent nside-128 evaluations, `evals (n / 128)^2`; the coarse levels cost 86):
+
+| equivalent evaluations | 100 | 200 | 300 | 400 | 500 | 600 | 700 |
+|---|---|---|---|---|---|---|---|
+| default start | 8.22 | 6.32 | 5.47 | 4.73 | 4.07 | 3.32 | 2.91 |
+| chain, conditional in g | 17.8 | 8.15 | 5.67 | 4.66 | 4.12 | 3.50 | 3.06 |
+| chain, conditional in κ | 358 | 146 | 95.9 | 86.2 | 76.3 | 66.1 | 55.9 |
+
+Verdict: on the ensemble objective the coarse-to-fine start does not pay. In g it starts 3 times lower than the default start (21 against 61.8) but the default start falls below it within 100 evaluations and the two curves are level from 400 on. The default start is already a Gaussian random field with the references' C_l, which is the right answer in g up to the higher-order terms; the planar gain came from a white-noise start. The slow phase of the 2500-iteration runs is not in the first hundreds of evaluations, which is where a better start helps.
+
+### 6.8 2D transport step (scheme P) and the transport metric, bicubic and local
+
+Code (`stl_core::planar::transport`, local operators only so that it can move to the HEALPix tangent-plane stencil): `bicubic` (Keys `a = -1/2`, a 4 x 4 stencil, C1 in the displacement, exact VJP and derivative in `u`, finite-difference tests), `gradient` (centred, the derivative of `bicubic` at `u = 0`), `Smoother` `K = sum_l w_l 4^l (D^T)^l D^l` with `D` the stride-2 filter `[1 3 3 1] / 8` per axis (symmetric positive, `K 1 = (sum w_l) 1`, 6 levels, `w_l = 1`). `stl-synth2d`:
+
+- `--transport`: scheme P on the current images, `x <- x(p + tau v)`, `v = -K(g grad x)` with `g` the pixel gradient of the loss, Armijo backtracking on `tau` (doubled after each accepted step, displacement capped at 2 pixels);
+- `--transport-precond S2`: pixel L-BFGS with `H0 = P = S2 I + grad x K grad x^T` (the transport step linearised), frozen and rebuilt every 20 iterations (`--transport-refresh`; the L-BFGS memory restarts with it).
+
+Planar example as in 6.4 (10 x 256^2 Turb_6, ensemble loss, T4), `--warm 100` before every run except after `--c2f`:
+
+| equivalent evaluations | 200 | 400 | 600 | 800 | 1000 | 1200 | final (evaluations) |
+|---|---|---|---|---|---|---|---|
+| pixel L-BFGS (6.4) | 4.77 | 2.21 | 1.53 | 1.12 | 0.855 | 0.772 | 0.737 (1299) |
+| `--c2f` then L-BFGS (6.4) | 0.573 | 0.314 | 0.210 | 0.154 | 0.125 | 0.114 | 0.114 (1110) |
+| transport, scheme P | 14.6 | 10.1 | 8.65 | 7.58 | 6.96 | 6.72 | 6.72 (1111) |
+| `--c2f` then transport | 3.64 | 2.75 | 2.47 | 2.33 | 2.24 | 2.21 | 2.21 (1069) |
+| L-BFGS, metric P, S2 = 0.1 | 5.80 | 2.53 | 1.89 | 1.74 | 1.71 | 1.69 | 1.68 (1258) |
+| L-BFGS, metric P, S2 = 1 | 5.51 | 1.72 | 1.33 | 1.20 | 1.13 | 1.11 | 1.11 (1228) |
+| L-BFGS, metric P, S2 = 10 | 5.21 | 1.64 | 1.30 | 1.17 | 1.09 | 1.06 | 1.06 (1212) || L-BFGS, metric P, S2 = 1e6 (control: identity, same restarts) | 4.93 | 1.61 | 1.29 | 1.15 | 1.12 | 1.10 | 1.09 (1239) |
+
+Diversity (maximum over translations of the correlation, mean of the per-image maxima / max; targets with each other 0.47 / 0.58), and maps in `benchmarks/lagrangian/transport2d/transport2d.png` (image 0, one colour scale):
+
+| run | with the targets | between syntheses |
+|---|---|---|
+| pixel L-BFGS (control above) | 0.28 / 0.38 | 0.31 / 0.34 |
+| transport, scheme P | 0.28 / 0.38 | 0.31 / 0.34 |
+| `--c2f` then transport | 0.27 / 0.32 | 0.24 / 0.25 |
+| metric P, S2 = 10 | 0.28 / 0.38 | 0.31 / 0.34 |
+
+Verdict: negative.
+
+- The transport step on the current image (scheme P) is 9 times above pixel L-BFGS at equal cost (6.72 against 0.772 at 1200 evaluations). A smooth displacement only rearranges the values of the warm-started image: the image barely moves (maps and correlations identical to pixel L-BFGS), and the remaining error is in the values, which transport cannot change. After `--c2f` it moves the structures (correlation between syntheses 0.24 instead of 0.31) but undoes the c2f gain (2.21 against 0.114).
+- The transport metric as a preconditioner does nothing: the control with `S2 = 1e6` (P close to the identity, the same L-BFGS restarts every 20 iterations) gives the same curve as `S2 = 1` and 10. The early lead over pixel L-BFGS (1.6 against 2.2 at 400) and the final deficit (1.1 against 0.74) both come from the restarts, not from the metric.
+
+### 6.9 2D band-wise homotopy after MGD (Lempereur et al., arXiv 2602.17211)
+
+`stl-synth2d --homotopy K`: moving targets `I_t = sum_j cos(a_j(t)) Z_j + sin(a_j(t)) X_j` over the pyramid bands (`transport::bands`, 6 levels of `(4 D^T)^j D^j`, local), `Z` the initial white-noise images, `X` the targets (image `k` with target `k`), `a_j` a ramp from 0 to pi/2 over a width `w` of [0, 1], the coarsest band first. At each instant `t_k = k / K` the targets are replaced (`PlanarObjective::retarget`, the normalisation of the true targets kept), the images follow by `--homotopy-iter` warm-started L-BFGS iterations, then noise `sqrt(2 / K) sigma`. Then 900 L-BFGS iterations on the true targets. Same example as 6.8.
+
+| run | homotopy evaluations | loss at t = 1 (true targets) | 600 | 800 | 1000 | 1200 | final (evaluations) |
+|---|---|---|---|---|---|---|---|
+| K = 20, 10 iterations, w = 0.5 | 240 | 2515 | 158 | 88.5 | 57.4 | 43.5 | 43.5 (1185) |
+| K = 20, 10 iterations, w = 0.15 (sharp) | 240 | 8219 | 158 | 87.2 | 58.3 | 43.3 | 43.3 (1184) |
+| K = 20, 10 iterations, w = 0.5, sigma = 0.1 | 240 | 2824 | 159 | 89.2 | 58.3 | 41.8 | 41.8 (1197) |
+| K = 40, 5 iterations, w = 0.5 | 241 | 90534 | 190 | 108 | 69.3 | 50.3 | 50.3 (1171) |
+| pixel L-BFGS `--warm 100` (6.4) | – | – | 1.53 | 1.12 | 0.855 | 0.772 | 0.737 (1299) |
+
+Diversity: 0.12 / 0.16 with the targets, 0.12 / 0.15 between syntheses (`homotopy 20x10`); the maps have lost the large-scale structure.
+
+Verdict: negative as configured. The tracking error grows all along the path (loss against the moving targets 0.04 at the first instant, 66 at t = 0.5, 2515 at t = 1): ten L-BFGS iterations per instant do not follow the targets once the fine bands enter, and the end of the path is no better than a cold start (the final L-BFGS stalls at 42-50, the slow phase of 6.1). MGD uses a Gauss-Newton drift on the moments; a few memoryless L-BFGS iterations are not a substitute. Tracking properly would need many more iterations per instant, at a cost above the whole pixel run.
+
