@@ -91,7 +91,33 @@ On HEALPix the chain is driven by successive runs of \texttt{stl-synth}, each st
 \item \emph{Independence from the ranks.} The bin edges and the histograms of the details per bin (4096 cells each) are reduced over all the ranks, and the draw of a pixel depends only on the seed and its NESTED index, so the result does not depend on the number of ranks.
 \end{itemize}
 
-On the convergence map r000 of \citet{takahashi2017} at $\nside=128$ (single-map loss of \texttt{stl-synth}, $L=4$, one T4), the chain $32\to64\to128$ (300, 200 and 1000 iterations) starts the last level at a loss of $9.4\times10^{-4}$, against $1.9\times10^{-2}$ with white details. At the same cost it is ahead of pixel L-BFGS from white noise, with losses 2.6 and 2 times lower after 200 and 400 equivalent evaluations. All the runs end on the same floor ($6$--$8\times10^{-8}$), because this single-map loss has no slow phase from white noise. The syntheses from white noise, directly or with white details, keep a pixel-scale checkerboard that the target does not have, and the conditional one does not (Fig.~\ref{fig:c2f_kappa}). The ensemble objective with several references (Sect.~\ref{sec:ensembles}), whose slow convergence motivated the method, has not been tested yet.
+On the convergence map r000 of \citet{takahashi2017} at $\nside=128$ (single-map loss of \texttt{stl-synth}, $L=4$, one T4), the chain $32\to64\to128$ (300, 200 and 1000 iterations) starts the last level at a loss of $9.4\times10^{-4}$, against $1.9\times10^{-2}$ with white details. At the same cost it is ahead of pixel L-BFGS from white noise, with losses 2.6 and 2 times lower after 200 and 400 equivalent evaluations. All the runs end on the same floor ($6$--$8\times10^{-8}$), because this single-map loss has no slow phase from white noise. The syntheses from white noise, directly or with white details, keep a pixel-scale checkerboard that the target does not have, and the conditional one does not (Fig.~\ref{fig:c2f_kappa}). The ensemble objective with several references (Sect.~\ref{sec:ensembles}), whose slow convergence motivated the method, is tested below.
+
+\paragraph{Ensemble objective.} \texttt{stl-ensemble run --init-noise conditional} takes the ten members of a coarser run, puts them on the children and adds details drawn from the ten references, whose parents and details are pooled. With the calibrations at $\nside=32$, 64 and 128 of the ten Takahashi maps, the chain $32\to64\to128$ (300, 200 and 600 iterations) is compared with the default start at 128, Gaussian random fields with the references' mean $C_\ell$ (Fig.~\ref{fig:c2f_tests}, left). Where the draw is made matters:
+\begin{itemize}
+\item Drawn on $\kappa$ and Gaussianised afterwards, the details give a field $g$ with wrong statistics. The chain starts the last level at 2718, against 61.8 for the default start, and stays far above it (55.9 against 2.91 after 700 equivalent evaluations).
+\item Drawn on $g$, the optimised variable, with the coarse $g$ matched to the histogram of the references' parent means, the chain starts the last level at 21. At equal cost it is still behind the default start up to about 400 equivalent evaluations, then level with it: 4.12 against 4.07 at 500, 3.06 against 2.91 at 700.
+\end{itemize}
+The method therefore does not pay on the ensemble objective. Its default start is already a Gaussian field with the right $C_\ell$, close to the answer in $g$, whereas the planar gain came from a white-noise start. The slow phase of the long runs lies beyond the first hundreds of evaluations, where a better start helps.
+
+\subsection{Two negative tests in the plane}
+\label{app:c2f_negative}
+
+Two other ideas were tested on the same planar example and found worse than pixel L-BFGS at equal cost (Fig.~\ref{fig:c2f_tests}, right). Both use only local operators, so that they would carry over to HEALPix.
+\begin{itemize}
+\item \emph{Transport of the current image.} The step $x\leftarrow x\circ(\mathrm{id}+\tau v)$, with $v=-K(\partial_x\mathcal{L}\,\nabla x)$, uses a bicubic (Keys) interpolation and a multi-scale smoothing $K=\sum_\ell 4^\ell (D^\top)^\ell D^\ell$ built on a local $[1\,3\,3\,1]/8$ pyramid. It reaches 6.7 after 1200 evaluations, against 0.77 for pixel L-BFGS. A smooth displacement only rearranges the values of the image, and the remaining error is in the values.
+\item \emph{Transport metric as a preconditioner.} Using the same metric as the initial inverse Hessian of L-BFGS, $P=\sigma^2 I+\nabla x\,K\,\nabla x^\top$, gives the same curve as a control with $P\approx I$: the metric itself does nothing.
+\item \emph{Band-wise homotopy.} Inspired by MGD \citep{lempereur2026}, the targets move along $I_t=\sum_j \cos a_j(t)\,Z_j+\sin a_j(t)\,X_j$ over the pyramid bands, large scales first. The images follow with ten L-BFGS iterations at each of twenty instants. The tracking error grows from 0.04 to 2515 by $t=1$, the end of the path is no better than a cold start, and the final loss stalls at 42--50.
+\end{itemize}
+The tracking would need many more iterations per instant than the whole pixel run costs.
+
+\begin{figure*}
+\centering
+\figfile{figures/c2f_tests.png}{\textwidth}
+\caption{Left: ensemble objective on the ten Takahashi maps at $\nside=128$, the default start against the chain $32\to64\to128$ with conditional details drawn on $g$ or on $\kappa$. The pale segments are the coarse levels, whose losses belong to other calibrations; the cost is counted in nside-128 evaluations. Right: planar turbulence, pixel L-BFGS and coarse-to-fine (Table~\ref{tab:c2f}) against the transport step, the transport metric, the control with restarts only, and the band-wise homotopy.}
+\label{fig:c2f_tests}
+\end{figure*}
+
 
 \begin{figure*}
 \centering
