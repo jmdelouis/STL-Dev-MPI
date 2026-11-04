@@ -363,7 +363,7 @@ in `plots/scripts/`.
 
 | Figure | What it shows |
 |---|---|
-| `maps_mollweide_n1024`, `maps_gnomonic_n1024` | r000-r002 and members 0-2 of each ensemble, one logarithmic colour scale; zooms of 10 degrees on one patch |
+| `maps_mollweide_n1024`, `maps_gnomonic_n1024` | r000-r002 and members 0-2 of each ensemble; zooms of 10 degrees on one patch.  Colours histogram-equalised (healpy's `norm='hist'`) with one mapping for all panels: the min and max of r000, and the equalisation on the distribution of r000 |
 | `mf_populations_n1024` | V0, V1, V2 against the threshold at nside 64 to 1024 (4-children means), mean +- std of each population, and the residual (mean - mean of the target) / std of the target |
 | `cl_populations_n1024` | l(l+1) C_l / 2 pi in 40 logarithmic bands, and the same residuals |
 | `sc_populations_n1024` | S1(j), S2(j), and S3, S4 reduced (real part averaged over the orientations, divided by the S2 of the scales of the moduli); maps standardised by r000; the same residuals |

@@ -12,7 +12,9 @@ type C64 = Complex64;
 
 /// Unnormalised complex 2D FFT of `[H, W]` arrays.
 pub struct Fft2 {
+    /// Number of rows `H`.
     pub h: usize,
+    /// Number of columns `W`.
     pub w: usize,
     rows: [Arc<dyn Fft<f64>>; 2],
     cols: [Arc<dyn Fft<f64>>; 2],
@@ -28,6 +30,7 @@ pub fn integer_frequency(k: usize, n: usize) -> i64 {
 }
 
 impl Fft2 {
+    /// Plans the forward and inverse transforms of `h x w` arrays.
     pub fn new(h: usize, w: usize) -> Self {
         let mut p = FftPlanner::new();
         Fft2 { h, w, rows: [p.plan_fft_forward(w), p.plan_fft_inverse(w)], cols: [p.plan_fft_forward(h), p.plan_fft_inverse(h)] }
@@ -184,7 +187,9 @@ fn chunks<T: Send>(n: usize, f: impl Fn(usize, usize) -> T + Sync) -> Vec<T> {
 /// weights of a pixel are computed when needed, for the bins within
 /// `CUT` widths.
 pub struct GaussianRings {
+    /// 2D FFT of the grid.
     pub fft: Fft2,
+    /// Number of radial bins.
     pub n_bins: usize,
     /// Bin centres (cycles per pixel).
     pub centers: Vec<f64>,

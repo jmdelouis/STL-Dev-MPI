@@ -22,7 +22,9 @@ use std::f64::consts::PI;
 /// `g`, output row `k` and stencil tap `p`.  Positions index the grid.
 #[derive(Clone, Debug)]
 pub struct ConvGeometry {
+    /// `nside` of the level the rows and grid belong to.
     pub nside: i64,
+    /// Stencil side in taps (`kernel_sz x kernel_sz` stencil).
     pub kernel_sz: usize,
     /// Number of gauges (orientations), `G`.
     pub g: usize,
@@ -32,7 +34,9 @@ pub struct ConvGeometry {
     pub n_in: usize,
     /// Number of stencil taps, `P = kernel_sz^2`.
     pub p: usize,
+    /// Grid position read by each entry (layout above).
     pub pos: Vec<u32>,
+    /// Bilinear weight of each entry, renormalised over the reads found in the grid.
     pub w: Vec<f64>,
     /// `complete[k]`: every read of row `k` (all taps, gauges and bilinear
     /// neighbours) is inside the grid, so its row equals the full-sky one.
@@ -109,6 +113,7 @@ impl ConvGeometry {
         ConvGeometry { nside, kernel_sz, g: gg, k: kk, n_in: grid.len(), p: pp, pos, w: wout, complete }
     }
 
+    /// Flat index of entry `(n, g, k, p)` in `pos` / `w`.
     #[inline]
     pub fn at(&self, n: usize, g: usize, k: usize, p: usize) -> usize {
         ((n * self.g + g) * self.k + k) * self.p + p
@@ -124,10 +129,15 @@ impl ConvGeometry {
 /// `HealPixConv.set_kernel` so that results match the library.
 #[derive(Clone, Debug)]
 pub struct Kernel {
+    /// Number of gauges `G`.
     pub g: usize,
+    /// Number of input channels `C_in`.
     pub c_in: usize,
+    /// Number of output channels `C_out`.
     pub c_out: usize,
+    /// Number of stencil taps `P`.
     pub p: usize,
+    /// Weights `[G, C_in, C_out, P]`, row-major.
     pub w: Vec<f64>,
 }
 
@@ -140,6 +150,7 @@ impl Kernel {
         Kernel { g, c_in, c_out, p, w }
     }
 
+    /// Weight of gauge `g`, input channel `c`, output channel `o`, tap `p`.
     #[inline]
     pub fn at(&self, g: usize, c: usize, o: usize, p: usize) -> f64 {
         self.w[((g * self.c_in + c) * self.c_out + o) * self.p + p]
@@ -267,11 +278,31 @@ fn forward_into(
 /// recomputing it).  Both give the same forward values; the adjoint adds
 /// the sub-blocks in turn, which may change the last bits.
 pub enum ConvPlan {
+    /// Geometry bound once for all output rows.
     Whole(ConvGeometry),
-    Chunked { grid: Vec<i64>, rows: Vec<i64>, chunk: usize, nside: i64, kernel_sz: usize, g: usize, gauge: Gauge },
+    /// Geometry rebuilt by sub-blocks of `chunk` rows from the stored grid,
+    /// rows and stencil parameters at every application.
+    Chunked {
+        /// Grid read (sorted NESTED ids).
+        grid: Vec<i64>,
+        /// Output rows (NESTED ids, in output order).
+        rows: Vec<i64>,
+        /// Output rows per sub-block.
+        chunk: usize,
+        /// `nside` of the level.
+        nside: i64,
+        /// Stencil side in taps.
+        kernel_sz: usize,
+        /// Number of gauges `G`.
+        g: usize,
+        /// Orientation convention.
+        gauge: Gauge,
+    },
 }
 
 impl ConvPlan {
+    /// Holds the whole geometry, or the `Chunked` form when `chunk` is
+    /// smaller than the number of `rows` (sub-blocks of at least one row).
     pub fn new(grid: &[i64], rows: &[i64], nside: i64, kernel_sz: usize, g: usize, gauge: Gauge, chunk: Option<usize>) -> Self {
         match chunk {
             Some(c) if c < rows.len() => ConvPlan::Chunked {
@@ -287,6 +318,7 @@ impl ConvPlan {
         }
     }
 
+    /// Number of output rows.
     pub fn n_rows(&self) -> usize {
         match self {
             ConvPlan::Whole(geo) => geo.k,
@@ -294,6 +326,7 @@ impl ConvPlan {
         }
     }
 
+    /// Number of grid cells (inputs).
     pub fn n_in(&self) -> usize {
         match self {
             ConvPlan::Whole(geo) => geo.n_in,

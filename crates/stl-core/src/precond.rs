@@ -7,7 +7,9 @@
 //! `j`) and `B_K = Pi_K` (the means of level `K`) are therefore orthogonal
 //! projectors summing to the identity, and
 //!
-//!     P = sum_j alpha_j B_j = alpha_0 I + sum_{j >= 1} (alpha_j - alpha_{j-1}) Pi_j
+//! ```text
+//! P = sum_j alpha_j B_j = alpha_0 I + sum_{j >= 1} (alpha_j - alpha_{j-1}) Pi_j
+//! ```
 //!
 //! is symmetric positive definite for any `alpha_j > 0`: L-BFGS uses it as
 //! its initial inverse Hessian `H0` (a change of metric), so that its
@@ -45,8 +47,11 @@ pub const CLAMP: f64 = 1e3;
 /// `P = sum_j alpha_j B_j` on rows whose length is a multiple of `4^depth`.
 #[derive(Clone, Debug)]
 pub struct Bands {
+    /// Number of levels `K` of the projectors (groups of `4^K` pixels).
     pub depth: usize,
+    /// Factors `alpha_0 .. alpha_K` (`K + 1` values).
     pub alpha: Vec<f64>,
+    /// How the factors are chosen.
     pub factors: BandFactors,
 }
 
@@ -87,6 +92,7 @@ impl Bands {
         (max_depth as f64 - r.max((max_depth - k) as f64)) as usize
     }
 
+    /// Power-law factors `alpha_j = 4^(gamma j)`.
     pub fn power_law(depth: usize, gamma: f64) -> Self {
         let alpha = (0..=depth).map(|j| 4f64.powf(gamma * j as f64)).collect();
         Bands { depth, alpha, factors: BandFactors::PowerLaw(gamma) }
@@ -104,6 +110,7 @@ impl Bands {
         Bands { depth, alpha, factors: BandFactors::TargetPower }
     }
 
+    /// Curvature factors ([`BandFactors::Curvature`]), all 1 initially.
     pub fn curvature(depth: usize) -> Self {
         Bands { depth, alpha: vec![1.0; depth + 1], factors: BandFactors::Curvature }
     }

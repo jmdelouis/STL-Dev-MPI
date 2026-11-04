@@ -1,0 +1,22 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.98s
+job 2747854: compute-114-15, GPU 0, 6 CPUs, niter 100, B 4, commit 9c52ff4
+0, NVIDIA A100-SXM4-80GB, 81920 MiB, 595.71.05
+=== rust_time 16:40:03: mpirun -np 1 --bind-to none /scratch/jmdeloui/stl-bench128/target/release/stl-synth --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --gpu --gpu-fields keep --gpu-terms device --gpu-cache full --out rust_time
+exit 0, 23 s wall
+[rust-local P=1] evaluation  116  loss = 2.166865e-6  t =    12.3 s
+{"evaluations":116,"loss_first":0.04500650385330326,"loss_last":2.1668651897568377e-6,"ranks":1,"seconds":12.32,"seconds_per_evaluation":0.106}
+=== rust_mem 16:40:26: mpirun -np 1 --bind-to none /scratch/jmdeloui/stl-bench128/target/release/stl-synth --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --gpu --gpu-fields recompute --gpu-cache none --gpu-block-rows 1024 --block-pixels 1024 --out rust_mem
+exit 0, 107 s wall
+[rust-local P=1] evaluation  116  loss = 2.381925e-6  t =   102.6 s
+{"evaluations":116,"loss_first":0.04500650385330323,"loss_last":2.381925224052697e-6,"ranks":1,"seconds":102.65,"seconds_per_evaluation":0.885}
+=== rust_cpu 16:42:13: mpirun -np 6 --bind-to core /scratch/jmdeloui/stl-bench128/target/release/stl-synth --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --L 4 --weights none --ensemble 4 --niter 100 --init init_m{m}.npy --init-units standardized --init-noise 0 --block-pixels 1024 --out rust_cpu
+exit 1, 0 s wall
+=== legacy_batch 16:42:14: /scratch/jmdeloui/stl-bench128/env/bin/python /scratch/jmdeloui/stl-bench128/src/tools/bench_n128/legacy_synth.py --stl-dev /scratch/jmdeloui/stl-bench128/py --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --init init_m{m}.npy --ensemble 4 --L 4 --niter 100 --mode batch --device cuda --threads 6 --out legacy_batch.json
+exit 0, 202 s wall
+[legacy-batch] evaluation  114  loss = 2.730526328272872e-06  t =   140.07 s
+{"code": "STL-Dev legacy (ST_Operator.apply + autograd)", "mode": "batch", "nside": 128, "J": 6, "L": 4, "ensemble": 4, "coefficients": 3970, "niter": 100, "evaluations": 114, "device": "cuda:0", "device_name": "NVIDIA A100-SXM4-80GB", "torch": "2.11.0+cu128", "threads": 6, "target": {"file": "/scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy", "mean": -5.063505170710414e-12, "std": 0.0003310177556423684}, "init": "init_m{m}.npy", "setup_seconds": 20.68, "seconds": 140.12, "seconds_per_evaluation": 1.2292, "cuda_max_allocated_bytes": 10117528064, "cuda_max_reserved_bytes": 19266535424, "rss_peak_bytes": 6381699072}
+=== legacy_sequential 16:45:36: /scratch/jmdeloui/stl-bench128/env/bin/python /scratch/jmdeloui/stl-bench128/src/tools/bench_n128/legacy_synth.py --stl-dev /scratch/jmdeloui/stl-bench128/py --target /scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy --init init_m{m}.npy --ensemble 4 --L 4 --niter 100 --mode sequential --device cuda --threads 6 --out legacy_sequential.json
+exit 0, 599 s wall
+[legacy-sequential] evaluation  114  loss = 2.455362900670765e-06  t =   538.38 s
+{"code": "STL-Dev legacy (ST_Operator.apply + autograd)", "mode": "sequential", "nside": 128, "J": 6, "L": 4, "ensemble": 4, "coefficients": 3970, "niter": 100, "evaluations": 114, "device": "cuda:0", "device_name": "NVIDIA A100-SXM4-80GB", "torch": "2.11.0+cu128", "threads": 6, "target": {"file": "/scratch/jmdeloui/stl-bench128/data/takahashi_r000_zs1_nside128_nested.npy", "mean": -5.063505170710414e-12, "std": 0.0003310177556423684}, "init": "init_m{m}.npy", "setup_seconds": 20.22, "seconds": 538.38, "seconds_per_evaluation": 4.7226, "cuda_max_allocated_bytes": 3985095680, "cuda_max_reserved_bytes": 11712593920, "rss_peak_bytes": 6350090240}
+done Mon Nov  2 04:55:35 PM CET 2026

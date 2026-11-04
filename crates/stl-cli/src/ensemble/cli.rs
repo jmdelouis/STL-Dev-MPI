@@ -17,6 +17,7 @@ use stl_mpi::io::{read_map, write_npy};
 use stl_mpi::synthesis::{run_lbfgs_with, Objective};
 use stl_mpi::Comm;
 
+/// Usage text of `stl-ensemble`, printed on `--help` and parse errors.
 pub const USAGE: &str = "\
 stl-ensemble calibrate --references MAP... --nside N --out CAL.json [options]
 stl-ensemble run --calibration CAL.json --niter N --out PREFIX [options]
@@ -63,38 +64,79 @@ both:
   --quiet
 ";
 
+/// Options of `stl-ensemble` (see [`USAGE`]).
 #[derive(Clone, Debug, Default)]
 pub struct Args {
+    /// The command: `calibrate` or `run`.
     pub command: String,
+    /// `--references`: reference maps (NESTED `.npy` / `.fits`), up to the
+    /// next option.
     pub references: Vec<PathBuf>,
+    /// `--nside`: nside of the synthesis (`calibrate`; the references are
+    /// block-averaged to it).
     pub nside: usize,
+    /// `--bootstrap-ids`: references whose mean is the target of the means
+    /// (default: all of them when there are as many as members, else a draw
+    /// with replacement).
     pub bootstrap_ids: Option<Vec<usize>>,
+    /// `--ensemble`: number of members `B` (default 10).
     pub ensemble: usize,
+    /// `--groups`: MPI groups of ranks sharing `B / G` members (default 1).
     pub groups: usize,
+    /// `--seed`: seed of the bootstrap draw (`calibrate`, default 20260914)
+    /// or of the initial Gaussian fields (`run`, default 61022026, `+ m` per
+    /// member).
     pub seed: Option<u64>,
+    /// `--knots`: LUT knots (default 8192).
     pub knots: usize,
+    /// `--calibration`: calibration JSON (`run`).
     pub calibration: Option<PathBuf>,
+    /// `--niter`: L-BFGS iterations.
     pub niter: usize,
+    /// `--max-eval`: L-BFGS evaluations (default `5 niter / 4`).
     pub max_eval: Option<usize>,
+    /// `--init`: Gaussian maps g of the members (`{m}` replaced by the
+    /// member); default Gaussian random fields of the calibration's C_l.
     pub init: Option<String>,
+    /// `--ps-variance-upper`: upper band centre of the C_l variance term
+    /// (default 383 at nside 128, required otherwise).
     pub ps_variance_upper: Option<f64>,
+    /// `--history-size`: L-BFGS history (default 10).
     pub history_size: usize,
+    /// `--checkpoint`: evaluations between checkpoints of the lowest loss so
+    /// far (0: none).
     pub checkpoint: usize,
+    /// `--out`: calibration JSON (`calibrate`) or output prefix (`run`).
     pub out: Option<String>,
+    /// `--block-pixels`: CPU engine block (default 16384).
     pub block_pixels: usize,
+    /// `--ranks`: thread ranks in builds without MPI (default 1).
     pub ranks: usize,
+    /// `--quiet`: no progress output.
     pub quiet: bool,
+    /// `--gpu`: one CUDA device per rank (feature `gpu`).
     pub gpu: bool,
+    /// `--gpu-conv` (`None`: `STL_GPU_CONV`, else dia).
     pub gpu_conv: Option<String>,
+    /// `--gpu-fields` (`None`: `STL_GPU_FIELDS`, else auto).
     pub gpu_fields: Option<String>,
+    /// `--gpu-cache`: convolution geometry kept on the device between
+    /// sweeps (default `auto`).
     pub gpu_cache: String,
+    /// `--geometry-cache`: where the convolution geometry is kept between
+    /// evaluations (`None`: `--gpu-cache` without host copies).
     pub geometry_cache: Option<String>,
+    /// `--gpu-block-rows`: owned cells per device block (0: from the device
+    /// memory).
     pub gpu_block_rows: usize,
     /// `--harmonic`: `Some(true)` on the device.
     pub harmonic_gpu: Option<bool>,
 }
 
 impl Args {
+    /// Parses `argv` (without the program name): the command, then the
+    /// options with their defaults.  `Err` carries the usage or the message of
+    /// a missing or invalid option.
     pub fn parse(argv: &[String]) -> Result<Args, String> {
         let mut a = Args {
             ensemble: 10,

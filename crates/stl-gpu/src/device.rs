@@ -136,9 +136,13 @@ fn compile(major: i32, minor: i32) -> Result<Ptx, String> {
 /// A kernel argument (passed by value).
 #[derive(Clone, Copy, Debug)]
 pub enum Arg {
+    /// A raw device address (see `Gpu::ptr`, `Gpu::at`).
     Ptr(u64),
+    /// A 64-bit integer (`long long` in the kernels).
     I64(i64),
+    /// A 32-bit integer (`int`).
     I32(i32),
+    /// A double.
     F64(f64),
 }
 
@@ -185,11 +189,16 @@ fn par_copy(dst: &mut [f64], src: &[f64]) {
     });
 }
 
+/// One CUDA device with its stream and the compiled kernels; every transfer
+/// and launch of a rank goes through it, in stream order.
 pub struct Gpu {
+    /// The device's primary context.
     pub ctx: Arc<CudaContext>,
+    /// The single stream of the rank: transfers and launches are ordered on it.
     pub stream: Arc<CudaStream>,
     _module: Arc<CudaModule>,
     funcs: HashMap<&'static str, CudaFunction>,
+    /// Device name as reported by the driver.
     pub name: String,
     /// Synchronise after every launch (`STL_GPU_SYNC` set): errors name their kernel.
     debug: bool,
@@ -238,6 +247,7 @@ impl Gpu {
         Self::new(ordinal)
     }
 
+    /// Ordinal of the device.
     pub fn ordinal(&self) -> usize {
         self.ctx.ordinal()
     }
@@ -248,6 +258,7 @@ impl Gpu {
         self.ctx.mem_get_info().unwrap()
     }
 
+    /// A new device buffer holding `v` (a null buffer if `v` is empty).
     pub fn upload<T: DeviceRepr>(&self, v: &[T]) -> CudaSlice<T> {
         if v.is_empty() {
             return self.stream.null().unwrap();
@@ -255,6 +266,7 @@ impl Gpu {
         self.stream.clone_htod(v).expect("host to device copy")
     }
 
+    /// A host copy of `s`; synchronises the stream.
     pub fn download<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> Vec<T> {
         if s.is_empty() {
             return Vec::new();
@@ -319,6 +331,7 @@ impl Gpu {
         out
     }
 
+    /// A new zero-filled device buffer of `n` values (a null buffer if `n == 0`).
     pub fn zeros<T: DeviceRepr + ValidAsZeroBits>(&self, n: usize) -> CudaSlice<T> {
         if n == 0 {
             return self.stream.null().unwrap();
@@ -326,12 +339,14 @@ impl Gpu {
         self.stream.alloc_zeros(n).expect("device allocation")
     }
 
+    /// Zeroes `s` on the stream.
     pub fn clear<T: DeviceRepr + ValidAsZeroBits>(&self, s: &mut CudaSlice<T>) {
         if !s.is_empty() {
             self.stream.memset_zeros(s).unwrap();
         }
     }
 
+    /// A new device buffer holding a device-to-device copy of `s`.
     pub fn copy<T: DeviceRepr>(&self, s: &CudaSlice<T>) -> CudaSlice<T> {
         if s.is_empty() {
             return self.stream.null().unwrap();
@@ -339,6 +354,7 @@ impl Gpu {
         self.stream.clone_dtod(s).unwrap()
     }
 
+    /// Waits for the stream; panics on a kernel failure.
     pub fn sync(&self) {
         self.stream.synchronize().expect("kernel failure");
     }
@@ -349,10 +365,12 @@ impl Gpu {
         p
     }
 
+    /// Kernel argument: the address of element `offset` of `s`.
     pub fn at<T>(&self, s: &CudaSlice<T>, offset: usize) -> Arg {
         Arg::Ptr(self.ptr(s) + (offset * std::mem::size_of::<T>()) as u64)
     }
 
+    /// Kernel argument: the address of `s`.
     pub fn a<T>(&self, s: &CudaSlice<T>) -> Arg {
         Arg::Ptr(self.ptr(s))
     }

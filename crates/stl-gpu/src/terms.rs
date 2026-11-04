@@ -26,6 +26,8 @@ pub struct DeviceTable {
 }
 
 impl DeviceTable {
+    /// Uploads the knots `x`, values `y` and derivatives `d` (same length, at
+    /// least 2).
     pub fn new(gpu: &Gpu, x: &[f64], y: &[f64], d: &[f64]) -> Self {
         assert!(x.len() >= 2 && y.len() == x.len() && d.len() == x.len());
         DeviceTable { x: gpu.upload(x), y: gpu.upload(y), d: gpu.upload(d), n: x.len() }
@@ -83,6 +85,8 @@ pub struct Pyramid {
 }
 
 impl Pyramid {
+    /// The levels `1..=depth` of the `rows` maps `x` `[rows, len]` (`len` a
+    /// multiple of `4^depth`).
     pub fn new(gpu: &Gpu, x: &CudaSlice<f64>, rows: usize, len: usize, depth: usize) -> Self {
         assert_eq!(x.len(), rows * len);
         assert_eq!(len % (1 << (2 * depth)), 0, "rows not aligned on the pyramid");
@@ -97,6 +101,7 @@ impl Pyramid {
         Pyramid { levels, rows, len }
     }
 
+    /// Number of levels above the maps.
     pub fn depth(&self) -> usize {
         self.levels.len()
     }
@@ -191,6 +196,7 @@ pub struct RadixSort {
 }
 
 impl RadixSort {
+    /// Buffers for sorting `n` keys.
     pub fn new(gpu: &Gpu, n: usize) -> Self {
         assert!(n < u32::MAX as usize);
         let m = 256 * n.div_ceil(TILE);

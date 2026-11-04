@@ -20,7 +20,9 @@ fn py_radians(x: f64) -> f64 {
 /// Row normalisation of the decimation weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WeightNorm {
+    /// Rows sum to one (l1 norm).
     L1,
+    /// Rows have unit Euclidean norm (l2 norm).
     L2,
 }
 
@@ -28,8 +30,11 @@ pub enum WeightNorm {
 /// `sigma = radius / 2`, l1 rows).
 #[derive(Clone, Copy, Debug)]
 pub struct DecimationParams {
+    /// Cone radius in degrees; `None`: 3 fine pixels.
     pub radius_deg: Option<f64>,
+    /// Gaussian width in degrees; `None`: `radius / 2`.
     pub sigma_deg: Option<f64>,
+    /// Row normalisation.
     pub norm: WeightNorm,
 }
 
@@ -42,14 +47,20 @@ impl Default for DecimationParams {
 /// Compressed sparse rows, `n_rows x n_cols`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Csr {
+    /// Number of rows.
     pub n_rows: usize,
+    /// Number of columns.
     pub n_cols: usize,
+    /// Row pointers, `n_rows + 1` entries: row `r` is `indptr[r]..indptr[r + 1]`.
     pub indptr: Vec<usize>,
+    /// Column of each stored entry.
     pub indices: Vec<usize>,
+    /// Value of each stored entry.
     pub values: Vec<f64>,
 }
 
 impl Csr {
+    /// Columns and values of row `r`.
     pub fn row(&self, r: usize) -> (&[usize], &[f64]) {
         let (a, b) = (self.indptr[r], self.indptr[r + 1]);
         (&self.indices[a..b], &self.values[a..b])

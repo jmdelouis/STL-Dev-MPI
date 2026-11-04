@@ -8,14 +8,18 @@ use libloading::Library;
 use std::ffi::{c_int, c_void};
 use std::sync::OnceLock;
 
+/// A cuFFT plan handle (`cufftHandle`).
 pub type Handle = c_int;
 /// `CUFFT_Z2Z`.
 const Z2Z: c_int = 0x69;
+/// `CUFFT_FORWARD`: exponent sign -1.
 pub const FORWARD: c_int = -1;
+/// `CUFFT_INVERSE`: exponent sign +1 (unnormalised).
 pub const INVERSE: c_int = 1;
 
 type MakePlanMany = unsafe extern "C" fn(Handle, c_int, *mut c_int, *mut c_int, c_int, c_int, *mut c_int, c_int, c_int, c_int, c_int, *mut usize) -> c_int;
 
+/// The cuFFT entry points resolved from the loaded library (see `cufft`).
 pub struct CuFft {
     _lib: Library,
     create: unsafe extern "C" fn(*mut Handle) -> c_int,
@@ -102,6 +106,7 @@ impl CuFft {
         check((self.exec_z2z)(h, data as *mut c_void, data as *mut c_void, direction), "exec")
     }
 
+    /// Releases a plan handle (errors are ignored).
     pub fn destroy(&self, h: Handle) {
         unsafe {
             (self.destroy)(h);

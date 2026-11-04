@@ -10,16 +10,19 @@ use std::f64::consts::PI;
 
 /// `180 / pi` and `pi / 180` as used by `torch.rad2deg` / `torch.deg2rad`.
 pub const RAD2DEG: f64 = 57.295_779_513_082_320_876_798_154_814_105_170_332_405_472_466_564;
+/// `pi / 180`, see [`RAD2DEG`].
 pub const DEG2RAD: f64 = 0.017_453_292_519_943_295_769_236_907_684_886_127_134_428_718_885_417;
 
 const JRLL: [i64; 12] = [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
 const JPLL: [i64; 12] = [1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7];
 
+/// Radians to degrees, `x * RAD2DEG` (`torch.rad2deg`).
 #[inline]
 pub fn rad2deg(x: f64) -> f64 {
     x * RAD2DEG
 }
 
+/// Degrees to radians, `x * DEG2RAD` (`torch.deg2rad`).
 #[inline]
 pub fn deg2rad(x: f64) -> f64 {
     x * DEG2RAD

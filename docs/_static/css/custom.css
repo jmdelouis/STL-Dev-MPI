@@ -1,0 +1,5 @@
+/* Wide tables of the reports: scroll rather than overflow. */
+.bd-article table {
+  display: block;
+  overflow-x: auto;
+}

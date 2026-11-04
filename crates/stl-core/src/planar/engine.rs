@@ -68,9 +68,13 @@ fn root_modulus_vjp(z: C64, g: C64) -> C64 {
 /// Planar operator: image size, channels, scales and tiling.
 #[derive(Clone, Debug)]
 pub struct PlanarEngine {
+    /// Image height at level 0, pixels.
     pub h: usize,
+    /// Image width at level 0, pixels.
     pub w: usize,
+    /// Number of channels `C`.
     pub channels: usize,
+    /// Number of scales `J` (levels `0 .. J`).
     pub j_count: usize,
     /// `has_fewer_convolutions` definitions of S3/S4.
     pub fewer: bool,
@@ -86,7 +90,9 @@ pub struct PlanarEngine {
 /// What the reverse sweep needs of the forward one: the map pyramid and
 /// the stored moduli `m[d][n]` (`m[d][n - d - 1]`).
 pub struct Pyramid {
+    /// `maps[n] = D^n x`, `[C, H_n, W_n]`.
     pub maps: Vec<Vec<f64>>,
+    /// Stored moduli `m[d][n - d - 1]` (`d < n`), `[C, L, H_n, W_n]`.
     pub m: Vec<Vec<Vec<f64>>>,
 }
 
@@ -96,6 +102,7 @@ impl Pyramid {
         self.maps.iter().map(Vec::len).sum::<usize>() + self.m.iter().flatten().map(Vec::len).sum::<usize>()
     }
 
+    /// True when nothing is held.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -190,15 +197,18 @@ impl PlanarEngine {
         PlanarEngine { h, w, channels, j_count, fewer, tile, threads: 1, plan, ranges, wav: wavelet() }
     }
 
+    /// Number of host threads over the tiles of a level (at least 1).
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
         self
     }
 
+    /// Coefficients in plan order (sorted by native level).
     pub fn plan(&self) -> &[Coefficient] {
         &self.plan
     }
 
+    /// Number of pyramid levels, `J`.
     pub fn levels(&self) -> usize {
         self.j_count
     }

@@ -1,9 +1,10 @@
 //! C ABI over the native engines and L-BFGS, for the Python ensemble driver
 //! of P. Campeti (`python/stl_ensemble`, `stl_port/native.py`, `ctypes`).
 //!
-//! One handle owns one engine (CPU [`LocalEngine`] or [`GpuEngine`]) whose
-//! batch, geometry and plan are fixed at creation: the complete plan
-//! (`Family::ALL`, one channel, `fewer = false`, `dg(j) = j`, gauge cosmo).
+//! One handle owns one engine (CPU [`stl_core::engine::LocalEngine`] or
+//! `stl_gpu::GpuEngine`) whose batch, geometry and plan are fixed at
+//! creation: the complete plan (`Family::ALL`, one channel,
+//! `fewer = false`, `dg(j) = j`, gauge cosmo).
 //! Maps are `f64` NESTED `[batch, 12 nside^2]`; complex values and cotangents
 //! are interleaved `(re, im)` pairs, and the gradient is that of
 //! `Re sum(conj(cotangent) * values)`.  Every forward state carries an
@@ -11,6 +12,8 @@
 //! `stlp_restore` refuse a stale or foreign one.  One caller thread per
 //! handle.  Panics are caught at the boundary: the call returns its failure
 //! value and `stlp_last_error` the message.
+
+#![warn(missing_docs)]
 
 use num_complex::Complex64;
 use serde_json::{json, Value};
@@ -110,6 +113,9 @@ impl Handle {
     }
 }
 
+/// Message of the last failure caught on the calling thread (empty if
+/// none).  The pointer is owned by the library and valid until the next
+/// failure on that thread; do not free it.
 #[no_mangle]
 pub extern "C" fn stlp_last_error() -> *const c_char {
     ERROR.with(|e| e.borrow().as_ptr())
@@ -181,6 +187,7 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
     })
 }
 
+/// Frees a handle returned by `stlp_new` and its engine (null is ignored).
 #[no_mangle]
 pub unsafe extern "C" fn stlp_free(p: *mut Handle) {
     if !p.is_null() {
@@ -321,6 +328,7 @@ pub unsafe extern "C" fn stlp_checkpoint(p: *mut Handle) -> *mut Snapshot {
     })
 }
 
+/// Frees a checkpoint returned by `stlp_checkpoint` (null is ignored).
 #[no_mangle]
 pub unsafe extern "C" fn stlp_checkpoint_free(p: *mut Snapshot) {
     if !p.is_null() {

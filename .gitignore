@@ -2,3 +2,7 @@
 **/__pycache__/
 /runs
 .ipynb_checkpoints/
+
+# examples and documentation outputs
+examples/*/out/
+docs/_build/

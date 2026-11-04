@@ -14,6 +14,8 @@ enum Payload {
 /// Message: (collective sequence number, sender, payload).
 type Message = (u64, usize, Payload);
 
+/// [`Comm`] of one rank of [`run_ranks`]: a thread with a channel to every
+/// peer; collectives are matched by sequence number.
 pub struct ThreadComm {
     rank: usize,
     size: usize,

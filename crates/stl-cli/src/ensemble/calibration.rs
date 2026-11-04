@@ -17,36 +17,66 @@ use stl_core::sht::Sht;
 
 type C64 = Complex64;
 
+/// Targets of the five blocks: bootstrap means and population variances
+/// of the features of the references, with the SC sigmas, PDF support and
+/// initial C_l.
 #[derive(Clone, Debug, Default)]
 pub struct Targets {
+    /// Bootstrap mean of the SC features (native SC coordinates) of the
+    /// Gaussian maps g (GSC block).
     pub gsc_mean: Vec<C64>,
+    /// Population variance of the SC features of g (GSC block).
     pub gsc_var: Vec<f64>,
+    /// Mean within-map sigma of the SC coefficients of g.
     pub gsc_sigma: Vec<f64>,
+    /// Bootstrap mean of the SC features of kappa (PSC block).
     pub psc_mean: Vec<C64>,
+    /// Population variance of the SC features of kappa (PSC block).
     pub psc_var: Vec<f64>,
+    /// Mean within-map sigma of the SC coefficients of kappa.
     pub psc_sigma: Vec<f64>,
+    /// Bootstrap mean of the C_l band powers of kappa.
     pub power_mean: Vec<f64>,
+    /// Population variance of the band powers.
     pub power_var: Vec<f64>,
+    /// Bootstrap mean of the PDF (CIC histogram, 100 bins) of kappa.
     pub pdf_mean: Vec<f64>,
+    /// Population variance of the PDF bins.
     pub pdf_var: Vec<f64>,
+    /// Bootstrap mean of the Minkowski functionals `[3, k]` of kappa.
     pub mf_mean: Vec<f64>,
+    /// Population variance of the Minkowski functionals `[3, k]`.
     pub mf_var: Vec<f64>,
+    /// `[lo, hi]` of the PDF bins: the range of the references widened by 2 %
+    /// on each side.
     pub pdf_support: [f64; 2],
+    /// C_l (`l = 0..=3 nside - 1`) of the Gaussian maps g, averaged over the
+    /// bootstrap draw: the spectrum of the initial Gaussian fields.
     pub initialization_cl: Vec<f64>,
+    /// Pixel mean of the Gaussian map g of the first bootstrap reference.
     pub initialization_reference_mean: f64,
 }
 
 /// The calibration: configuration of the plan, LUT and targets.
 #[derive(Clone, Debug)]
 pub struct Calibration {
+    /// HEALPix nside of the members and of the references.
     pub nside: usize,
+    /// Number of scales `J` of the plan.
     pub scales: usize,
+    /// Number of orientations `L` (4).
     pub orientations: usize,
+    /// Wavelet stencil size (5).
     pub kernel: usize,
+    /// Number of coefficients of the plan.
     pub plan_len: usize,
+    /// Names of the reference maps (the population of the variances).
     pub references: Vec<String>,
+    /// Indices in `references` of the bootstrap draw (means of the targets).
     pub bootstrap_ids: Vec<usize>,
+    /// LUT pooled over all the references, `kappa = f(g)`.
     pub lut: Lut,
+    /// Targets of the five blocks.
     pub targets: Targets,
 }
 
@@ -183,6 +213,8 @@ fn complexes(v: &Value, key: &str) -> Result<Vec<C64>, String> {
 }
 
 impl Calibration {
+    /// JSON of schema `stl-ensemble-calibration-1`: configuration,
+    /// references, bootstrap ids, LUT knots and targets.
     pub fn to_json(&self) -> Value {
         let t = &self.targets;
         json!({
@@ -203,6 +235,8 @@ impl Calibration {
         })
     }
 
+    /// Reads a calibration written by [`Calibration::to_json`]; errors on
+    /// another schema or a missing field.
     pub fn from_json(v: &Value) -> Result<Self, String> {
         if v["schema"] != "stl-ensemble-calibration-1" {
             return Err("not a stl-ensemble calibration".into());

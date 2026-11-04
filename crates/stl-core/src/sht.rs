@@ -34,8 +34,11 @@ type C64 = Complex64;
 /// One iso-latitude ring.
 #[derive(Clone, Debug)]
 pub struct Ring {
+    /// `cos theta` of the ring.
     pub cos: f64,
+    /// `sin theta` of the ring.
     pub sin: f64,
+    /// Number of pixels of the ring.
     pub nphi: usize,
     /// Longitude of the first pixel.
     pub phi0: f64,
@@ -55,13 +58,21 @@ struct Sums {
 
 /// Scaling of the Legendre recursion (shared with the device transforms).
 pub const LN_SCALE: f64 = 600.0 * std::f64::consts::LN_2;
+/// `2^600`, the scaling step of the Legendre recursion.
 pub const SCALE: f64 = 4.149515568880993e180; // 2^600
+/// `2^300`: a scaled value above this is divided by `SCALE`.
 pub const LIMIT: f64 = 2.037035976334486e90; // 2^300
 
+/// Spherical harmonic transforms of full-sky maps of one `nside` up to
+/// `lmax`: ring geometry, RING -> NESTED table and FFT plans.
 pub struct Sht {
+    /// HEALPix `nside`.
     pub nside: usize,
+    /// Maximum multipole.
     pub lmax: usize,
+    /// Number of pixels, `12 nside^2`.
     pub npix: usize,
+    /// The `4 nside - 1` rings, from north to south.
     pub rings: Vec<Ring>,
     /// NESTED index of every pixel in RING order.
     nest: Vec<u32>,
@@ -178,6 +189,7 @@ impl Sht {
         (0..=self.lmax).flat_map(|m| (m..=self.lmax).map(move |l| (l, m))).collect()
     }
 
+    /// Pixel solid angle `Omega = 4 pi / N_pix`, steradians.
     pub fn area(&self) -> f64 {
         4.0 * std::f64::consts::PI / self.npix as f64
     }

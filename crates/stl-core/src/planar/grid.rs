@@ -22,16 +22,21 @@ use num_complex::Complex64;
 /// `len` consecutive pixels from `start` of a periodic axis of `size` pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
+    /// First pixel (any integer, taken modulo `size`).
     pub start: i64,
+    /// Number of pixels.
     pub len: usize,
+    /// Number of pixels of the periodic axis.
     pub size: usize,
 }
 
 impl Span {
+    /// `len` pixels from `start` on an axis of `size` pixels.
     pub fn new(start: i64, len: usize, size: usize) -> Self {
         Span { start, len, size }
     }
 
+    /// The whole axis of `size` pixels.
     pub fn full(size: usize) -> Self {
         Span { start: 0, len: size, size }
     }
@@ -87,27 +92,35 @@ impl Span {
 /// Rows by columns of one level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
+    /// Rows of the window.
     pub rows: Span,
+    /// Columns of the window.
     pub cols: Span,
 }
 
 impl Window {
+    /// The whole `h x w` level.
     pub fn full(h: usize, w: usize) -> Self {
         Window { rows: Span::full(h), cols: Span::full(w) }
     }
 
+    /// Number of pixels, rows times columns.
     pub fn len(&self) -> usize {
         self.rows.len * self.cols.len
     }
 
+    /// True when the window has no pixel.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The window with `h` more pixels on each side ([`Span::grow`]).
     pub fn grow(&self, h: usize) -> Self {
         Window { rows: self.rows.grow(h), cols: self.cols.grow(h) }
     }
 
+    /// Pixels of the next level whose decimation stencil meets the window
+    /// ([`Span::coarse`] per axis).
     pub fn coarse(&self) -> Self {
         Window { rows: self.rows.coarse(), cols: self.cols.coarse() }
     }

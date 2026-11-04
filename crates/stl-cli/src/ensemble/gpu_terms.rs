@@ -54,6 +54,9 @@ struct Member {
     mk: Option<MkState>,
 }
 
+/// The device side of the C_l, PDF and Minkowski blocks for this group's
+/// members: the transforms, the Minkowski parameters and the per-member
+/// states kept between the forward and the reverse pass.
 pub struct GpuTerms {
     gpu: Arc<Gpu>,
     sht: GpuSht,
@@ -64,6 +67,8 @@ pub struct GpuTerms {
 }
 
 impl GpuTerms {
+    /// Device transforms of `sht`, the thresholds of `mk` and the analysis
+    /// of the constant map on `gpu`.
     pub fn new(gpu: Arc<Gpu>, sht: &Sht, mk: &Minkowski) -> Result<Self, String> {
         let dev = GpuSht::new(&gpu, sht)?;
         let params = MinkowskiParams { nu: gpu.upload(&mk.nu), k: mk.nu.len(), eps: mk.eps };
@@ -96,7 +101,7 @@ impl GpuTerms {
     /// Features of the members' whole physical maps `kfull` `[local, npix]`:
     /// band powers `[local, nb]`, CIC `[local, bins]`, Minkowski `[local, 3 k]`;
     /// the seconds of the first two and of the third.  The transforms run in
-    /// batches of [`group`](Self::group) members.
+    /// batches of `group` members (from the free device memory).
     pub fn forward(&mut self, kfull: &[f64], windows: &[Vec<f64>], cic: &Cic) -> (Vec<f64>, Vec<f64>, Vec<f64>, [f64; 2]) {
         let gpu = &*self.gpu;
         let npix = self.sht.npix;
