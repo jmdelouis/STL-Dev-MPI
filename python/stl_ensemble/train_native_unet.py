@@ -3,7 +3,7 @@
 the PR3 maps, frozen noise biases (the --real --bias frozen run of stlia
 train_denoise.py), with Adam (cosine schedule) or L-BFGS by rounds.
 
-    python train_native_unet.py --data DIR --out RUN --nside 64 --optimizer adam --steps 3000
+    python train_native_unet.py --data DIR --out RUN --nside 256 --optimizer adam --steps 3000
     python train_native_unet.py --data DIR --out RUN --nside 64 --optimizer lbfgs --rounds 20 --lbfgs-iter 20
 
 Data (as train_denoise.py): DIR/planck353_{Q,U}_n{nside}.npy, the half
@@ -12,13 +12,23 @@ FFP10 noise planck353_noise{,hm1,hm2}_{f}_n{nside}_mc{k}.npy (--sims: the
 simulations present for all three are used).
 
 Adam: field f = fields[step % 2], biases refreshed every --bias-every steps
-(per field, at the current output). L-BFGS: round r trains field
-fields[r % 2] (or both with --lbfgs-fields joint) for --lbfgs-iter
-iterations, after a refresh of its biases. With --seconds the training
-stops at that wall time. Every --eval-seconds of training (not counted),
-both fields are evaluated with the biases of one fixed set of draws: the
-common objective of the comparison. Writes RUN/history.json and
-RUN/params.npy.
+(per field, at the current output), zero on the coefficients without noise
+bias unless --bias-all (train_denoise.py >= a2141c1). L-BFGS: round r
+trains field fields[r % 2] (or both with --lbfgs-fields joint) for
+--lbfgs-iter iterations after a refresh of the biases. --seconds stops the
+training at that wall time.
+
+Evaluations (not counted in the training time): every --eval-every steps
+or rounds, and every --eval-seconds of training if given, the loss terms of
+both fields with the current biases, and with --eval-draws N the common
+objective of the comparisons: both fields with biases from one fixed set
+of N draws.
+
+Writes, as train_denoise.py: RUN/train.json (args, j, coefficients,
+parameters, noise_rms, loss_weights, seconds, loss_history, evals),
+RUN/eval_{Q,U}.npz (sky = d, d, u) and RUN/model.pt (when torch is
+importable; stlia.unet.load reads it), plus RUN/params.npy and
+RUN/history.json (the native records, with the training times).
 """
 import argparse
 import json
@@ -33,6 +43,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stl_port.native import NativeUNet  # noqa: E402
 
+TERMS = ("data", "res", "cross", "l1", "l2", "l3", "cl")
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
 p.add_argument("--out", required=True)
@@ -40,12 +51,16 @@ p.add_argument("--nside", type=int, default=64)
 p.add_argument("--j", type=int, default=None)
 p.add_argument("--levels", type=int, default=None, help="default: down to nside 8")
 p.add_argument("--channels", default=None)
+p.add_argument("--gauge", default="phi", choices=["phi", "cosmo"])
+p.add_argument("--ksz", type=int, default=3)
+p.add_argument("--cond", default="none", choices=["none", "log857"])
 p.add_argument("--loss", default="data=1,l1=1,l2=1,l3=1")
 p.add_argument("--optimizer", choices=["adam", "lbfgs"], default="adam")
 p.add_argument("--steps", type=int, default=3000, help="Adam steps (cosine schedule length)")
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--bias-every", type=int, default=50)
 p.add_argument("--bias-realizations", type=int, default=40)
+p.add_argument("--bias-all", action="store_true", help="estimate the bias of every coefficient (train_denoise.py --bias-all)")
 p.add_argument("--rounds", type=int, default=20)
 p.add_argument("--lbfgs-iter", type=int, default=20)
 p.add_argument("--lbfgs-history", type=int, default=10)
@@ -53,7 +68,11 @@ p.add_argument("--lbfgs-max-eval", type=int, default=None)
 p.add_argument("--lbfgs-fields", choices=["alternate", "joint"], default="alternate")
 p.add_argument("--sims", default="10-49")
 p.add_argument("--seconds", type=float, default=None, help="wall-time budget of the training")
-p.add_argument("--eval-seconds", type=float, default=60.0)
+p.add_argument("--log-every", type=int, default=10)
+p.add_argument("--eval-every", type=int, default=250, help="steps (Adam) or rounds (L-BFGS) between evaluations")
+p.add_argument("--eval-seconds", type=float, default=None, help="also evaluate every this much training time")
+p.add_argument("--eval-draws", type=int, default=0, help="draws of the fixed-bias common objective (0: not computed)")
+p.add_argument("--engine-cache-bytes", type=int, default=None, help="GPU geometry cache (0: from the free memory)")
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--device", type=int, default=0)
 p.add_argument("--backend", default="gpu")
@@ -63,52 +82,97 @@ n = a.nside
 load = lambda name: np.load(os.path.join(a.data, f"{name}_n{n}.npy")).astype(np.float64)
 lo, _, hi = a.sims.partition("-")
 sims = [k for k in range(int(lo), int(hi or lo) + 1)
-        if all(os.path.exists(os.path.join(a.data, f"planck353_{kd}_Q_n{n}_mc{k}.npy")) for kd in ("noise", "noisehm1", "noisehm2"))]
+        if all(os.path.exists(os.path.join(a.data, f"planck353_{kd}_{f}_n{n}_mc{k}.npy"))
+               for kd in ("noise", "noisehm1", "noisehm2") for f in ("Q", "U"))]
+assert sims, "no simulation with full- and half-mission noise"
 levels = a.levels or int(math.log2(n // 8)) + 1
 channels = [int(c) for c in a.channels.split(",")] if a.channels else [32, 64, 96, 128, 128, 128, 128][:levels]
+j = a.j or int(math.log2(n)) - 1
 weights = {k: float(v) for k, v in (item.split("=") for item in a.loss.split(","))}
-net = NativeUNet(n, channels, cond=1, j=a.j, loss=weights, backend=a.backend, device=a.device, seed=a.seed)
+engine = {} if a.engine_cache_bytes is None else {"cache_bytes": a.engine_cache_bytes}
+cond = 1 if a.cond == "log857" else 0
+net = NativeUNet(n, channels, ksz=a.ksz, gauge=a.gauge, cond=cond, j=j, loss=weights, backend=a.backend,
+                 device=a.device, seed=a.seed, engine=engine, bias_all=a.bias_all)
 i857 = load("planck857_I")
-c = np.log(np.clip(i857, np.percentile(i857[i857 > 0], 0.1), None))
-net.set_cond(((c - c.mean()) / c.std()).astype(np.float32)[None])
+if cond:
+    c = np.log(np.clip(i857, np.percentile(i857[i857 > 0], 0.1), None))
+    net.set_cond(((c - c.mean()) / c.std()).astype(np.float32)[None])
 net.set_common(i857)
 fields = ("Q", "U")
+obs, rms = {}, {}
 for f in fields:
     pools = [np.stack([np.load(os.path.join(a.data, f"planck353_{kd}_{f}_n{n}_mc{k}.npy")) for k in sims])
              for kd in ("noise", "noisehm1", "noisehm2")]
-    net.set_field(f, load(f"planck353_{f}"), load(f"planck353hm1_{f}"), load(f"planck353hm2_{f}"), *pools)
+    obs[f] = load(f"planck353_{f}")
+    rms[f] = float(np.sqrt(np.mean(pools[0] ** 2)))
+    net.set_field(f, obs[f], load(f"planck353hm1_{f}"), load(f"planck353hm2_{f}"), *pools)
+    del pools
 rng = np.random.default_rng(a.seed + 777)
-eval_draws = (np.arange(a.bias_realizations) % len(sims), np.where(np.arange(a.bias_realizations) % 2, -1.0, 1.0))
-print(f"nside {n} levels {levels} channels {channels} params {net.size} sims {len(sims)} loss {weights} "
-      f"optimizer {a.optimizer}", flush=True)
+fixed_draws = (np.arange(a.eval_draws) % len(sims), np.where(np.arange(a.eval_draws) % 2, -1.0, 1.0))
+print(f"nside {n} J {j} levels {levels} channels {channels} params {net.size} sims {len(sims)} loss {weights} "
+      f"optimizer {a.optimizer} bias {'all' if a.bias_all else 'biased coefficients only'} cond {a.cond}", flush=True)
 
 
 def draws():
     return rng.integers(0, len(sims), a.bias_realizations), rng.choice([-1.0, 1.0], a.bias_realizations)
 
 
-hist = {"train_seconds": [], "eval": [], "step_terms": []}
-clock = {"train": 0.0, "next_eval": 0.0}
+hist = {"step": [], "loss": [], **{t: [] for t in TERMS}}
+native = {"eval": [], "steps": []}
+evals = {}
+clock = {"train": 0.0, "next_eval": a.eval_seconds if a.eval_seconds else float("inf")}
+started = time.time()
 
 
-def evaluate():
-    """Both fields, biases from the fixed evaluation draws (restored after)."""
+def evaluate(step, save=False):
+    """Terms of both fields with their current biases; the fixed-draw objective with --eval-draws."""
     out = {}
     for f in fields:
-        net.estimate_bias(f, *eval_draws)
-        out[f] = net.loss(f)
-    hist["eval"].append({"train_seconds": clock["train"], **{f: out[f] for f in fields},
-                         "total": sum(out[f]["total"] for f in fields)})
-    print(f"eval t={clock['train']:.1f}s total {hist['eval'][-1]['total']:.6g} "
-          + " ".join(f"{f} {out[f]['total']:.5g}" for f in fields), flush=True)
-    clock["next_eval"] = clock["train"] + a.eval_seconds
+        u = net.apply(obs[f])
+        out[f] = {"pixel_rms_error_over_noise": float(np.sqrt(np.mean((u - obs[f]) ** 2))) / rms[f],
+                  "loss_terms": {k: v for k, v in net.loss(f).items() if k != "total"}}
+        out[f]["data_loss"] = out[f]["loss_terms"].get("data", float("nan"))
+        if save:
+            np.savez(os.path.join(a.out, f"eval_{f}.npz"), sky=obs[f], d=obs[f], u=u)
+    rec = {"step": step, "train_seconds": clock["train"],
+           **{f: sum(out[f]["loss_terms"][k] * weights.get(k, 0.0) for k in out[f]["loss_terms"]) for f in fields}}
+    if a.eval_draws:
+        saved = {}
+        for f in fields:
+            net.estimate_bias(f, *fixed_draws)
+            saved[f] = net.loss(f)["total"]
+        rec["fixed_draws"] = {**saved, "total": sum(saved.values())}
+        for f in fields:  # back to training biases at the next refresh
+            net.estimate_bias(f, *draws())
+    native["eval"].append(rec)
+    evals[step] = out
+    print(f"eval {step} t={clock['train']:.1f}s " + " ".join(
+        f"{f} err/noise {out[f]['pixel_rms_error_over_noise']:.3f} loss {rec[f]:.5g}" for f in fields)
+        + (f" | fixed draws {rec['fixed_draws']['total']:.5g}" if a.eval_draws else ""), flush=True)
+    np.save(os.path.join(a.out, "params.npy"), net.get_params())
+
+
+def log(step, terms):
+    hist["step"].append(step)
+    hist["loss"].append(terms["total"])
+    for t in TERMS:
+        hist[t].append(terms.get(t) if t in weights else None)
 
 
 def out_of_time():
     return a.seconds is not None and clock["train"] >= a.seconds
 
 
-evaluate()
+def timed_eval(step):
+    if clock["train"] >= clock["next_eval"]:
+        evaluate(step)
+        clock["next_eval"] = clock["train"] + a.eval_seconds
+
+
+for f in fields:  # biases of the untrained network, for the first evaluation
+    net.estimate_bias(f, *draws())
+evaluate(0)
+last = 0
 if a.optimizer == "adam":
     for step in range(1, a.steps + 1):
         f = fields[step % 2]
@@ -118,18 +182,22 @@ if a.optimizer == "adam":
         lr = a.lr * 0.5 * (1 + math.cos(math.pi * (step - 1) / a.steps))
         terms = net.step(f, lr)
         clock["train"] += time.perf_counter() - t0
-        hist["step_terms"].append({"step": step, "field": f, "seconds": clock["train"], **terms})
-        if step % 10 == 0 or step == 1:
-            print(f"step {step} {f} loss {terms['total']:.6g} {clock['train'] / step:.3f} s/step", flush=True)
-        if clock["train"] >= clock["next_eval"]:
-            evaluate()
+        native["steps"].append({"step": step, "field": f, "seconds": clock["train"], **terms})
+        last = step
+        if step % a.log_every == 0 or step == 1:
+            log(step, terms)
+            print(f"step {step} {f} loss {terms['total']:.6g} " + " ".join(f"{k} {terms[k]:.4g}" for k in weights)
+                  + f" {clock['train'] / step:.3f} s/step", flush=True)
+        if step % a.eval_every == 0 and step < a.steps:
+            evaluate(step)
+        timed_eval(step)
         if out_of_time():
             break
 else:
     opts = {"max_iter": a.lbfgs_iter, "history_size": a.lbfgs_history}
     if a.lbfgs_max_eval:
         opts["max_eval"] = a.lbfgs_max_eval
-    for r in range(a.rounds):
+    for r in range(1, a.rounds + 1):
         names = list(fields) if a.lbfgs_fields == "joint" else [fields[r % 2]]
         t0 = time.perf_counter()
         for f in names:
@@ -137,15 +205,31 @@ else:
         rep = net.lbfgs(names, opts)
         clock["train"] += time.perf_counter() - t0
         h = rep["loss_history"]
-        hist["step_terms"].append({"round": r, "fields": names, "seconds": clock["train"], "evaluations": rep["evaluations"],
-                                   "loss_start": h[0], "loss_end": min(h)})
+        native["steps"].append({"round": r, "fields": names, "seconds": clock["train"], "evaluations": rep["evaluations"],
+                                "loss_start": h[0], "loss_end": min(h)})
+        last = r
+        log(r, dict(zip(rep["terms"], rep["terms_history"][int(np.argmin(h))])))
         print(f"round {r} {names} {h[0]:.6g} -> {min(h):.6g} in {rep['evaluations']} evaluations, "
               f"t={clock['train']:.1f}s", flush=True)
-        if clock["train"] >= clock["next_eval"]:
-            evaluate()
+        if r % a.eval_every == 0 and r < a.rounds:
+            evaluate(r)
+        timed_eval(r)
         if out_of_time():
             break
-evaluate()
-np.save(os.path.join(a.out, "params.npy"), net.get_params())
+evaluate(last, save=True)
+cfg = net.info()["config"]
+with open(os.path.join(a.out, "train.json"), "w") as fh:
+    json.dump({"args": vars(a), "j": j, "coefficients": net.info()["coefficients"], "parameters": net.size,
+               "noise_rms": rms, "loss_weights": weights, "seconds": time.time() - started,
+               "train_seconds": clock["train"], "loss_history": hist, "evals": evals,
+               "implementation": "STL-Dev-MPI native U-Net (NativeUNet)", "library": net.info()["version"]}, fh, indent=1)
 with open(os.path.join(a.out, "history.json"), "w") as fh:
-    json.dump({"args": vars(a), "params": net.size, "sims": sims, **hist}, fh, indent=1)
+    json.dump({"args": vars(a), "params": net.size, "sims": sims, **native}, fh, indent=1)
+try:
+    import torch
+    state = {k: torch.as_tensor(v) for k, v in net.state_dict().items()}
+    torch.save({"state": state, "nside": n, "levels": levels, "channels": channels, "conv": "sphere", "gauge": a.gauge,
+                "ksz": a.ksz, "norm": "group", "scale": None, "cond": cond, "j": j, "noise_rms": rms},
+               os.path.join(a.out, "model.pt"))
+except ImportError:
+    print("torch not importable: model.pt not written (params.npy and state names in train.json)", flush=True)

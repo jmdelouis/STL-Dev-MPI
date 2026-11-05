@@ -21,7 +21,7 @@ try:
     import torch
     from stlia.unet import UNet
     from stlia.stl_torch import DenoiseLoss, StatsFunction, as_real
-    from stlia.train_denoise import CrossStats
+    from stlia.train_denoise import CrossStats, unbiased
 except ImportError as e:  # pragma: no cover
     torch = None
     print(f"torch or stlia missing ({e}): skipped")
@@ -54,8 +54,10 @@ def _setup(seed=0):
     return net, dict(d=d, d1=d1, d2=d2, t857=t857, n0=n0, n1=n1, n2=n2, cond=cond, draws=draws)
 
 
-def _torch_step(net, o):
-    """Frozen-bias loss terms and parameter gradients, as train_denoise.py."""
+def _torch_step(net, o, bias_all=False):
+    """Frozen-bias loss terms and parameter gradients, as train_denoise.py
+    (Healpix-STL-IA >= a2141c1: no bias on the coefficients of unbiased(),
+    unless bias_all)."""
     one = NativeEngine(NSIDE, J, batch=1)
     xeng = NativeEngine(NSIDE, J, batch=5, cross=True)
     loss_fn = DenoiseLoss(one.plan, NSIDE)
@@ -87,6 +89,9 @@ def _torch_step(net, o):
         bias["l1"] = cross([ud + a for a in n1], [ud + b for b in n2]).mean(0) - uu
         bias["l2"] = cross([ud + a for a in n0], [ud] * m).mean(0) - uu
         bias["l3"] = cross([o["t857"]] * m, [ud + a for a in n0]).mean(0) - tu
+        if not bias_all:
+            for t in bias:
+                bias[t][torch.as_tensor(unbiased(one.plan if t == "data" else xeng.plan, t))] = 0
     vt, tv = one.forward(o["d"][None], moments=True)
     target, tvar = torch.as_tensor(as_real(vt[0])), torch.as_tensor(tv[0])
     model = StatsFunction.apply(u[None], one, 1)[0] + bias["data"]
@@ -134,6 +139,23 @@ def test_network_matches_torch():
         err = max(_rel(g[n], q.grad.numpy(), floor) for n, q in net.named_parameters())
         print(f"network: correction {_rel(r, rt):.2e}, gradients {err:.2e}")
         assert err < 1e-4
+
+
+def test_training_step_bias_all_matches_torch():
+    """--bias-all: the bias of every coefficient estimated."""
+    if torch is None:
+        return
+    net, o = _setup(3)
+    ref_terms, ref_grads = _torch_step(net, o, bias_all=True)
+    with _native(net, o, bias_all=True) as nat:
+        nat.zero_grad()
+        terms = nat.loss("Q", backward=True)
+        g = nat.grads_dict()
+        floor = 1e-2 * max(np.abs(v).max() for v in ref_grads.values())
+        eg = max(_rel(g[n], ref_grads[n], floor) for n in ref_grads)
+        et = max(abs(terms[k] - ref_terms[k]) / abs(ref_terms[k]) for k in ref_terms)
+        print(f"training step, bias_all: terms {et:.2e}, gradients {eg:.2e}")
+        assert et < 1e-4 and eg < 1e-3
 
 
 def test_training_step_matches_torch():
@@ -222,6 +244,7 @@ def test_lbfgs_round_decreases_the_loss():
 if __name__ == "__main__":
     test_network_matches_torch()
     test_training_step_matches_torch()
+    test_training_step_bias_all_matches_torch()
     test_live_step_matches_torch()
     test_lbfgs_round_decreases_the_loss()
     print("native U-Net tests passed")

@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-07-v7"
+SCRIPT_VERSION = "2026-11-07-v8"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -533,9 +533,12 @@ class NativeUNet:
 
     def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
                  backend="cpu", device=0, j=None, loss=None, bias_batch=5, block_pixels=4096, library=None,
-                 engine=None):
+                 engine=None, bias_all=False):
         """engine: options of the GPU statistics engines (cache, cache_bytes,
-        threads, conv, fields; as NativeEngine)."""
+        threads, conv, fields; as NativeEngine). bias_all: estimate the frozen
+        bias of every coefficient (default: zero on those without noise bias,
+        the mean of data, S2 of l1/l2/l3, S3 with the noise-free modulus of
+        l2/l3, as train_denoise.py without --bias-all)."""
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -546,7 +549,8 @@ class NativeUNet:
         self.config = dict(nside=self.nside, channels=[int(c) for c in channels], ksz=int(ksz), gauge=gauge,
                            slope=float(slope), cond=self.cond, scale=None if scale is None else float(scale),
                            seed=int(seed), backend=backend, device=int(device), bias_batch=int(bias_batch),
-                           block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()})
+                           block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()},
+                           bias_all=bool(bias_all))
         if j is not None:
             self.config["j"] = int(j)
         self.config.update(engine or {})

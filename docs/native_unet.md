@@ -5,8 +5,8 @@ the CPU or one GPU, with its exact reverse pass, Adam and L-BFGS, and its traini
 scattering losses of `stlia/train_denoise.py` (`--real`, frozen noise biases) with everything on
 one device: network, statistics engines, observations and noise pools. Only coefficient vectors
 (values, variances, cotangents) and the losses go through the host. Branch `claude/native-unet`
-(from `claude/spectrum`), bridge version `2026-11-07-v8`, Python `stl_port.native`
-`2026-11-07-v7`.
+(from `claude/spectrum`), bridge version `2026-11-07-v9`, Python `stl_port.native`
+`2026-11-07-v8`.
 
 ## 1. The network
 
@@ -59,7 +59,17 @@ current `u`:
 - `B_l2 = <Phi(u + n, u)> - Phi(u, u)`;
 - `B_l3 = <Phi(T, u + n)> - Phi(T, u)`.
 
-They are recomputed when the driver asks (every 50 steps in `train_denoise.py`). The
+They are recomputed when the driver asks (every 50 steps in `train_denoise.py`).
+
+As in `train_denoise.py` from Healpix-STL-IA a2141c1, the biases are zero on the coefficients
+without noise bias, unless `bias_all=True` (`--bias-all`). These are the coefficients whose noise
+average is the noise-free statistic, because the noise enters them only linearly:
+- `data`: the mean;
+- `l1`: S2;
+- `l2`: S2, and S3 with the modulus of `u` (`c1 = 1`);
+- `l3`: S2, and S3 with the modulus of `T` (`c1 = 0`).
+
+The rule repeats for every mask. The
 statistics may be averaged over masks (`set_masks`, as `NativeEngine`).
 
 The targets that do not depend on `u` (`Phi(d)`, `Phi(d1, d2)`, `Phi(T, d)` and their
@@ -100,6 +110,13 @@ net.estimate_bias("Q", sims, signs)
 report = net.lbfgs("Q", {"max_iter": 20, "history_size": 10})   # evaluations, loss_history, terms_history
 ```
 
+Driver: `python/stl_ensemble/train_native_unet.py`, the `--real --bias frozen` run of
+`train_denoise.py`.
+- Options: `--optimizer adam` (cosine) or `lbfgs` (rounds, `--lbfgs-fields alternate|joint`),
+  `--cond none|log857`, `--bias-all`, `--seconds`.
+- Writes `train.json`, `eval_{Q,U}.npz` (`sky = d`, `d`, `u`) and `model.pt` as `train_denoise.py`
+  does. `stlia.unet.load` reads that `model.pt`; its output agrees with the native one to 1e-6.
+
 Other calls:
 - `live(field, data_draws, hm_draws, lr=0, backward=False)`: the live-bias loss
   (`train_denoise.py --bias live`), with the models as means over fresh draws and the gradient
@@ -135,7 +152,7 @@ from the float64 truth: the conditioning of the GroupNorm reverse in single prec
 Training step (`python/stl_ensemble/tests/test_native_unet.py`, nside 16, J = 3):
 - Native trainer against the torch pipeline of `train_denoise.py` (`frozen_losses` with
   `StatsFunction` / `CrossStats` over `NativeEngine`, the same draws for the biases):
-  - loss terms to 1.3e-7;
+  - loss terms to 1.3e-7 (biases masked as Healpix-STL-IA a2141c1, and with `bias_all`);
   - parameter gradients to 1.1e-5;
   - an Adam step from the same gradients to 7e-9.
 - An L-BFGS round lowers the loss (20.0 to 8.4 in 6 evaluations).

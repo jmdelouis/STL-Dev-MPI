@@ -23,7 +23,8 @@
 //! `B_data = <Phi(u + n)> - Phi(u)`, `B_l1 = <Phi(u + n1, u + n2)> - Phi(u,
 //! u)`, `B_l2 = <Phi(u + n, u)> - Phi(u, u)`, `B_l3 = <Phi(T, u + n)> -
 //! Phi(T, u)`, the means over draws `(n, n1, n2)` of one simulation with a
-//! sign.
+//! sign, set to zero on the coefficients without noise bias (`Stats::exact`;
+//! `bias_all` estimates every one).
 
 use super::*;
 use std::collections::HashMap;
@@ -72,6 +73,8 @@ trait Backend {
     fn set_masks(&mut self, masks: Option<Masks>);
     /// Native pixels `[K, ncoeff]` of the averages of `kind`.
     fn stats_pixels(&self, kind: Kind) -> Vec<f64>;
+    /// Coefficients without noise bias of a term ([`Stats::exact`]).
+    fn exact(&self, term: &str) -> Vec<bool>;
 }
 
 /// Engine geometry shared by the backends (boxed: the engines borrow it).
@@ -98,6 +101,30 @@ impl Stats {
     /// (declared after them in the backends).
     unsafe fn refs(&self) -> (&'static LocalGeometry, &'static EngineConfig) {
         (&*(&*self.geo as *const LocalGeometry), &*(&*self.cfg as *const EngineConfig))
+    }
+
+    /// `[K, ncoeff]`: the coefficients of `term` without noise bias, whose
+    /// noise average is the noise-free statistic (the noise enters them only
+    /// linearly; `unbiased()` of Healpix-STL-IA's `train_denoise.py`): the
+    /// mean of `data`; S2 of `l1`, `l2`, `l3`; S3 with the modulus of `u`
+    /// (`c1 = 1`) for `l2`, with the modulus of `T` (`c1 = 0`) for `l3`.
+    fn exact(&self, term: &str) -> Vec<bool> {
+        let kind = if term == "data" { Kind::Auto } else { Kind::Cross };
+        let plan = self.plan(kind);
+        let one: Vec<bool> = plan
+            .iter()
+            .map(|c| {
+                let f = c.family.name();
+                match term {
+                    "data" => f == "mean",
+                    "l2" => f == "S2" || (f == "S3" && c.c1 == 1),
+                    "l3" => f == "S2" || (f == "S3" && c.c1 == 0),
+                    _ => f == "S2",
+                }
+            })
+            .collect();
+        let k = self.masks.as_ref().map_or(1, Masks::len);
+        (0..k).flat_map(|_| one.iter().cloned()).collect()
     }
 
     /// Native pixels `[K, ncoeff]` of the averages of `kind`.
@@ -229,6 +256,10 @@ impl Backend for CpuBack {
 
     fn stats_pixels(&self, kind: Kind) -> Vec<f64> {
         self.stats.pixels(kind)
+    }
+
+    fn exact(&self, term: &str) -> Vec<bool> {
+        self.stats.exact(term)
     }
 }
 
@@ -368,6 +399,10 @@ impl Backend for GpuBack {
     fn stats_pixels(&self, kind: Kind) -> Vec<f64> {
         self.stats.pixels(kind)
     }
+
+    fn exact(&self, term: &str) -> Vec<bool> {
+        self.stats.exact(term)
+    }
 }
 
 // -- trainer ---------------------------------------------------------------------
@@ -423,6 +458,9 @@ struct Trainer<B: Backend> {
     /// Draws per statistics call of the bias estimates (`bias_batch` maps,
     /// or `3 bias_batch` pairs).
     bias_batch: usize,
+    /// Estimate the bias of every coefficient (else zero where there is no
+    /// noise bias, [`Stats::exact`]).
+    bias_all: bool,
 }
 
 /// `(w_c)` of `DenoiseLoss.weights`: `N_c / V_c / n`, the largest weight
@@ -569,6 +607,18 @@ impl<B: Backend> Trainer<B> {
             bias.l1 = acc[0].iter().zip(uu).map(|(a, p)| a / m - p).collect();
             bias.l2 = acc[1].iter().zip(uu).map(|(a, p)| a / m - p).collect();
             bias.l3 = acc[2].iter().zip(tu).map(|(a, p)| a / m - p).collect();
+        }
+        if !self.bias_all {
+            // No noise bias there: the estimate would only add scatter.
+            for (term, b) in [("data", &mut bias.data), ("l1", &mut bias.l1), ("l2", &mut bias.l2), ("l3", &mut bias.l3)] {
+                if !b.is_empty() {
+                    for (v, e) in b.iter_mut().zip(self.back.exact(term)) {
+                        if e {
+                            *v = C64::default();
+                        }
+                    }
+                }
+            }
         }
         self.fields.get_mut(&f).unwrap().bias = Some(bias);
     }
@@ -790,7 +840,9 @@ pub struct UNetHandle {
 /// training: `j` (scales, `log2(nside) - 1`), `loss` (`{"data", "l1", "l2",
 /// "l3"}` weights, 0 by default), `bias_batch` (5, draws per statistics
 /// call of a bias estimate: 5 maps, 15 pairs, as `train_denoise.py` with
-/// `B = 4`), `block_pixels` (4096); GPU engines: `cache`
+/// `B = 4`), `bias_all` (false: the frozen biases are zero on the
+/// coefficients without noise bias, as `train_denoise.py` without
+/// `--bias-all`), `block_pixels` (4096); GPU engines: `cache`
 /// (`transposition`), `cache_bytes` (1 GiB), `threads` (1), `conv`,
 /// `fields` (as `stlp_new`).  Null on failure.
 #[no_mangle]
@@ -821,6 +873,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
         let l = &v["loss"];
         let weights = Weights { data: real(l, "data", 0.0), l1: real(l, "l1", 0.0), l2: real(l, "l2", 0.0), l3: real(l, "l3", 0.0) };
         let bias_batch = integer(&v, "bias_batch", 5);
+        let bias_all = v["bias_all"].as_bool().unwrap_or(false);
         let backend = v["backend"].as_str().unwrap_or("cpu");
         let inner = match backend {
             "cpu" => AnyTrainer::Cpu(Trainer {
@@ -829,6 +882,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 t857: None,
                 fields: HashMap::new(),
                 bias_batch,
+                bias_all,
             }),
             #[cfg(feature = "gpu")]
             "gpu" => {
@@ -847,7 +901,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), bias_batch })
+                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), bias_batch, bias_all })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
