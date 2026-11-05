@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-08-v9"
+SCRIPT_VERSION = "2026-11-08-v10"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -166,22 +166,23 @@ class NativeEngine:
     ncoeff], and native_pixels() gives the [K, ncoeff] pixel counts of the
     averages (for the ergodic weights).
 
-    spin=2: the maps are (Q, U) [batch, 2, npix] NESTED. Every level j of
-    the pyramid holds chi_E + i chi_B = -(d_x - i d_y)^2 P_j, P_j the mean of
-    the four children of P_{j-1} = Q + iU transported into the parent's
-    frame, the derivative a local spin_kernel x spin_kernel stencil in
-    pixel units of the level (weight (l / l_j)^2 in the flat limit); the
+    spin=2: the maps are (Q, U) [batch, 2, npix] NESTED. Level 0 holds
+    chi_E + i chi_B = -(d_x - i d_y)^2 P, P = Q + iU, the derivative a local
+    stencil on the pixels within spin_kernel // 2 rings (pixel units), and
+    the coarser levels its scalar decimations (spin_pyramid="scalar", the
+    default); spin_pyramid="transported": every level j holds the operator
+    applied at level j to P_j, the mean of the four children of P_{j-1}
+    transported into the parent's frame (weight (l / l_j)^2); the
     statistics are those of chi_E and chi_B with the one-channel plan:
     values [batch, 2 (E, B), (K,) ncoeff], gradients [batch, 2, npix].
     Masks (indicators of the valid data) are eroded by the stencil at every
     level. spin_fields(maps, level) returns (Q, U) and (chi_E, chi_B) of a
-    level. spin_pyramid="scalar": chi_0 only, the coarser levels being its
-    scalar decimations (the engine's own pyramid), as for a scalar map.
+    level (scalar pyramid: level 0 only).
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
                  threads=1, cache="transposition", device=0, library=None,
-                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="transported"):
+                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="scalar"):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None

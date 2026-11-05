@@ -35,16 +35,16 @@ stencil nor the SHT reference is accurate.
 
 **Pyramid** (`spin_pyramid`):
 
-- `"transported"` (default): `P_j` is the mean of the four NESTED
+- `"transported"`: `P_j` is the mean of the four NESTED
   children of `P_{j-1}`, each rotated into the parent's frame by parallel
   transport, and `chi_j` is the stencil applied to `P_j` at level `j`; the
   engine reads the `chi_j` of every level as they are
   (`LocalEngine::reload_levels`, `GpuEngine::load_levels`).
-- `"scalar"`: `chi_0` only; the coarser levels are its decimations by the
+- `"scalar"` (default): `chi_0` only; the coarser levels are its decimations by the
   engine's own scalar pyramid, as for a scalar map. The wavelet of level
   `j` then sees `chi` at `k h_0 ~ 1.57 / 2^j`, where the stencil is
-  accurate, instead of `k h_j ~ 1.57` at every level (recommended, see the
-  validation).
+  accurate, instead of `k h_j ~ 1.57` at every level (see the
+  validation; chosen as the default).
 
 **Gradient** (pyramidal): the engine's reverse sweep gives the cotangents of
 the maps of every level; `transported`: each goes through the transposed
@@ -75,7 +75,7 @@ eng.forward_levels([...])                      # statistics of maps given per le
 orientations), the same for E and B: index `[:, 0]` is E, `[:, 1]` is B.
 `native_pixels()` gives the eroded mask sizes. Cross statistics with
 `spin=2` are not available yet. C ABI: `stlp_new` with `"spin": 2`,
-`"spin_kernel"`, `"spin_pyramid"`; `stlp_spin_fields`,
+`"spin_kernel"`, `"spin_pyramid"` (`"scalar"` by default); `stlp_spin_fields`,
 `stlp_forward_levels`; ABI version `2026-11-08-v10`.
 
 ## Validation (nside 64, J = 5, L = 4; `python/stl_ensemble/validate_spin.py`)

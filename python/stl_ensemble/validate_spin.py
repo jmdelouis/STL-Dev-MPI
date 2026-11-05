@@ -93,7 +93,7 @@ def main():
     p.add_argument("--j", type=int, default=None)
     p.add_argument("--kernel", type=int, default=5)
     p.add_argument("--backend", default="cpu")
-    p.add_argument("--pyramid", default="transported", choices=["transported", "scalar"])
+    p.add_argument("--pyramid", default="scalar", choices=["transported", "scalar"])
     p.add_argument("--realisations", type=int, default=2)
     p.add_argument("--planck", nargs=2, default=None)
     p.add_argument("--fd-nside", type=int, default=16)

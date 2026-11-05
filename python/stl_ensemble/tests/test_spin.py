@@ -52,7 +52,7 @@ def test_vjp():
 
 def test_level0_shared():
     x = _maps(1, 3)
-    a = NativeEngine(NSIDE, J, spin=2)
+    a = NativeEngine(NSIDE, J, spin=2, spin_pyramid="transported")
     b = NativeEngine(NSIDE, J, spin=2, spin_pyramid="scalar")
     va, vb = a.forward(x)[0], b.forward(x)[0]
     assert va.shape == (1, 2, a.ncoeff)
@@ -84,7 +84,7 @@ def test_smooth_pure_e():
 
 
 def test_masks_eroded():
-    e = NativeEngine(NSIDE, J, spin=2)
+    e = NativeEngine(NSIDE, J, spin=2, spin_pyramid="transported")
     w = np.ones(12 * NSIDE**2)
     w[:200] = 0.0
     e.set_masks(w[None])

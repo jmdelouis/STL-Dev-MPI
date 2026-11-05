@@ -21,9 +21,11 @@
 //! `[batch, K, len(plan)]`.
 //!
 //! Spin 2 (`"spin": 2`, [`stl_core::spin`]): the maps are `(Q, U)`
-//! `[batch, 2, 12 nside^2]`; every level `j` of the pyramid holds
-//! `chi_E + i chi_B = -(d_x - i d_y)^2 P_j` of the transported mean `P_j`
-//! of `P = Q + iU`, and the statistics are those of `chi_E` and `chi_B`
+//! `[batch, 2, 12 nside^2]`; level 0 holds `chi_E + i chi_B =
+//! -(d_x - i d_y)^2 P` of `P = Q + iU` and the coarser levels its scalar
+//! decimations (`"spin_pyramid": "scalar"`, the default), or every level
+//! `j` the operator applied to the transported mean `P_j`
+//! (`"transported"`); the statistics are those of `chi_E` and `chi_B`
 //! with the plan of one channel: values `[batch, 2 (E, B), K, len(plan)]`.
 //! Masks are eroded by the stencil at every level.
 //!
@@ -130,8 +132,9 @@ pub struct Handle {
     masks: Option<Masks>,
     /// Spin-2 front end (maps `(Q, U)`; engine batch `2 batch`: E, B).
     spin: Option<SpinPyramid>,
-    /// Spin 2 with `"spin_pyramid": "scalar"`: `chi_0` only, decimated by
-    /// the scalar pyramid of the engine (else `chi_j` at every level).
+    /// Spin 2 with `"spin_pyramid": "scalar"` (default): `chi_0` only,
+    /// decimated by the scalar pyramid of the engine (`"transported"`:
+    /// `chi_j` at every level).
     spin_scalar: bool,
 }
 
@@ -216,7 +219,7 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
         let cfg = Box::new(EngineConfig::new(j, false));
         let cross = v["cross"].as_bool().unwrap_or(false);
         let channels = if cross { 2 } else { 1 };
-        let spin_scalar = match v["spin_pyramid"].as_str().unwrap_or("transported") {
+        let spin_scalar = match v["spin_pyramid"].as_str().unwrap_or("scalar") {
             "transported" => false,
             "scalar" => true,
             other => panic!("spin_pyramid must be transported or scalar, not {other:?}"),
