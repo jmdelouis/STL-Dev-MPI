@@ -90,8 +90,11 @@ fn global_quantiles<C: Comm>(comm: &C, v: &[f64], q: usize) -> Vec<f64> {
 
 /// The target's details per joint bin of (parent value, parent local variation).
 pub struct Conditional {
+    /// Quantile bins per feature.
     pub q: usize,
+    /// Fine pixels per coarse pixel (`(nside / nside_c)^2`).
     pub factor: usize,
+    /// nside of the coarse init.
     pub nside_c: i64,
     edges: [Vec<f64>; 2],
     lo: f64,
@@ -155,6 +158,7 @@ impl Conditional {
         Conditional { q, factor, nside_c, edges, lo, width, cdf }
     }
 
+    /// Joint bin `value_bin * q + variation_bin` of a parent's value and local variation.
     pub fn bin(&self, value: f64, variation: f64) -> usize {
         bucket(&self.edges[0], value) * self.q + bucket(&self.edges[1], variation)
     }

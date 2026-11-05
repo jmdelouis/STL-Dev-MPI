@@ -108,6 +108,7 @@ class Snapshot:
         self._lib, self._handle, self.key, self.owner = lib, handle, key, owner
 
     def close(self):
+        """Free the saved state."""
         if self._handle:
             self._lib.stlp_checkpoint_free(self._handle)
             self._handle = None
@@ -216,6 +217,8 @@ class NativeEngine:
         return (self.batch, self.nmasks, self.ncoeff) if self.nmasks else (self.batch, self.ncoeff)
 
     def info(self):
+        """The engine's description, from the library: version, sizes, backend, the plan
+        (``plan``), the number of masks and, on a GPU, the device; plus ``library_sha256``."""
         with self._lock:
             self._open()
             p = self._lib.stlp_info(self._handle)
@@ -229,6 +232,32 @@ class NativeEngine:
                 self._lib.stlp_string_free(p)
 
     def forward(self, maps, generation=0, member=0, objective="gaussian", moments=False):
+        """Statistics of a batch of maps, keeping the state for :meth:`vjp`.
+
+        Parameters
+        ----------
+        maps : array_like
+            ``[batch, npix]`` NESTED maps (``[npix]`` when ``batch == 1``); with
+            ``cross=True``, pairs ``[batch, 2, npix]``.
+        generation, member : int
+            Identity of the forward state (e.g. the L-BFGS evaluation and the
+            ensemble member); :meth:`vjp` must be called with the same values.
+        objective : str
+            Name of the objective, part of the identity (several objectives can
+            share one engine with :meth:`checkpoint` / :meth:`restore`).
+        moments : bool
+            Also return the spatial variance of each coefficient's terms.
+
+        Returns
+        -------
+        values : ndarray of complex128
+            ``[batch, ncoeff]``, or ``[batch, K, ncoeff]`` with ``K`` masks, in the
+            order of ``plan``.
+        variances : ndarray of float64
+            Same shape as ``values`` if ``moments``, else ``[batch, 0]``. Divided
+            by :meth:`native_pixels`, they estimate the variance of each coefficient
+            between realisations (ergodicity).
+        """
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
@@ -251,6 +280,22 @@ class NativeEngine:
             return values, variance
 
     def vjp(self, cotangents, generation=0, member=0, objective="gaussian"):
+        """Gradient of ``Re sum(conj(cotangents) * values)`` with respect to the maps.
+
+        Parameters
+        ----------
+        cotangents : array_like of complex
+            Shaped like the ``values`` of the last :meth:`forward`; for a loss
+            ``L``, ``dL/dRe + i dL/dIm`` (``2 w (S - S*)`` for ``sum w |S - S*|^2``).
+        generation, member, objective
+            Must equal those of the last :meth:`forward` (else ``RuntimeError``).
+
+        Returns
+        -------
+        ndarray of float64
+            Shaped like the maps of the forward: ``[batch, npix]`` or
+            ``[batch, 2, npix]`` with ``cross=True``.
+        """
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
@@ -284,6 +329,8 @@ class NativeEngine:
         return g[:, 0], g[:, 1]
 
     def checkpoint(self):
+        """Copy of the current forward state (a :class:`Snapshot`), to run another
+        objective on the engine and come back with :meth:`restore`."""
         with self._lock:
             self._open()
             p = self._lib.stlp_checkpoint(self._handle)
@@ -292,6 +339,8 @@ class NativeEngine:
             return Snapshot(self._lib, p, self._current_key, self._handle)
 
     def restore(self, snapshot, generation=0, member=0, objective="gaussian"):
+        """Make ``snapshot`` (from :meth:`checkpoint`) the current forward state; its
+        identity must be ``(generation, member, objective)``."""
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
@@ -307,6 +356,8 @@ class NativeEngine:
             self._current_key = key
 
     def close(self):
+        """Free the native engine (also on garbage collection and at the end of a
+        ``with`` block)."""
         if getattr(self, "_handle", None):
             self._lib.stlp_free(self._handle)
             self._handle = None
@@ -375,6 +426,8 @@ class SpectrumEngine:
             raise RuntimeError("spectrum engine is closed")
 
     def info(self):
+        """The engine's description: version, sizes, spin, ``components``,
+        where the transforms run, masks and ``fsky``; plus ``library_sha256``."""
         with self._lock:
             self._open()
             p = self._lib.stlp_spec_info(self._handle)
@@ -421,6 +474,22 @@ class SpectrumEngine:
         return (self.batch,) + ((2,) if self.cross else ()) + field
 
     def forward(self, maps, generation=0, member=0, objective="cl"):
+        """Pseudo-spectra of a batch of maps, keeping the state for :meth:`vjp`.
+
+        Parameters
+        ----------
+        maps : array_like
+            ``[batch, npix]`` NESTED maps; ``[batch, 2, npix]`` (Q, U) with
+            ``spin >= 1``; one more axis of 2 with ``cross=True``.
+        generation, member, objective
+            Identity of the forward state, as in :meth:`NativeEngine.forward`.
+
+        Returns
+        -------
+        ndarray of float64
+            ``C_l`` of shape ``[batch, (K,) (components,) lmax + 1]``: ``K`` masks
+            if any, ``components`` (EE, BB, EB, ...) if ``spin >= 1``.
+        """
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
@@ -440,6 +509,8 @@ class SpectrumEngine:
             return cl
 
     def vjp(self, cotangents, generation=0, member=0, objective="cl"):
+        """Gradient of ``sum(cotangents * C_l)`` with respect to the maps of the last
+        :meth:`forward` (same identity); shaped like those maps."""
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
@@ -474,6 +545,7 @@ class SpectrumEngine:
         return g[:, 0], g[:, 1]
 
     def close(self):
+        """Free the native engine."""
         if getattr(self, "_handle", None):
             self._lib.stlp_spec_free(self._handle)
             self._handle = None
@@ -573,14 +645,14 @@ class PatchEngine:
     parents at the coarser levels) only. A disc of radius 180 gives the
     full-sky statistics.
 
-    select(centres, radius, core=None) -> ids, a list of sorted NESTED pixel
-        arrays; centres are NESTED pixels [B] at nside or vectors [B, 3].
-    forward(maps, centres=None, radius=None, core=None, moments=True,
-        generation=0) -> (values [B, ncoeff] complex, variances [B, ncoeff]);
-        maps[i] is the patch x[ids[i]] ([n_i], or [2, n_i] with cross=True),
-        a list, or a dense array when every disc has the same size.
-    vjp(cotangents [B, ncoeff], generation=0) -> gradients shaped like maps.
-    native_pixels [B, ncoeff]: number of pixels each coefficient averages.
+    - select(centres, radius, core=None) -> ids, a list of sorted NESTED
+      pixel arrays; centres are NESTED pixels [B] at nside or vectors [B, 3].
+    - forward(maps, centres=None, radius=None, core=None, moments=True,
+      generation=0) -> (values [B, ncoeff] complex, variances [B, ncoeff]);
+      maps[i] is the patch x[ids[i]] ([n_i], or [2, n_i] with cross=True),
+      a list, or a dense array when every disc has the same size.
+    - vjp(cotangents [B, ncoeff], generation=0) -> gradients shaped like maps.
+    - native_pixels [B, ncoeff]: number of pixels each coefficient averages.
     """
     def __init__(self, nside, j, kernel=5, orientations=4, cross=False,
                  threads=0, cache=256, library=None, backend="cpu", device=0, cache_bytes=None,
@@ -614,6 +686,8 @@ class PatchEngine:
             raise RuntimeError("patch engine is closed")
 
     def info(self):
+        """The engine's description: version, sizes, the plan, the number of
+        levels, the backend and caches; plus ``library_sha256``."""
         with self._lock:
             self._open()
             p = self._lib.stlp_patch_info(self._handle)
@@ -681,6 +755,26 @@ class PatchEngine:
         return [m[k][..., i] for k, i in enumerate(self.ids)]
 
     def forward(self, maps, centres=None, radius=None, core=None, moments=True, generation=0):
+        """Statistics of the patches of the selected discs.
+
+        Parameters
+        ----------
+        maps : list of ndarray or ndarray
+            Patch ``i`` is ``x[ids[i]]`` (``[n_i]``, or ``[2, n_i]`` with
+            ``cross=True``), e.g. from :meth:`gather`; one ndarray ``[B, n]`` when
+            every disc has ``n`` pixels.
+        centres, radius, core : optional
+            Select the discs first (:meth:`select`); radii in degrees.
+        moments : bool
+            Also return the spatial variances of the terms.
+        generation : int
+            Identity of the forward state for :meth:`vjp`.
+
+        Returns
+        -------
+        values : ndarray of complex128, ``[B, ncoeff]``
+        variances : ndarray of float64, ``[B, ncoeff]`` (``[B, 0]`` without moments)
+        """
         with self._lock:
             self._open()
             if centres is not None:
@@ -713,6 +807,18 @@ class PatchEngine:
             return values, variance
 
     def vjp(self, cotangents, generation=0):
+        """Gradients of ``Re sum(conj(cotangents) * values)`` with respect to the
+        patches of the last :meth:`forward` (same ``generation``).
+
+        Parameters
+        ----------
+        cotangents : array_like of complex, ``[B, ncoeff]``
+
+        Returns
+        -------
+        list of ndarray, or ndarray
+            One gradient per patch, with the structure of the forward's ``maps``.
+        """
         with self._lock:
             self._open()
             if self._generation != int(generation):
@@ -805,6 +911,7 @@ class PatchEngine:
         return [x[0] for x in g], [x[1] for x in g]
 
     def close(self):
+        """Free the native engine."""
         if getattr(self, "_handle", None):
             self._lib.stlp_patch_free(self._handle)
             self._handle = None

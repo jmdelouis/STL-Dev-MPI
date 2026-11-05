@@ -192,6 +192,7 @@ pub struct Args {
     /// `--init-noise conditional`: details drawn conditionally on the
     /// coarse init ([`conditional::Conditional`]), `--init-bins` bins.
     pub init_conditional: bool,
+    /// `--init-bins`: quantile bins per feature of `--init-noise conditional` (default 8).
     pub init_bins: usize,
     /// `--seed`: white-noise seed (member `m` uses `seed + m`).
     pub seed: u64,

@@ -185,7 +185,9 @@ pub fn bands(x: &[f64], h: usize, w: usize, levels: usize) -> Vec<Vec<f64>> {
 /// `K = sum_l w_l 4^l (D^T)^l D^l` on `[h][w]` planes.
 #[derive(Clone, Debug)]
 pub struct Smoother {
+    /// Rows of a plane.
     pub h: usize,
+    /// Columns of a plane.
     pub w: usize,
     /// `w_l`, `l = 0..len` (level `l` at `h / 2^l`).
     pub weights: Vec<f64>,

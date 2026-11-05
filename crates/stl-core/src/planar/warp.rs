@@ -31,6 +31,7 @@ pub enum Flow {
 }
 
 impl Flow {
+    /// Variables per pixel: 2 for [`Flow::Both`], else 1.
     pub fn parts(self) -> usize {
         if self == Flow::Both {
             2
@@ -40,9 +41,14 @@ impl Flow {
     }
 }
 
+/// The displacement operator of `h x w` periodic planes: white variables
+/// to `(u_r, u_c)` through the multiplier `K`, and the warp of an anchor plane.
 pub struct Warp {
+    /// Rows of a plane.
     pub h: usize,
+    /// Columns of a plane.
     pub w: usize,
+    /// Which parts of the displacement are variables.
     pub flow: Flow,
     fft: Fft2,
     /// `K(k)` on the unshifted frequency grid `[H, W]`.
@@ -53,8 +59,11 @@ pub struct Warp {
 pub struct WarpState {
     /// `dx/dq_r`, `dx/dq_c` at every pixel (derivatives of the bilinear interpolant).
     pub dr: Vec<f64>,
+    /// `dx/dq_c` at every pixel.
     pub dc: Vec<f64>,
+    /// Row displacement `u_r` (pixels).
     pub ur: Vec<f64>,
+    /// Column displacement `u_c` (pixels).
     pub uc: Vec<f64>,
 }
 
@@ -96,6 +105,7 @@ impl Warp {
         self.flow.parts() * self.h * self.w
     }
 
+    /// No variable (an empty plane).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

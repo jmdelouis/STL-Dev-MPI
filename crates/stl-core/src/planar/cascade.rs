@@ -73,6 +73,7 @@ fn bucket(edges: &[f64], v: f64) -> usize {
 pub struct SplitMix(pub u64);
 
 impl SplitMix {
+    /// Uniform in `[0, 1)`, 53 random bits.
     pub fn next_f64(&mut self) -> f64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
@@ -92,7 +93,9 @@ impl SplitMix {
 /// The targets' detail pixels grouped by bin of (coarse value, coarse
 /// gradient modulus), `q` quantile bins per feature.
 pub struct ConditionalDetail {
+    /// Side of the planes.
     pub n: usize,
+    /// Quantile bins per feature.
     pub q: usize,
     edges: [Vec<f64>; 2],
     start: Vec<usize>,
@@ -125,6 +128,7 @@ impl ConditionalDetail {
         me
     }
 
+    /// Joint bin `value_bin * q + grad_bin` of a coarse value and gradient modulus.
     pub fn bin(&self, value: f64, grad: f64) -> usize {
         bucket(&self.edges[0], value) * self.q + bucket(&self.edges[1], grad)
     }
