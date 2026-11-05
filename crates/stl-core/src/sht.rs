@@ -155,7 +155,7 @@ fn phases(phi0: f64, sign: f64, count: usize, out: &mut Vec<C64>) {
 
 /// Highest `m` where a ring of `(cos, sin)` has spin-`s` functions above
 /// about `1e-30` up to `lmax` (libsharp's `sharp_get_mlim`).
-fn mlim(lmax: usize, s: usize, cos: f64, sin: f64) -> usize {
+pub fn mlim(lmax: usize, s: usize, cos: f64, sin: f64) -> usize {
     let ofs = (lmax as f64 * 0.01).max(100.0);
     let b = -2.0 * s as f64 * cos.abs();
     let t1 = lmax as f64 * sin + ofs;

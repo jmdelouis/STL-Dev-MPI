@@ -170,6 +170,13 @@ forward, 5 syntheses per VJP; 10 each with `--cross`), median of 5 evaluations a
 
 The WSL row is the blocked recursions of 5.1 (0.168 s and 0.148 s before, same session); the garoupe
 rows and the spin-`s` times below predate them.
+The device Legendre sums (kernels and GEMMs) skip the same negligible rings as the host (`mlim`):
+on the T4 at nside 256, `lmax = 511`, that saves 1 to 5 % (analysis 0.311 s against 0.318 s with
+the kernels, 0.205 s against 0.217 s with the GEMMs, batch 20), not more, because the skipped
+(`m`, ring) pairs are the short ones. Two other host techniques were tried on the device and left
+out because the T4 was not faster with them: fewer threads holding more rings in the transposed
+sums (0.040 s against 0.033 s at batch 1), and direct DFTs of the short polar rings in place of one
+cuFFT call per length (no measurable change).
 The GPU setup is the CUDA context and the NVRTC compilation of the kernels, once per process.
 Host transfers (maps up, `a_lm` down, cotangents up, maps down) are included.
 

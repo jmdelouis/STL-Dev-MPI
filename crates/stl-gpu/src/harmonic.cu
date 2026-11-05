@@ -71,7 +71,7 @@ struct RecConst {
 };
 
 // Starting value lambda_mm (scaled by SCALE^k) of the recursion on a ring of
-// ln(sin) `lnsin` (Sht::recurse).
+// ln(sin) `lnsin` (Sht::recurse_block).
 __device__ __forceinline__ void rec_start(i64 m, double lnsin, const double* log_mm, RecConst rc, double* cur, int* k) {
     double lg = log_mm[m] + (double)m * lnsin;
     int kk = lg > rc.lo ? 0 : (int)ceil((lg - rc.c300) / rc.ln_scale);
@@ -101,12 +101,13 @@ extern "C" __global__ void sht_leg_syn(
     const double2* alm, i64 lmax, const double* coef, const double* log_mm,
     const double* cs, const double* sn, const double* lnsin, i64 nr, i64 pairs, int deriv,
     double rc_lo, double rc_c300, double rc_ln, double rc_scale, double rc_limit,
-    double2* A, double2* B, double2* C)
+    const i64* p0, double2* A, double2* B, double2* C)
 {
     RecConst rc = {rc_lo, rc_c300, rc_ln, rc_scale, rc_limit};
     i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
     i64 m = blockIdx.y;
-    if (p > pairs) return;
+    // Rings before p0[m]: negligible up to lmax (the sums stay zero).
+    if (p > pairs || p < p0[m]) return;
     double cosv = cs[p], sinv = sn[p];
     i64 off = alm_index(lmax, m, m);
     const double2* a = alm + off;
@@ -160,11 +161,13 @@ extern "C" __global__ void sht_leg_syn(
 // Transpose of sht_leg_syn (Sht::legendre_adjoint): out[chunk][packed
 // (l, m)] = sum over the chunk's ring pairs of lambda A + lambda' B +
 // l (l + 1) lambda C (B, C when `deriv`).  Grid (lmax + 1, chunks), SHT_T
-// threads; thread t holds the rings chunk * SHT_T * SHT_R + j SHT_T + t.
+// threads; thread t holds the rings p0[m] + chunk * SHT_T * SHT_R + j SHT_T
+// + t (the rings before p0[m] are negligible: Sht::mlim); a chunk without
+// rings writes zeros.
 extern "C" __global__ void sht_leg_adj(
     const double2* A, const double2* B, const double2* C, int deriv,
     i64 lmax, const double* coef, const double* log_mm,
-    const double* cs, const double* sn, const double* lnsin, i64 nr, i64 pairs,
+    const double* cs, const double* sn, const double* lnsin, i64 nr, i64 pairs, const i64* p0,
     double rc_lo, double rc_c300, double rc_ln, double rc_scale, double rc_limit,
     double2* out, i64 nalm)
 {
@@ -176,11 +179,16 @@ extern "C" __global__ void sht_leg_adj(
     i64 off = alm_index(lmax, m, m);
     const double* cf = coef + 3 * off;
     double2 z = make_double2(0.0, 0.0);
+    i64 first = p0[m] + chunk * (SHT_T * SHT_R);
+    if (first > pairs) {
+        for (i64 l = m + t; l <= lmax; l += SHT_T) out[chunk * nalm + off + (l - m)] = z;
+        return;
+    }
     double prev[SHT_R], cur[SHT_R];
     int k[SHT_R];
 #pragma unroll
     for (int j = 0; j < SHT_R; j++) {
-        i64 p = chunk * (SHT_T * SHT_R) + (i64)j * SHT_T + t;
+        i64 p = first + (i64)j * SHT_T + t;
         prev[j] = 0.0;
         cur[j] = 0.0;
         k[j] = 0;
@@ -195,7 +203,7 @@ extern "C" __global__ void sht_leg_adj(
         }
 #pragma unroll
         for (int j = 0; j < SHT_R; j++) {
-            i64 p = chunk * (SHT_T * SHT_R) + (i64)j * SHT_T + t;
+            i64 p = first + (i64)j * SHT_T + t;
             if (p > pairs) continue;
             double cosv = cs[p], sinv = sn[p];
             i64 s = nr - 1 - p;
@@ -621,12 +629,13 @@ __device__ __forceinline__ i64 leg_rows(i64 lmax, i64 m, int q) {
 // Grid (ceil(P / blockDim), m-block).
 extern "C" __global__ void leg_table(
     i64 m0, i64 lmax, const double* coef, const double* log_mm, const double* cs, const double* lnsin, i64 P,
-    double rc_lo, double rc_c300, double rc_ln, double rc_scale, double rc_limit, const i64* cum, double* T)
+    double rc_lo, double rc_c300, double rc_ln, double rc_scale, double rc_limit, const i64* cum, const i64* p0, double* T)
 {
     RecConst rc = {rc_lo, rc_c300, rc_ln, rc_scale, rc_limit};
     i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
     i64 m = m0 + blockIdx.y;
-    if (p >= P) return;
+    // Rows before p0[m] (negligible rings) are neither written nor read.
+    if (p >= P || p < p0[m]) return;
     double cosv = cs[p];
     const double* cf = coef + 3 * alm_index(lmax, m, m);
     double* t0 = T + P * cum[2 * (m - m0)];

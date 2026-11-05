@@ -25,7 +25,7 @@ use crate::cufft::{cufft, CuFft, Handle, FORWARD, INVERSE};
 use crate::device::{Arg, Gpu, NULL};
 use crate::terms::copy_rows;
 use cudarc::driver::CudaSlice;
-use stl_core::sht::{Sht, LIMIT, LN_SCALE, SCALE};
+use stl_core::sht::{mlim, Sht, LIMIT, LN_SCALE, SCALE};
 
 /// Pixels per partial sum of [`pixel_sum`] and of the Minkowski functionals.
 pub const CHUNK: usize = 1 << 16;
@@ -140,6 +140,10 @@ pub struct GpuSht {
     nest: CudaSlice<u32>,
     log_mm: CudaSlice<f64>,
     coef: CudaSlice<f64>,
+    /// First ring pair of every m where the functions are significant up
+    /// to lmax (`stl_core::sht::mlim`); the rings before it are skipped.
+    p0: CudaSlice<i64>,
+    p0_host: Vec<usize>,
     fft: &'static CuFft,
     classes: Vec<FftClass>,
     rings5: Vec<FftRings>,
@@ -190,6 +194,8 @@ impl GpuSht {
         let nest = gpu.upload(sht.nest_of_ring());
         let log_mm = gpu.upload(sht.log_mm());
         let coef = gpu.zeros::<f64>(3 * nalm);
+        // mlim increases towards the equator: the significant rings of m are p0[m]..=pairs.
+        let p0: Vec<i64> = (0..=lmax).map(|m| (0..=pairs).find(|&p| m <= mlim(lmax, 0, sht.rings[p].cos, sht.rings[p].sin)).unwrap_or(pairs) as i64).collect();
         gpu.launch("sht_coef", ((lmax + 1).div_ceil(256) as u32, (lmax + 1) as u32), 256, &[lmax.into(), gpu.a(&coef)]);
         // Batches of rings of one length: the polar pairs (north i, south
         // 4 nside - i), then the 2 nside + 1 equatorial rings, contiguous.
@@ -249,6 +255,8 @@ impl GpuSht {
             nest,
             log_mm,
             coef,
+            p0: gpu.upload(&p0),
+            p0_host: p0.iter().map(|&p| p as usize).collect(),
             fft,
             classes,
             rings5,
@@ -260,7 +268,7 @@ impl GpuSht {
         })
     }
 
-    /// Constants of the scaled recursion, as `Sht::recurse`.
+    /// Constants of the scaled recursion, as `Sht::recurse_block`.
     fn rc(&self) -> [Arg; 5] {
         let ln2 = std::f64::consts::LN_2;
         [(-650.0 * ln2).into(), (300.0 * ln2).into(), LN_SCALE.into(), SCALE.into(), LIMIT.into()]
@@ -327,7 +335,7 @@ impl GpuSht {
                         (deriv as i32).into(),
                     ];
                     args.extend(self.rc());
-                    args.extend([gpu.at(&sums.a, o), self.opt_at(gpu, &sums.b, o), self.opt_at(gpu, &sums.c, o)]);
+                    args.extend([gpu.a(&self.p0), gpu.at(&sums.a, o), self.opt_at(gpu, &sums.b, o), self.opt_at(gpu, &sums.c, o)]);
                     gpu.launch("sht_leg_syn", ((self.pairs + 1).div_ceil(128) as u32, (self.lmax + 1) as u32), 128, &args);
                 }
             }
@@ -340,13 +348,14 @@ impl GpuSht {
         let p = self.pairs + 1;
         let mut args = vec![b.m0.into(), self.lmax.into(), gpu.a(&self.coef), gpu.a(&self.log_mm), gpu.a(&self.cs), gpu.a(&self.lnsin), p.into()];
         args.extend(self.rc());
-        args.extend([gpu.a(&b.cum_dev), gpu.a(&g.table)]);
+        args.extend([gpu.a(&b.cum_dev), gpu.a(&self.p0), gpu.a(&g.table)]);
         gpu.launch("leg_table", (p.div_ceil(128) as u32, (b.m1 - b.m0) as u32), 128, &args);
     }
 
     /// `C = op(T) X` of one (m, q) of block `b`: `t` true for the transpose
     /// (adjoint, `[n_q, cols]` from `[P, cols]`), false for the synthesis
     /// (`[P, cols]` from `[n_q, cols]`); `x` holds the `[n_q, cols]` side.
+    /// Only the rings from `p0[m]` take part (the others are negligible).
     #[allow(clippy::too_many_arguments)]
     fn gemm(&self, gpu: &Gpu, g: &Gemm, b: &MBlock, m: usize, q: usize, cols: usize, x: &CudaSlice<f64>, o: &CudaSlice<f64>, t: bool) {
         let p = self.pairs + 1;
@@ -355,14 +364,16 @@ impl GpuSht {
             return;
         }
         let c = b.cum[2 * (m - b.m0) + q];
-        let table = gpu.ptr(&g.table) + (8 * p * c) as u64;
+        let first = self.p0_host[m];
+        let rows = p - first;
+        let table = gpu.ptr(&g.table) + (8 * (p * c + first)) as u64;
         let xp = gpu.ptr(x) + (8 * cols * c) as u64;
-        let op = gpu.ptr(o) + (8 * (2 * (m - b.m0) + q) * p * cols) as u64;
+        let op = gpu.ptr(o) + (8 * ((2 * (m - b.m0) + q) * p * cols + first)) as u64;
         let r = unsafe {
             if t {
-                g.blas.dgemm(g.handle, OP_T, OP_N, n, cols, p, 1.0, table, p, op, p, 0.0, xp, n)
+                g.blas.dgemm(g.handle, OP_T, OP_N, n, cols, rows, 1.0, table, p, op, p, 0.0, xp, n)
             } else {
-                g.blas.dgemm(g.handle, OP_N, OP_N, p, cols, n, 1.0, table, p, xp, n, 0.0, op, p)
+                g.blas.dgemm(g.handle, OP_N, OP_N, rows, cols, n, 1.0, table, p, xp, n, 0.0, op, p)
             }
         };
         r.unwrap_or_else(|e| panic!("{e}"));
@@ -490,6 +501,7 @@ impl GpuSht {
                 gpu.a(&self.lnsin),
                 self.nr.into(),
                 self.pairs.into(),
+                gpu.a(&self.p0),
             ];
             args.extend(self.rc());
             args.extend([gpu.a(&part), self.nalm.into()]);
