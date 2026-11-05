@@ -111,9 +111,22 @@ report = net.lbfgs("Q", {"max_iter": 20, "history_size": 10})   # evaluations, l
 ```
 
 Driver: `python/stl_ensemble/train_native_unet.py`, the `--real --bias frozen` run of
-`train_denoise.py`.
+`train_denoise.py`, with its option names and meaning.
 - Options: `--optimizer adam` (cosine) or `lbfgs` (rounds, `--lbfgs-fields alternate|joint`),
-  `--cond none|log857`, `--bias-all`, `--seconds`.
+  `--bias-all`, `--seconds`, and:
+  - `--loss data=1,l1=1,l2=1,l3=1,cl=1`. `cl` is the binned half-mission cross spectrum
+    `C_b(m d1, m d2)` against `C_b(m u, m u)` under the apodised galactic masks `--cl-masks`
+    (`--cl-lmin 10`, `--cl-width 30`, `--cl-lmax 2 nside - 1`, `--cl-apod 5`): pseudo-spectra
+    divided by `mean(m^2)`, a reduced chi^2 with the Gaussian variance of the target bins, no
+    noise bias (`stl_port.denoise`, over `SpectrumEngine`). The driver adds its cotangent
+    through `apply(d, cot=...)` before the Adam update (one more network forward per step).
+  - `--stat-masks 0,20,30,45`: the statistics averaged under `|b| > b0` (`set_masks`), every
+    coefficient once per mask with its ergodic weight and its own frozen bias.
+  - `--cond none|log857|sigma|log857+sigma`: `sigma` is `0.5 log` of the mean over the fields
+    and the training simulations of the noise squared, standardised.
+  - `--bias-warmup N`: live biases (`live`, `--realizations` distinct simulations per step for
+    the data term and for the `l` terms) for the first `N` steps; frozen estimates every
+    `--bias-every` steps from step `N + 1`.
 - Writes `train.json`, `eval_{Q,U}.npz` (`sky = d`, `d`, `u`) and `model.pt` as `train_denoise.py`
   does. `stlia.unet.load` reads that `model.pt`; its output agrees with the native one to 1e-6.
 
@@ -161,6 +174,28 @@ Training step (`python/stl_ensemble/tests/test_native_unet.py`, nside 16, J = 3)
 - On a garoupe T4 with the native side on the GPU: all the above pass. The training-step
   gradients are 3.7e-4 from the torch CPU reference, the float32 conditioning.
 
+Best configuration of Healpix-STL-IA (`python/stl_ensemble/tests/test_native_denoise.py`: terms
+`data`, `l1`, `l2`, `l3`, `cl`, statistics under the cuts 0, 20, 30, 45 deg, `cl` under the
+apodised cuts 0, 30, 45, 60 deg, two conditioning maps `log857`, `sigma`), against
+`train_denoise.py` rebuilt with torch autograd over `NativeEngine`, with the same weights and the
+same draws:
+
+| case | terms (max rel.) | gradients (max rel. / norm) |
+|---|---|---|
+| nside 16 synthetic, CPU, frozen / live | 2.1e-7 / 2.3e-7 | 3.4e-6 / 4.0e-6 |
+| nside 16 synthetic, T4, frozen / live | 1.6e-7 / 1.8e-7 | 2.2e-6 / 3.9e-6 |
+| nside 64 PR3 Q (FFP10 mc10-15), T4, frozen | 6.5e-7 | 1.6e-3 / 5.9e-4 |
+| nside 64 PR3 Q, T4, live (warmup) | 6.2e-7 | 1.6e-3 / 6.0e-4 |
+
+- The `cl` term agrees to 3.8e-7 with `stlia.spectra` on both of its backends (`SpectrumEngine`
+  and the torch ring-FFT transform).
+- The conditioning maps are identical to those of `train_denoise.py`, and so are the mask ids.
+- The nside 64 gradients carry the float32 GroupNorm conditioning described above.
+- Reports: `docs/runs/native_denoise/`.
+- A 40-step run of the driver with the full configuration (warmup 10, biases every 10 steps) is
+  in `smoke_n64.log`. `stlia.unet.load` reads its `model.pt` (`cond = 2`), and the output agrees
+  with the native one to 1.4e-6.
+
 ## 5. Timings and memory
 
 `python/stl_ensemble/bench_native_unet.py`, one garoupe Tesla T4.
@@ -189,6 +224,19 @@ A100 1/2. The torch reference runs at about 3.75 s/step on an A100.
 The native bias estimate includes the creation of the statistics engines (they are built at
 their first call); torch's excludes it. Bias draws are batched as in `train_denoise.py` (5
 maps, 15 pairs per call): the nside 64 estimate is the same, 5.7 s.
+
+Best configuration, nside 256 on a T4 (6 levels, J = 7; seconds per call):
+
+| call | full sky | 4 statistics masks |
+|---|---|---|
+| frozen step (`step`) | 6.3 | 7.7 |
+| live step, B = 4 (warmup) | 14.2 | 20.3 |
+| bias estimate, 40 draws | 37.8 | 51.2 |
+| `cl` (spectra on the GPU, value and gradient) | 0.16 | |
+| extra network passes of `cl` (`apply`, then `apply(cot=...)`) | 1.4 | |
+
+With `--steps 3000 --bias-warmup 500 --bias-every 50`, the best configuration costs about 1.7
+times the run without masks, `cl` or warmup (`r256_native`).
 
 ## 6. Adam against L-BFGS (nside 64, PR3 maps)
 
