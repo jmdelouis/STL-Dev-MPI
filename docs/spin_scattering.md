@@ -58,7 +58,10 @@ so that the averages only take pixels whose field reads valid data:
 row when every pixel it reads is; `scalar`: level 0 eroded by the stencil,
 then a coarse pixel is dropped when the decimation cone of its children
 meets a dropped pixel. The wavelets still read the zeroed data within their
-halo near an edge (as for scalar maps).
+halo near an edge (as for scalar maps). A coarse level that the erosion empties (a small
+mask, e.g. |b| > 45 deg at nside 2-4) falls back to the parents of the
+level below, the rule of the scalar masks (a parent kept when one of its
+children is).
 
 ## API (Python, `stl_port.native`)
 
@@ -73,10 +76,29 @@ eng.forward_levels([...])                      # statistics of maps given per le
 
 `eng.plan` is the one-channel plan (`family`, `c1 = c2 = 0`, scales,
 orientations), the same for E and B: index `[:, 0]` is E, `[:, 1]` is B.
-`native_pixels()` gives the eroded mask sizes. Cross statistics with
-`spin=2` are not available yet. C ABI: `stlp_new` with `"spin": 2`,
-`"spin_kernel"`, `"spin_pyramid"` (`"scalar"` by default); `stlp_spin_fields`,
-`stlp_forward_levels`; ABI version `2026-11-08-v10`.
+`native_pixels()` gives the eroded mask sizes. C ABI: `stlp_new` with
+`"spin": 2`, `"spin_kernel"`, `"spin_pyramid"` (`"scalar"` by default),
+`"spin_a"`; `stlp_spin_fields`, `stlp_forward_levels`; ABI version
+`2026-11-08-v11`.
+
+**Cross statistics** (scalar pyramid only), pairs `(a, b)` with `b` a
+`(Q, U)` field and `a` another one (`spin_a=2`) or a scalar map `T`
+(`spin_a=0`, e.g. the 857 GHz intensity, used as it is):
+
+```python
+x = NativeEngine(nside, j, batch=B, spin=2, cross=True, spin_a=0, masks=...)
+values, var = x.forward_cross(a, b, moments=True)   # a [B, npix] (spin_a=0) or [B, 2, npix]; b [B, 2, npix]
+ga, gb = x.vjp_cross(cotangents)                    # shapes of a and b
+```
+
+`values[:, 0]` is the cross plan of `(chi_E^a, chi_E^b)` (or `(T,
+chi_E^b)`), `values[:, 1]` that of `(chi_B^a, chi_B^b)` (or `(T,
+chi_B^b)`), `[B, 2, (K,) ncoeff]`, with the plan of the scalar cross
+engine (`c1 != c2`; `x.plan == NativeEngine(..., cross=True).plan`). E x B
+terms are not computed. The engine runs the scalar cross plan on the pairs
+`(chi_k^a, chi_k^b)`, `k = E, B`, as two batch rows per pair; the transposed
+stencil maps the cotangents back to `(Q, U)` (and the two rows of `T` add
+up).
 
 ## Validation (nside 64, J = 5, L = 4; `python/stl_ensemble/validate_spin.py`)
 
@@ -126,6 +148,21 @@ direction, nside 16, relative error 2.3e-6 (transported) and 1.2e-6
 (scalar), CPU and GPU. GPU against CPU: statistics equal to the printed 14
 digits; `tests/test_spin.py` checks 1e-12.
 
+**Cross statistics** (scalar pyramid, against the scalar cross engine on
+the exact `chi_0`, E; `docs/runs/spin_n64/val_n64_scalar_cross_*.json`):
+Planck 857 GHz `T` x Planck 353 `(Q, U)`: S1 j = 0..4 0.021 / 0.005 /
+0.006 / 0.017 / 0.064, S2 0.26 / 0.021 / 0.004 / 0.017 / 0.079, S3 / S4
+with j1 > 0 0.038 / 0.030; two correlated dust `(Q, U)` fields: S1 j = 1..4
+0.027 / 0.005 / 0.009 / 0.022, S2 0.054 / 0.008 / 0.020 / 0.041. (A
+synthetic `T` weakly correlated with `chi_E` gives larger relative errors
+at j = 3, 4, 20-30 %, on cross coefficients close to zero.) GPU equals CPU
+to the printed 14 digits; `tests/test_spin.py` checks 1e-12, the
+finite-difference vjp of both kinds of pairs, and the identity with the
+scalar cross engine on the same `chi` (1e-12). The galactic cuts |b| > 0,
+20, 30, 45 deg at nside 64 (J = 5) keep 49152 / 30464 / 22528 / 12320
+pixels at level 0 and 192 / 24 / 8 / 24 at level 4 (the last two after the
+fallback).
+
 ## Timings (T4, garoupe; one `(Q, U)` map = two engine rows)
 
 | nside | engine | forward | vjp | device peak | host operators |
@@ -136,6 +173,8 @@ digits; `tests/test_spin.py` checks 1e-12.
 | 256 | scalar (one map) | 0.81 s | 1.01 s | 1.63 GB | |
 | 256 | spin 2, transported | 0.86 s | 1.25 s | 1.79 GB | 1.12 GB |
 | 256 | spin 2, scalar | 0.87 s | 1.24 s | 1.83 GB | 0.80 GB |
+| 256 | spin 2 cross, 2 pairs (QU x QU), forward with moments | 1.64 s | 2.93 s | 2.63 GB | 0.80 GB |
+| 256 | spin 2 cross, 2 pairs (T x QU), forward with moments | 1.53 s | 2.92 s | 2.67 GB | 0.80 GB |
 
 Building the engine and the operators takes 26 s (scalar pyramid) to 28 s
 (transported) at nside 256, against 23 s for the scalar engine alone.

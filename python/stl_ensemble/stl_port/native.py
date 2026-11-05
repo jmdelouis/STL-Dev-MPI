@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-08-v10"
+SCRIPT_VERSION = "2026-11-08-v11"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -178,11 +178,18 @@ class NativeEngine:
     Masks (indicators of the valid data) are eroded by the stencil at every
     level. spin_fields(maps, level) returns (Q, U) and (chi_E, chi_B) of a
     level (scalar pyramid: level 0 only).
+
+    spin=2, cross=True (scalar pyramid): pairs (a, b), b a (Q, U) field
+    [batch, 2, npix] and a another one (spin_a=2) or a scalar map T
+    [batch, npix] (spin_a=0); forward_cross(a, b) gives the cross plan of
+    (chi_E^a, chi_E^b) and (chi_B^a, chi_B^b), or (T, chi_E^b) and
+    (T, chi_B^b): [batch, 2 (E, B), (K,) ncoeff]; vjp_cross returns
+    (grad_a, grad_b) in the shapes of a and b.
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
                  threads=1, cache="transposition", device=0, library=None,
-                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="scalar"):
+                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="scalar", spin_a=2):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -199,8 +206,11 @@ class NativeEngine:
         self.cross = bool(cross)
         if spin not in (0, 2) or spin_kernel not in (3, 5, 7, 9):
             raise ValueError("spin must be 0 or 2, spin_kernel 3, 5, 7 or 9")
-        if spin and self.cross:
-            raise ValueError("spin=2 with cross=True is not available yet")
+        if spin and self.cross and spin_pyramid != "scalar":
+            raise ValueError("spin=2 with cross=True needs spin_pyramid='scalar'")
+        if spin_a not in (0, 2):
+            raise ValueError("spin_a must be 0 (scalar map) or 2 (Q, U)")
+        self.spin_a = int(spin_a) if spin and self.cross else None
         if spin_pyramid not in ("transported", "scalar"):
             raise ValueError("spin_pyramid must be transported or scalar")
         self.spin = int(spin)
@@ -210,7 +220,8 @@ class NativeEngine:
                            backend=backend, kernel=int(kernel), orientations=int(orientations),
                            block_pixels=int(block_pixels), cache_bytes=int(cache_bytes),
                            threads=int(threads), cache=cache, device=int(device), cross=self.cross,
-                           spin=self.spin, spin_kernel=int(spin_kernel), spin_pyramid=spin_pyramid)
+                           spin=self.spin, spin_kernel=int(spin_kernel), spin_pyramid=spin_pyramid,
+                           spin_a=int(spin_a))
         self._handle = self._lib.stlp_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
@@ -264,7 +275,16 @@ class NativeEngine:
         return head + ((self.nmasks, self.ncoeff) if self.nmasks else (self.ncoeff,))
 
     def _map_shape(self):
+        if self.spin and self.cross:
+            return (self.batch, (2 if self.spin_a == 2 else 1) + 2, self.npix)
         return (self.batch, 2, self.npix) if self._pairs else (self.batch, self.npix)
+
+    def _pack_spin_cross(self, a, b):
+        """(a, b) -> the bridge's input: a [batch, 1 or 2, npix] then b [batch, 2, npix]."""
+        pa = 2 if self.spin_a == 2 else 1
+        a = np.asarray(a, dtype=np.float64).reshape(self.batch, pa, self.npix)
+        b = np.asarray(b, dtype=np.float64).reshape(self.batch, 2, self.npix)
+        return np.concatenate([a.ravel(), b.ravel()])
 
     def forward_levels(self, levels):
         """Statistics of maps given at every level (no decimation, no spin
@@ -310,12 +330,17 @@ class NativeEngine:
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
-            x = np.ascontiguousarray(maps, dtype=np.float64)
-            shape = self._map_shape()
-            if x.shape == shape[1:] and self.batch == 1:
-                x = x[None]
-            if x.shape != shape:
-                raise ValueError(f"expected maps {shape}, got {x.shape}")
+            if self.spin and self.cross:
+                if not (isinstance(maps, (tuple, list)) and len(maps) == 2):
+                    raise ValueError("spin=2, cross=True: maps = (a, b), or use forward_cross")
+                x = self._pack_spin_cross(*maps)
+            else:
+                x = np.ascontiguousarray(maps, dtype=np.float64)
+                shape = self._map_shape()
+                if x.shape == shape[1:] and self.batch == 1:
+                    x = x[None]
+                if x.shape != shape:
+                    raise ValueError(f"expected maps {shape}, got {x.shape}")
             if not np.isfinite(x).all():
                 raise ValueError("input map contains non-finite values")
             values = np.empty(self._shape(), dtype=np.complex128)
@@ -342,23 +367,35 @@ class NativeEngine:
                 raise ValueError(f"expected cotangents {shape}, got {c.shape}")
             if not np.isfinite(c).all():
                 raise ValueError("non-finite coefficient cotangent")
-            grad = np.empty(self._map_shape(), dtype=np.float64)
+            if self.spin and self.cross:
+                pa = 2 if self.spin_a == 2 else 1
+                grad = np.empty(self.batch * (pa + 2) * self.npix)
+            else:
+                grad = np.empty(self._map_shape(), dtype=np.float64)
             status = self._lib.stlp_vjp(self._handle, _pointer(c.view(np.float64)), c.size, *key, _pointer(grad))
             if status:
                 raise _error(self._lib)
+            if self.spin and self.cross:
+                ga, gb = np.split(grad, [self.batch * pa * self.npix])
+                ga = ga.reshape(self.batch, 2, self.npix) if pa == 2 else ga.reshape(self.batch, self.npix)
+                return ga, gb.reshape(self.batch, 2, self.npix)
             return grad
 
     def forward_cross(self, a, b, generation=0, member=0, objective="gaussian", moments=False):
         """Cross statistics S(a, b) of the pairs a, b [batch, npix] (cross=True)."""
         if not self.cross:
             raise RuntimeError("forward_cross needs NativeEngine(..., cross=True)")
+        if self.spin:
+            return self.forward((a, b), generation, member, objective, moments)
         a = np.asarray(a, dtype=np.float64).reshape(self.batch, self.npix)
         b = np.asarray(b, dtype=np.float64).reshape(self.batch, self.npix)
         return self.forward(np.stack([a, b], 1), generation, member, objective, moments)
 
     def vjp_cross(self, cotangents, generation=0, member=0, objective="gaussian"):
-        """(grad_a, grad_b), each [batch, npix], after forward_cross."""
+        """(grad_a, grad_b), each [batch, npix] (spin=2: the shapes of a and b), after forward_cross."""
         g = self.vjp(cotangents, generation, member, objective)
+        if self.spin:
+            return g
         return g[:, 0], g[:, 1]
 
     def checkpoint(self):

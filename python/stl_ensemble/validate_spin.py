@@ -96,6 +96,7 @@ def main():
     p.add_argument("--pyramid", default="scalar", choices=["transported", "scalar"])
     p.add_argument("--realisations", type=int, default=2)
     p.add_argument("--planck", nargs=2, default=None)
+    p.add_argument("--planck-t", default=None, help="scalar map T (e.g. 857 GHz) for the T x (Q, U) cross terms")
     p.add_argument("--fd-nside", type=int, default=16)
     p.add_argument("--out", default=None)
     a = p.parse_args()
@@ -138,6 +139,27 @@ def main():
         report["statistics"][name] = st
         print(name, "fields", json.dumps(fields), flush=True)
         print(name, "statistics", json.dumps({k: v for k, v in st["E"].items() if "l=" not in k}), flush=True)
+
+    # Cross statistics (scalar pyramid): against the scalar cross engine on
+    # the exact chi_0 (T as it is), per component (E, B).
+    if scalar:
+        sc = NativeEngine(nside, j, batch=1, cross=True, backend=a.backend)
+        pairs = []
+        u = cases[0][1]
+        pairs.append(("qu_x_qu", 2, u + 0.3 * random_qu(nside, 400), u + 0.3 * random_qu(nside, 401)))
+        pairs.append(("t_x_qu", 0, chi_exact(u, nside)[0] / np.std(chi_exact(u, nside)[0]) + random_qu(nside, 402)[0], u))
+        if a.planck and a.planck_t:
+            pairs.append(("t857_x_planck353", 0, np.load(a.planck_t).astype(np.float64), cases[-1][1]))
+        report["cross"] = {}
+        for name, spin_a, xa, xb in pairs:
+            e = NativeEngine(nside, j, batch=1, spin=2, cross=True, spin_a=spin_a, backend=a.backend)
+            loc = e.forward_cross(xa[None], xb[None])[0][0]
+            ea = chi_exact(xa, nside) if spin_a == 2 else np.stack([xa, xa])
+            eb = chi_exact(xb, nside)
+            ref = np.stack([sc.forward_cross(ea[k][None], eb[k][None])[0][0] for k in range(2)])
+            st = summarise(e.plan, loc, ref)
+            report["cross"][name] = st
+            print("cross", name, json.dumps({k: v for k, v in st["E"].items() if "l=" not in k}), flush=True)
 
     # Locality: a hole of 15 degrees, masks eroded by the stencil at every level.
     qu = cases[0][1]
