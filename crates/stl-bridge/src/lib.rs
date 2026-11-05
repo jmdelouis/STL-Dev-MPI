@@ -20,6 +20,13 @@
 //! those of the full sky; values, variances and cotangents become
 //! `[batch, K, len(plan)]`.
 //!
+//! Spin 2 (`"spin": 2`, [`stl_core::spin`]): the maps are `(Q, U)`
+//! `[batch, 2, 12 nside^2]`; every level `j` of the pyramid holds
+//! `chi_E + i chi_B = -(d_x - i d_y)^2 P_j` of the transported mean `P_j`
+//! of `P = Q + iU`, and the statistics are those of `chi_E` and `chi_B`
+//! with the plan of one channel: values `[batch, 2 (E, B), K, len(plan)]`.
+//! Masks are eroded by the stencil at every level.
+//!
 //! A spectrum handle (`stlp_spec_*`) gives the pseudo-C_l of masked
 //! full-sky maps (anafast, `iter = 0`; spin 0, or EE/BB/EB of spin-`s`
 //! fields) and their VJP.
@@ -46,9 +53,11 @@ use stl_core::engine::{EngineConfig, LocalEngine};
 use stl_core::lbfgs::{minimize, LbfgsOptions, Local};
 use stl_core::local::LocalGeometry;
 use stl_core::mask::Masks;
+use stl_core::neighbours::{dilate, parents};
 use stl_core::disc::{pixel_vector, unit, DiscGeometry, DiscModel, DiscState, DiscSupport};
 use stl_core::plan::{build_plan, Coefficient, Family};
 use stl_core::sht::Sht;
+use stl_core::spin::SpinPyramid;
 use stl_core::stencil::Gauge;
 #[cfg(feature = "gpu")]
 use stl_core::engine::{Partition, Serial};
@@ -56,7 +65,7 @@ use stl_core::engine::{Partition, Serial};
 use stl_gpu::{disc::{GpuDiscEngine, Patches}, ConvForm, FieldStore, GeometryCache, Gpu, GpuEngine, GpuOptions, GpuSht, HostForwardState};
 
 /// Version of the C ABI and its JSON (`stlp_info`).
-pub const VERSION: &str = "2026-11-07-v9";
+pub const VERSION: &str = "2026-11-08-v10";
 
 thread_local! { static ERROR: RefCell<CString> = RefCell::new(CString::default()); }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -119,6 +128,11 @@ pub struct Handle {
     current: Option<Identity>,
     /// Masks of the averages (none: the whole sky).
     masks: Option<Masks>,
+    /// Spin-2 front end (maps `(Q, U)`; engine batch `2 batch`: E, B).
+    spin: Option<SpinPyramid>,
+    /// Spin 2 with `"spin_pyramid": "scalar"`: `chi_0` only, decimated by
+    /// the scalar pyramid of the engine (else `chi_j` at every level).
+    spin_scalar: bool,
 }
 
 enum Fields {
@@ -202,6 +216,23 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
         let cfg = Box::new(EngineConfig::new(j, false));
         let cross = v["cross"].as_bool().unwrap_or(false);
         let channels = if cross { 2 } else { 1 };
+        let spin_scalar = match v["spin_pyramid"].as_str().unwrap_or("transported") {
+            "transported" => false,
+            "scalar" => true,
+            other => panic!("spin_pyramid must be transported or scalar, not {other:?}"),
+        };
+        let spin = match integer(&v, "spin", 0) {
+            0 => None,
+            2 => {
+                assert!(!cross, "spin 2: cross statistics are not available yet");
+                let threads = integer(&v, "spin_threads", std::thread::available_parallelism().map_or(1, |n| n.get()));
+                let levels = if spin_scalar { 1 } else { cfg.levels() };
+                Some(SpinPyramid::new(nside as i64, levels, integer(&v, "spin_kernel", 5), threads))
+            }
+            s => panic!("spin must be 0 or 2, not {s}"),
+        };
+        // Spin 2: the engine sees (chi_E, chi_B) of each map as two batch rows.
+        let batch = if spin.is_some() { 2 * batch } else { batch };
         let plan = plan_of(j, geo.l, &cfg.j_to_dg, cross);
         let npix = 12 * nside * nside;
         // Safety: the boxes outlive the engine (see `Handle`).
@@ -231,7 +262,7 @@ pub unsafe extern "C" fn stlp_new(config: *const c_char) -> *mut Handle {
             other => panic!("backend must be cpu or gpu, not {other:?}"),
         };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, channels, npix, current: None, masks: None }))
+        Box::into_raw(Box::new(Handle { backend, _geo: geo, _cfg: cfg, plan, id, nside, batch, channels, npix, current: None, masks: None, spin, spin_scalar }))
     })
 }
 
@@ -254,7 +285,11 @@ pub unsafe extern "C" fn stlp_info(p: *mut Handle) -> *mut c_char {
         let mut info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"),
             "nside": h.nside, "batch": h.batch, "channels": h.channels, "cross": h.channels == 2,
             "dtype": "float64/complex128", "fewer": false, "plan": plan_json(&h.plan),
-            "masks": h.masks.as_ref().map_or(0, Masks::len)});
+            "masks": h.masks.as_ref().map_or(0, Masks::len),
+            "spin": if h.spin.is_some() { 2 } else { 0 },
+            "spin_kernel": h.spin.as_ref().map(|s| s.kernel_sz),
+            "spin_pyramid": h.spin.as_ref().map(|_| if h.spin_scalar { "scalar" } else { "transported" }),
+            "spin_bytes": h.spin.as_ref().map(SpinPyramid::nbytes)});
         #[cfg(feature = "gpu")]
         if let Backend::Gpu(e) = &h.backend {
             let (peak, total) = e.device_memory();
@@ -280,7 +315,14 @@ pub unsafe extern "C" fn stlp_set_masks(p: *mut Handle, weights: *const f64, k: 
         h.current = None;
         let masks = (k > 0).then(|| {
             let w = std::slice::from_raw_parts(weights, k * h.npix);
-            Masks::from_weights(h.nside as i64, h._cfg.levels(), w.chunks(h.npix).map(<[f64]>::to_vec).collect())
+            match &h.spin {
+                // Pixels whose chi reads valid data only, at every level.
+                Some(s) if h.spin_scalar => Masks::from_levels(
+                    w.chunks(h.npix).map(|m| scalar_pyramid_valid(&h._geo, h._cfg.levels(), s.valid_rows(m).swap_remove(0))).collect(),
+                ),
+                Some(s) => Masks::from_levels(w.chunks(h.npix).map(|m| s.valid_rows(m)).collect()),
+                None => Masks::from_weights(h.nside as i64, h._cfg.levels(), w.chunks(h.npix).map(<[f64]>::to_vec).collect()),
+            }
         });
         match &mut h.backend {
             Backend::Cpu(e) => e.set_masks(masks.clone()),
@@ -290,6 +332,25 @@ pub unsafe extern "C" fn stlp_set_masks(p: *mut Handle, weights: *const f64, k: 
         h.masks = masks;
         0
     })
+}
+
+/// Spin 2 with the scalar pyramid: the pixels of every level whose
+/// decimated `chi` only reads valid `chi_0` (`valid0`, level 0): a coarse
+/// pixel is dropped when the decimation cone of its children (dilated by
+/// the decimation halo) meets a dropped fine pixel.
+fn scalar_pyramid_valid(geo: &LocalGeometry, levels: usize, valid0: Vec<f64>) -> Vec<Vec<f64>> {
+    let mut out = vec![valid0];
+    for d in 0..levels - 1 {
+        let fine = out.last().unwrap();
+        let bad: Vec<i64> = (0..fine.len() as i64).filter(|&p| fine[p as usize] == 0.0).collect();
+        let reach = parents(&dilate(&bad, geo.nside(d), geo.down_rings(d)));
+        let mut next = vec![1.0; geo.pixels(d + 1)];
+        for p in reach {
+            next[p as usize] = 0.0;
+        }
+        out.push(next);
+    }
+    out
 }
 
 /// Number of pixels each coefficient averages to `out` (`[K, len(plan)]`,
@@ -331,9 +392,17 @@ pub unsafe extern "C" fn stlp_forward(
         assert_eq!(n, h.batch * h.channels * h.npix, "input shape mismatch");
         h.current = None;
         let x = std::slice::from_raw_parts(x, n);
+        let chi = h.spin.as_ref().map(|s| s.forward(x));
+        let x = match &chi {
+            Some(c) if h.spin_scalar => &c[0][..],
+            _ => x,
+        };
         let (values, variance) = match &mut h.backend {
             Backend::Cpu(e) => {
-                e.reload(x);
+                match &chi {
+                    Some(c) if !h.spin_scalar => e.reload_levels(c),
+                    _ => e.reload(x),
+                }
                 if moments {
                     e.forward_moments(&h.plan)
                 } else {
@@ -342,7 +411,10 @@ pub unsafe extern "C" fn stlp_forward(
             }
             #[cfg(feature = "gpu")]
             Backend::Gpu(e) => {
-                e.load(&Serial, x);
+                match &chi {
+                    Some(c) if !h.spin_scalar => e.load_levels(&Serial, c),
+                    _ => e.load(&Serial, x),
+                }
                 e.forward(&Serial, &h.plan, moments)
             }
         };
@@ -380,16 +452,90 @@ pub unsafe extern "C" fn stlp_vjp(
         let grad = match &mut h.backend {
             Backend::Cpu(e) => {
                 let mg = e.reverse(&h.plan, &c);
-                e.map_cotangent(mg)
+                match &h.spin {
+                    Some(s) if h.spin_scalar => s.adjoint(&[e.map_cotangent(mg)]),
+                    Some(s) => s.adjoint(&mg),
+                    None => e.map_cotangent(mg),
+                }
             }
             #[cfg(feature = "gpu")]
             Backend::Gpu(e) => {
                 let mg = e.reverse(&Serial, &h.plan, &c);
-                let g = e.analysis_vjp(&Serial, mg);
-                e.gpu.download(&g)
+                match &h.spin {
+                    Some(s) if h.spin_scalar => {
+                        let g = e.analysis_vjp(&Serial, mg);
+                        s.adjoint(&[e.gpu.download(&g)])
+                    }
+                    Some(s) => s.adjoint(&mg.iter().map(|g| e.gpu.download(g)).collect::<Vec<_>>()),
+                    None => {
+                        let g = e.analysis_vjp(&Serial, mg);
+                        e.gpu.download(&g)
+                    }
+                }
             }
         };
         std::slice::from_raw_parts_mut(out, h.batch * h.channels * h.npix).copy_from_slice(&grad);
+        0
+    })
+}
+
+/// Forward sweep on maps given at every level (no decimation of level 0,
+/// no spin front end): `x` the concatenation over the levels `d` of
+/// `[engine batch, channels, 12 (nside / 2^d)^2]` (spin 2: engine batch
+/// `2 batch`, rows `(chi_E, chi_B)` of each map).  Values as
+/// `stlp_forward`; for validation (no vjp).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_forward_levels(p: *mut Handle, x: *const f64, n: usize, out: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        h.current = None;
+        let rows = h.batch * h.channels;
+        let sizes: Vec<usize> = (0..h._cfg.levels()).map(|d| rows * h._geo.pixels(d)).collect();
+        assert_eq!(n, sizes.iter().sum::<usize>(), "input shape mismatch");
+        let mut x = std::slice::from_raw_parts(x, n);
+        let maps: Vec<Vec<f64>> = sizes
+            .iter()
+            .map(|&s| {
+                let (a, b) = x.split_at(s);
+                x = b;
+                a.to_vec()
+            })
+            .collect();
+        let values = match &mut h.backend {
+            Backend::Cpu(e) => {
+                e.reload_levels(&maps);
+                e.forward(&h.plan)
+            }
+            #[cfg(feature = "gpu")]
+            Backend::Gpu(e) => {
+                e.load_levels(&Serial, &maps);
+                e.forward(&Serial, &h.plan, false).0
+            }
+        };
+        let o = std::slice::from_raw_parts_mut(out, 2 * values.len());
+        for (o, z) in o.chunks_mut(2).zip(&values) {
+            o[0] = z.re;
+            o[1] = z.im;
+        }
+        0
+    })
+}
+
+/// Spin 2: the transported `(Q, U)` of level `level` to `qu` and its
+/// `(chi_E, chi_B)` to `chi` (each `[batch, 2, 12 (nside / 2^level)^2]`)
+/// for the maps `x` (`[batch, 2, 12 nside^2]`).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_spin_fields(p: *mut Handle, x: *const f64, n: usize, level: usize, qu: *mut f64, chi: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &*p;
+        let s = h.spin.as_ref().expect("not a spin-2 handle");
+        assert_eq!(n, h.batch * h.npix, "input shape mismatch");
+        assert!(level < s.levels(), "level out of range");
+        let x = std::slice::from_raw_parts(x, n);
+        let pol = s.polarisation(x);
+        let c = s.eth[level].apply(&pol[level], s.threads);
+        std::slice::from_raw_parts_mut(qu, c.len()).copy_from_slice(&pol[level]);
+        std::slice::from_raw_parts_mut(chi, c.len()).copy_from_slice(&c);
         0
     })
 }

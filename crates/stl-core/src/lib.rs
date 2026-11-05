@@ -23,5 +23,6 @@ pub mod plan;
 pub mod planar;
 pub mod precond;
 pub mod sht;
+pub mod spin;
 pub mod stencil;
 pub mod wavelet;

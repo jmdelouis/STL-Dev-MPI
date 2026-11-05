@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 23.92s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.02s
+/tmp/jmdeloui-stlia/data/planck353_Q_n64.npy
+/tmp/jmdeloui-stlia/data/planck353_U_n64.npy
+test_vjp ok
+test_level0_shared ok
+smooth pure E: chi_E error 1.35e-02, B/E 4.79e-03
+test_smooth_pure_e ok
+test_masks_eroded ok
+test_gpu_matches_cpu ok
+locality {"0": {"changed_pixels": 1113, "pixels": 49152}, "eroded_mask_pixels": {"level 0": 48039, "level 1": 11821, "level 2": 2833, "level 3": 611, "level 4": 86}, "masked_statistics_rel_change": {"mean": 0.0, "var": 0.0, "S1 j=0": 0.00010078154940381096, "S2 j=0": 0.00022891626514524784, "S3 j=0": 0.037447933821084564, "S3 j1=0": 0.0366284132611895, "S4 j=0": 0.0017042435490526248, "S4 j1=0": 0.001635765927065876, "S1 j=1": 3.340289694758225e-05, "S2 j=1": 5.3392030004625296e-05, "S3 j=1": 0.0063463470327551515, "S4 j=1": 0.00030939175628439953, "S3 j1=>0": 0.011472303195057158, "S4 j1=>0": 0.0007132342407117155, "S1 j=2": 6.246226538901083e-05, "S2 j=2": 9.327422812546663e-05, "S3 j=2": 0.0017355261400660298, "S4 j=2": 0.0002481534687206734, "S1 j=3": 1.4997377785616564e-05, "S2 j=3": 3.2898539328259e-05, "S3 j=3": 0.0005126733685694568, "S4 j=3": 0.00012810823285442117, "S1 j=4": 6.667294469497423e-05, "S2 j=4": 7.27519968974985e-05, "S3 j=4": 0.00022207003456506302, "S4 j=4": 6.718561763675823e-05}}
+SCRIPT VERSION: stl_port 2026-10-29-v2-variance-ratio
+SCRIPT VERSION: stl_port.native 2026-11-08-v9
+{"nside": 64, "engine": "scalar", "build_s": 16.93, "forward_s": 0.024, "vjp_s": 0.035, "device_peak_bytes": 483131392, "device_total_bytes": 15843721216, "spin_host_bytes": null}
+{"nside": 64, "engine": "spin2 transported", "build_s": 16.69, "forward_s": 0.029, "vjp_s": 0.053, "device_peak_bytes": 485228544, "device_total_bytes": 15843721216, "spin_host_bytes": 69740496}
+{"nside": 64, "engine": "spin2 scalar", "build_s": 16.45, "forward_s": 0.037, "vjp_s": 0.057, "device_peak_bytes": 483131392, "device_total_bytes": 15843721216, "spin_host_bytes": 49929808}
+{"nside": 256, "engine": "scalar", "build_s": 22.87, "forward_s": 0.805, "vjp_s": 1.016, "device_peak_bytes": 1626079232, "device_total_bytes": 15843721216, "spin_host_bytes": null}
+{"nside": 256, "engine": "spin2 transported", "build_s": 27.59, "forward_s": 0.867, "vjp_s": 1.246, "device_peak_bytes": 1791754240, "device_total_bytes": 15843721216, "spin_host_bytes": 1117643920}
+{"nside": 256, "engine": "spin2 scalar", "build_s": 25.92, "forward_s": 0.854, "vjp_s": 1.23, "device_peak_bytes": 1827405824, "device_total_bytes": 15843721216, "spin_host_bytes": 799006288}

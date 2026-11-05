@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-07-v8"
+SCRIPT_VERSION = "2026-11-08-v9"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -64,6 +64,8 @@ def _library(path=None):
         "stlp_checkpoint_free": ([_VOID], None),
         "stlp_restore": ([_VOID, _VOID, C.c_uint64, C.c_uint64, C.c_uint64], C.c_int),
         "stlp_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_spin_fields": ([_VOID, _DOUBLE, C.c_size_t, C.c_size_t, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_forward_levels": ([_VOID, _DOUBLE, C.c_size_t, _DOUBLE], C.c_int),
         "stlp_native_pixels": ([_VOID, _SIZE], C.c_int),
         "stlp_lbfgs": ([_DOUBLE, C.c_size_t, C.c_char_p, _CALLBACK, _VOID], C.c_int64),
         "stlp_patch_new": ([C.c_char_p], _VOID),
@@ -163,11 +165,23 @@ class NativeEngine:
     of the full sky; values, variances and cotangents are [batch, K,
     ncoeff], and native_pixels() gives the [K, ncoeff] pixel counts of the
     averages (for the ergodic weights).
+
+    spin=2: the maps are (Q, U) [batch, 2, npix] NESTED. Every level j of
+    the pyramid holds chi_E + i chi_B = -(d_x - i d_y)^2 P_j, P_j the mean of
+    the four children of P_{j-1} = Q + iU transported into the parent's
+    frame, the derivative a local spin_kernel x spin_kernel stencil in
+    pixel units of the level (weight (l / l_j)^2 in the flat limit); the
+    statistics are those of chi_E and chi_B with the one-channel plan:
+    values [batch, 2 (E, B), (K,) ncoeff], gradients [batch, 2, npix].
+    Masks (indicators of the valid data) are eroded by the stencil at every
+    level. spin_fields(maps, level) returns (Q, U) and (chi_E, chi_B) of a
+    level. spin_pyramid="scalar": chi_0 only, the coarser levels being its
+    scalar decimations (the engine's own pyramid), as for a scalar map.
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
                  threads=1, cache="transposition", device=0, library=None,
-                 cross=False, masks=None):
+                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="transported"):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -182,11 +196,20 @@ class NativeEngine:
         self.npix = 12 * self.nside**2
         self.backend = backend
         self.cross = bool(cross)
+        if spin not in (0, 2) or spin_kernel not in (3, 5, 7, 9):
+            raise ValueError("spin must be 0 or 2, spin_kernel 3, 5, 7 or 9")
+        if spin and self.cross:
+            raise ValueError("spin=2 with cross=True is not available yet")
+        if spin_pyramid not in ("transported", "scalar"):
+            raise ValueError("spin_pyramid must be transported or scalar")
+        self.spin = int(spin)
         self.channels = 2 if self.cross else 1
+        self._pairs = self.cross or self.spin == 2
         self.config = dict(nside=self.nside, j=self.j, batch=self.batch,
                            backend=backend, kernel=int(kernel), orientations=int(orientations),
                            block_pixels=int(block_pixels), cache_bytes=int(cache_bytes),
-                           threads=int(threads), cache=cache, device=int(device), cross=self.cross)
+                           threads=int(threads), cache=cache, device=int(device), cross=self.cross,
+                           spin=self.spin, spin_kernel=int(spin_kernel), spin_pyramid=spin_pyramid)
         self._handle = self._lib.stlp_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
@@ -236,7 +259,38 @@ class NativeEngine:
             return out if self.nmasks else out[0]
 
     def _shape(self):
-        return (self.batch, self.nmasks, self.ncoeff) if self.nmasks else (self.batch, self.ncoeff)
+        head = (self.batch, 2) if self.spin else (self.batch,)
+        return head + ((self.nmasks, self.ncoeff) if self.nmasks else (self.ncoeff,))
+
+    def _map_shape(self):
+        return (self.batch, 2, self.npix) if self._pairs else (self.batch, self.npix)
+
+    def forward_levels(self, levels):
+        """Statistics of maps given at every level (no decimation, no spin
+        front end; for validation): levels[d] [engine rows, 12 (nside/2^d)^2],
+        engine rows = batch (spin=2: batch x (chi_E, chi_B))."""
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(np.concatenate([np.asarray(v, dtype=np.float64).ravel() for v in levels]))
+            values = np.empty(self._shape(), dtype=np.complex128)
+            self._current_key = None
+            if self._lib.stlp_forward_levels(self._handle, _pointer(x), x.size, _pointer(values.view(np.float64))):
+                raise _error(self._lib)
+            return values
+
+    def spin_fields(self, maps, level=0):
+        """spin=2: ((Q, U), (chi_E, chi_B)) of `level`, each [batch, 2, npix_level]."""
+        if not self.spin:
+            raise RuntimeError("spin_fields needs NativeEngine(..., spin=2)")
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(maps, dtype=np.float64).reshape(self._map_shape())
+            n = 12 * (self.nside >> int(level))**2
+            qu = np.empty((self.batch, 2, n))
+            chi = np.empty((self.batch, 2, n))
+            if self._lib.stlp_spin_fields(self._handle, _pointer(x), x.size, int(level), _pointer(qu), _pointer(chi)):
+                raise _error(self._lib)
+            return qu, chi
 
     def info(self):
         with self._lock:
@@ -256,7 +310,7 @@ class NativeEngine:
             self._open()
             key = _key(generation, member, objective)
             x = np.ascontiguousarray(maps, dtype=np.float64)
-            shape = (self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix)
+            shape = self._map_shape()
             if x.shape == shape[1:] and self.batch == 1:
                 x = x[None]
             if x.shape != shape:
@@ -287,7 +341,7 @@ class NativeEngine:
                 raise ValueError(f"expected cotangents {shape}, got {c.shape}")
             if not np.isfinite(c).all():
                 raise ValueError("non-finite coefficient cotangent")
-            grad = np.empty((self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix), dtype=np.float64)
+            grad = np.empty(self._map_shape(), dtype=np.float64)
             status = self._lib.stlp_vjp(self._handle, _pointer(c.view(np.float64)), c.size, *key, _pointer(grad))
             if status:
                 raise _error(self._lib)
