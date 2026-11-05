@@ -9,14 +9,15 @@ those of the validated Rust code.
 
 Three engines in `stl_port.native` (`python/stl_ensemble/stl_port/native.py`):
 
-| Engine | Statistics | Domain | Pages with the definitions and the measurements |
+| Engine | Statistics | Domain | Reports with the definitions and the measurements |
 |---|---|---|---|
 | `NativeEngine` | scattering covariance (`mean`, `var`, S1–S4), auto or cross `S(a, b)` | full sky, or averaged over `K` masks | [masked statistics](../masked_statistics.md), [cross statistics](../disc_cross_statistics.md) |
 | `PatchEngine` | the same plan, auto or cross | disc patches (support radius `R`, averaging core `r`) | [disc patches](../disc_cross_statistics.md) |
 | `SpectrumEngine` | pseudo-`C_ℓ` (anafast, `iter=0`): spin 0 (`TT`), spin `s` (`EE`, `BB`, `EB`), auto or cross | full sky, or `K` masks (weights) | [pseudo-spectra](../spectrum.md) |
 
-A worked example with all three, wrapped for torch, is
-[the tutorial on differentiable losses](../tutorials/differentiable.md).
+Worked examples: the three engines wrapped for torch on a laptop CPU
+({doc}`../tutorials/differentiable`, example 06), and the GPU path with CUDA tensors
+({doc}`../tutorials/torch_loss`).
 
 ## Setup
 
@@ -49,90 +50,15 @@ Conventions shared by the three engines:
   forward and VJP on a laptop, against 5.3 s for `NativeEngine(cross=True, batch=7)`. Masks remain
   a `NativeEngine` feature.
 
-## `NativeEngine`: full sky, masks, cross
+## The engines
 
-```python
-from stl_port.native import NativeEngine
+| Engine | Page |
+|---|---|
+| `NativeEngine`: full sky, `K` masks, cross statistics | {doc}`native-engine` |
+| `PatchEngine`: disc patches, CPU threads or GPU, CUDA tensors | {doc}`patch-engine` |
+| `SpectrumEngine`: pseudo-`C_ℓ`, spin 0 and spin `s`, masks | {doc}`spectrum-engine` |
 
-eng = NativeEngine(nside, j, batch=B, backend="gpu")          # J scales, L = 4, kernel 5
-values, var = eng.forward(x, generation=g, moments=True)      # x [B, npix] -> complex [B, ncoeff], float [B, ncoeff]
-grad = eng.vjp(cot, generation=g)                             # cot complex [B, ncoeff] -> [B, npix]
-eng.plan, eng.ncoeff, eng.native_pixels()                     # coefficient list; pixels each coefficient averages
-```
-
-- **Masks.** `NativeEngine(..., masks=m)` or `eng.set_masks(m)` takes `K` masks, given as a list
-  of NESTED id arrays at `nside` or as `[K, npix]` indicators (nonzero means in the mask). Every
-  coefficient is then averaged over each mask at its native level: level `n + 1` holds the
-  parents of the mask at level `n`. The fields (wavelets, moduli, pyramid) remain those of the
-  full sky, so the terms near the mask edge read pixels outside it. Values, variances and
-  cotangents become `[B, K, ncoeff]`, and `native_pixels()` returns `[K, ncoeff]`. One sweep
-  serves all the masks: five galactic cuts cost +16 % over the full sky on a T4.
-  `set_masks(None)` returns to the whole sky.
-- **Cross.** `cross=True` holds the cross terms of two maps, `S(a, b)`: S1 to S4 with
-  `c1 ≠ c2`, with S3 and S4 in both orders (there is no cross `mean` or `var`).
-  `forward_cross(a, b)` and `vjp_cross(cot) -> (ga, gb)` take the two maps separately. Drop
-  `gb` to keep `b` constant. Masks combine with `cross`.
-- **Ergodic weights.** `var` holds the spatial variances of the terms over the averaged pixels.
-  `var / native_pixels()` estimates the variance of each coefficient, so a reduced χ² is
-  `mean(|S − T|² / (var / N))`, as `stl-synth --weights ergodic` does.
-
-## `PatchEngine`: disc patches
-
-```python
-from stl_port.native import PatchEngine
-
-pe = PatchEngine(nside, j, cross=False, backend="cpu")    # backend="gpu", device=0 for the device engine
-ids = pe.select(centres, radius=10.0, core=7.0)           # degrees; centres: NESTED ids [B] or vectors [B, 3]
-values, var = pe.forward(pe.gather(x))                    # patches x[ids[i]] -> complex [B, ncoeff]
-grads = pe.vjp(cot)                                       # one gradient per patch, laid out as ids[i]
-pe.native_pixels                                          # [B, ncoeff]
-```
-
-- **Disc and core.** The *support* holds every pixel whose centre lies within `radius` of the
-  centre. The wavelet is bound to it with renormalised weights, and the decimation is restricted
-  to it, so nothing outside the disc is read. The coefficients average over the *core*: the
-  pixels within `core` and their parents. The ring between core and support absorbs the edge
-  effects of the convolutions. Without `core` the averages cover the whole support. A disc of
-  180° gives the full-sky statistics.
-- **Batches.** The discs of a batch may differ in size, so patches and gradients are lists. A
-  dense `[B, n]` array works when all discs have `n` pixels. The plan is that of
-  `NativeEngine(nside, j, cross=...)`.
-- **CPU cache.** `cache` (256) disc geometries are kept, keyed by `(centre, R, r)`. Sixteen new discs
-  at nside 256 and `R = 10°` take 0.6 s on 20 threads; a cached disc takes less than 1 ms. Drawing
-  centres from a finite set (for example the pixels of a coarse nside) makes the geometry free
-  after the first epoch.
-- **GPU cache and `reserve_bytes`.** With `backend="gpu"`, the discs of a batch are grouped by
-  centre and evaluated in one launch per operator. Their geometries are cached on the device,
-  least recently used first out: before a new disc is built, cached discs are evicted until
-  `reserve_bytes` (2 GiB) stay free on the device. The free memory is read at that time, so a
-  network training on the same GPU is accounted for. `cache_bytes` optionally caps the cache.
-  `forward_device(x)` and `vjp_device(cot)` take and return CUDA tensors (the concatenated
-  patches) without copying the maps to the host.
-
-## `SpectrumEngine`: pseudo-`C_ℓ`, spin 0 and spin `s`
-
-```python
-from stl_port.native import SpectrumEngine
-
-se = SpectrumEngine(nside, lmax=None, batch=B, backend="gpu", masks=w)   # lmax: 3 nside - 1 by default
-cl = se.forward(x, generation=g)          # x [B, npix] -> [B, K, lmax + 1] (no K axis without masks)
-grad = se.vjp(cot, generation=g)          # cot like cl -> [B, npix]
-se.fsky                                   # mean(w²) per mask
-
-pol = SpectrumEngine(nside, spin=2, masks=w)
-cl = pol.forward(qu)                      # qu [B, 2, npix] (Q, U) -> [B, K, 3, lmax + 1]: pol.components = EE, BB, EB
-```
-
-- **Definition.** The spectra are those of `healpy.anafast(x, lmax, iter=0)`, with no ring
-  weights, on NESTED maps; spin `s` follows `healpy.map2alm_spin`. The tests compare with
-  healpy to 1e-11.
-- **Masks.** `[K, npix]` weights (binary or apodised) or NESTED id lists. Each map (`Q` and `U`
-  alike) is multiplied by each weight before the analysis. The output is the pseudo-spectrum, not
-  divided by `f_sky` (`se.fsky` provides it).
-- **Cross.** `cross=True`: pairs `[B, 2, npix]` (`[B, 2, 2, npix]` for spin `s`) and the cross
-  spectra only (`E1E2`, `B1B2`, `E1B2`, `B1E2` for spin `s`).
-- **GPU.** Spin 0 runs its harmonic transforms on the device. Spin `s` uses the host transforms
-  with either backend.
+The signatures are in {doc}`../api/python`.
 
 ## What is differentiable
 

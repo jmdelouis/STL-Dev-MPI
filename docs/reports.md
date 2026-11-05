@@ -20,6 +20,14 @@ its setup (machine, commit, job) so that it can be reproduced.
 | [Geometry cache and preconditioners](geometry_cache_preconditioner.md) | `--geometry-cache host` and `auto`, per-scale L-BFGS preconditioners, projection to nside 2048 × 10 |
 | [Harmonic terms: cost at nside 1024 and 2048](harmonic_speed.md) | profile of `stl-ensemble` and the options to reach nside 2048 on one A100 |
 
+## Differentiable engines (Python)
+
+| Report | Content |
+|---|---|
+| [Disc patches and cross statistics](disc_cross_statistics.md) | statistics on disc patches (`PatchEngine`) and cross statistics `S(a, b)` (`cross=True`), exact VJPs, CPU and GPU, for networks trained with STL losses |
+| [Masked statistics](masked_statistics.md) | full-sky statistics averaged over `K` masks in one sweep (`NativeEngine(masks=...)`), validation and T4 timings |
+| [Differentiable pseudo-spectra](spectrum.md) | `SpectrumEngine`: anafast with its VJP, spin 0 and spin `s`, masks, against healpy |
+
 ## Ensembles and productions
 
 | Report | Content |
@@ -27,14 +35,13 @@ its setup (machine, commit, job) so that it can be reproduced.
 | [P. Campeti's ensemble method](campeti_merge.md) | the merge of his package: `stl-bridge`, `stl-ensemble`, validation against his Python, harmonic terms on the GPU |
 | [Production at nside 1024](campeti_production_1024.md) | step by step: calibration, Slurm job on one A100, monitoring and restart, results against the ten Takahashi realisations |
 | [Kappa power spectrum](kappa_power_spectrum.md) | the C_ℓ deficit of Gaussianised syntheses and its correction (`--kappa-table`, level power) |
-| [Disc patches and cross statistics](disc_cross_statistics.md) | `stl-bridge` / `stl_port.native`: statistics on random disc patches (`PatchEngine`) and cross statistics `S(a, b)` (`cross=True`), exact VJPs, for networks trained with STL losses |
-| [Masked statistics](masked_statistics.md) | the full-sky statistics averaged over `K` masks in one sweep (`NativeEngine(masks=...)`), CPU and GPU, exact VJP; T4 timings |
-| [Differentiable pseudo-spectra](spectrum.md) | anafast with its VJP (`SpectrumEngine`): spin 0 and spin `s` (`EE`, `BB`, `EB`), auto and cross, `K` masks, CPU and GPU; validation against healpy, timings |
 
 ## Research notes
 
 | Report | Content |
 |---|---|
+| [Lagrangian and coarse-to-fine synthesis](lagrangian_synthesis.md) | deformation-based synthesis, transport steps, homotopy, and the coarse-to-fine starts with conditional details (`stl-synth2d --c2f`, `--init-noise conditional`) |
+| [Amortized synthesis](amortized_synthesis.md) | generators trained through the statistics loss instead of one L-BFGS run per map: design and nside 64 prototype |
 | [Multi-scale conditional diffusion](diffusion_design.md) | a learned generative model on the HEALPix pyramid, complementary to the synthesis (`diffusion/`) |
 
 ```{toctree}
@@ -54,5 +61,7 @@ kappa_power_spectrum
 disc_cross_statistics
 masked_statistics
 spectrum
+lagrangian_synthesis
+amortized_synthesis
 diffusion_design
 ```

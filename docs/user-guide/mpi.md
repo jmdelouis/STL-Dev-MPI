@@ -1,11 +1,13 @@
-# MPI guide
+# MPI
 
 Every tool runs on several ranks. Without the `mpi` feature the ranks are threads of one process
 (`--ranks N`); with it they are the processes of `mpirun`, on one or many nodes. Both backends
 implement the same `stl_mpi::Comm` trait, and the results do not depend on the backend nor on
 the number of ranks (to the order of the sums, below 1e-15 for the statistics).
 
-## Build and run
+---
+
+## Minimal example
 
 ```bash
 export LIBCLANG_PATH=...                                    # bindgen (build time only)
@@ -19,7 +21,20 @@ mpirun -n 4 stl-mpi-check fixtures/stats/stats_n32_J4_L4_k5_C1_B1_full_b256
 Any MPI library works (OpenMPI 4 and 5, Intel MPI 2019 were used); CUDA-aware MPI is not needed
 (the exchanges go through the host).
 
-## Decomposition
+---
+
+## Key parameters
+
+| Option | Default | Description |
+|---|---|---|
+| `mpirun -n P` | | ranks (with the `mpi` feature); `--ranks P` runs them as threads without it |
+| `--block-pixels N` | 16384 | cells per block: the per-rank transient memory |
+| `--groups G` | 1 | groups of ranks for ensembles, `B / G` members each |
+| `--overlap N` | off | levels `< N` with redundant halos (no exchange during the sweeps), for a few ranks |
+| `--gpu` | off | one device per rank: local rank modulo the visible devices, or `STL_GPU_DEVICE` |
+| `mpirun --bind-to none` | | let each rank use every core (OpenMPI binds ranks to one core by default) |
+
+### Decomposition
 
 Rank `r` owns a contiguous range of NESTED cells of level 0, aligned so that it also owns the
 parents of its cells at every coarser level ([concepts](concepts.md#distributed-memory)).
@@ -33,7 +48,11 @@ so the memory per rank shrinks as `1/P` down to the block transients (80 to 110 
 16384) and the MPI runtime itself (OpenMPI 5 starts every rank at 190 to 350 MB, Intel MPI at
 20 to 30 MB).
 
-## How many ranks
+---
+
+## Pitfalls and costs
+
+### How many ranks
 
 | nside | Typical | Measured |
 |---|---|---|
@@ -44,7 +63,7 @@ so the memory per rank shrinks as `1/P` down to the block transients (80 to 110 
 At small nside the work saturates when a rank holds only a few hundred cells of level 0 (beyond
 64 ranks at nside 64): the halos of the small levels dominate.
 
-## Groups of ranks for ensembles
+### Groups of ranks for ensembles
 
 `--ensemble B --groups G` splits the ranks into `G` groups of consecutive ranks; each group holds
 `B / G` members (as one batch on its CPU or GPU engine) and the groups exchange one vector of
@@ -52,14 +71,14 @@ At small nside the work saturates when a rank holds only a few hundred cells of 
 maps); `G = B` gives one member per group (large maps, `B` times the ranks or GPUs). Every `G`
 gives the same synthesis to about 1e-12.
 
-## Coarse-to-fine starts
+### Coarse-to-fine starts
 
 With `--init` at a lower nside, every rank's range must fall on whole pixels of the init map; if
 the program stops with "rank ranges are not aligned on its pixels", use fewer ranks or an init
 closer in nside. At large nside chain `N/8 → N/4 → N/2 → N`, each step initialised by the
 previous one (`--init`, `--init-noise auto`).
 
-## Batch systems
+### Batch systems
 
 Slurm, PBS and TGCC scripts are in `tools/hpc/`, `tools/datarmor/`, `tools/irene/`, and
 explained in [USAGE](../USAGE.md) section 6, with the sizing rules in section 7. Typical pitfalls:

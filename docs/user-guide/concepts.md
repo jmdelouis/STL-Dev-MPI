@@ -15,7 +15,7 @@ $$
 
 with L-BFGS (strong Wolfe line search, transcribed line by line from `torch.optim.LBFGS`), the
 map itself being the variable. Extra terms can be added (ensemble scatter, level power, histogram,
-Minkowski functionals, statistics of a transformed map; see [the CLI reference](cli.md)).
+Minkowski functionals, statistics of a transformed map; see {doc}`stl-synth` and {doc}`../api/cli/stl-synth`).
 
 ## The pyramid
 

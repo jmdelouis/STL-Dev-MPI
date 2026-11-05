@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "STL-Dev-MPI: pyramidal scattering-covariance statistics, gradients and synthesis on HEALPix and 2D grids, in Rust with MPI and CUDA"
+abstract: >-
+  STL-Dev-MPI computes the scattering-covariance statistics (mean, variance,
+  S1, S2, S3, S4) of full-sky HEALPix maps, disc patches and periodic images,
+  together with their exact gradient, and synthesises maps whose statistics
+  match those of a target map or of a population of maps. The statistics and
+  their gradient are computed block by block over the multiresolution pyramid
+  with explicit vector-Jacobian products, and the sky is split between MPI
+  ranks or GPUs, so that the memory of a process is bounded by its share of
+  the sky. It is the high-performance port of the patch-local engine of
+  STL-Dev and matches its statistics to 1e-10. Python bindings expose the
+  engines and their gradients to NumPy and PyTorch.
+type: software
+license: MIT
+repository-code: "https://github.com/jmdelouis/STL-Dev-MPI"
+version: "0.1.0"
+keywords:
+  - HEALPix
+  - scattering transform
+  - scattering covariance
+  - wavelet statistics
+  - synthesis
+  - weak lensing
+  - MPI
+  - CUDA
+  - Rust
+authors:
+  - family-names: Delouis
+    given-names: Jean-Marc
+    orcid: "https://orcid.org/0000-0002-0713-1658"
+    affiliation: "LOPS UMR 6523, CNRS-IFREMER-IRD-Univ. Brest-IUEM, Plouzané, France"
+  - family-names: Campeti
+    given-names: Paolo
+references:
+  - type: software
+    title: "STL-Dev"
+    repository-code: "https://github.com/STL-Proj/STL-Dev"

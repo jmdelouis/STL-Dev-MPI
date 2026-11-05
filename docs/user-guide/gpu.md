@@ -1,4 +1,4 @@
-# GPU guide
+# GPU
 
 `--gpu` runs the sweeps on CUDA devices, **one device per rank**, with the same decomposition,
 exchanges, objective and L-BFGS as the CPU engine. Everything stays `f64`; the kernels are
@@ -6,7 +6,9 @@ compiled at start-up by NVRTC with `--fmad=false`, without floating-point atomic
 are deterministic and match the CPU engine to 1e-12 (statistics to 6e-16). The design and every
 measurement are in the [GPU engine report](../gpu.md).
 
-## Build and run
+---
+
+## Minimal example
 
 ```bash
 export CUDARC_CUDA_VERSION=12040                    # the driver's CUDA version (nvidia-smi)
@@ -26,7 +28,22 @@ the GPU tests skip silently with `CUDA_ERROR_NO_DEVICE`.
 The device of a rank is its local rank modulo the visible devices (`CUDA_VISIBLE_DEVICES`), or
 `STL_GPU_DEVICE`.
 
-## Choosing the options
+---
+
+## Key parameters
+
+| Option (`stl-synth`, `stl-stats`, `stl-ensemble`) | Default | Description |
+|---|---|---|
+| `--gpu` | off | one CUDA device per rank (`stl-synth2d --gpu`: the batch on one device) |
+| `--gpu-fields F` | `auto` | wavelet fields `keep` (fastest) or `recompute` (a third of the memory) |
+| `--geometry-cache P` | from `--gpu-cache` | convolution geometry between evaluations: `device`, `host` (pinned host memory), `auto`, `off`; bit-identical results |
+| `--gpu-terms T` | `device` | the objective's extra terms on the `device` or the `host` |
+| `--gpu-conv F` | `dia` | geometry form: masked diagonals or bound stencils |
+| `--gpu-block-rows N` | from free memory | owned cells per device block |
+| `STL_GPU_DEVICE`, `STL_GPU_CACHE_MB`, `STL_HOST_CACHE_MB` | | device, cache budgets |
+| Python engines: `backend="gpu"`, `device=` | `"cpu"`, 0 | {doc}`native-engine`, {doc}`patch-engine`, {doc}`spectrum-engine` |
+
+Which options for which situation:
 
 | Situation | Options |
 |---|---|
@@ -52,7 +69,11 @@ bit-identical results ([report](../geometry_cache_preconditioner.md)).
 marginal, kappa transform and kurtosis and the gradient sums run on the device, and the maps go
 to the device once per evaluation. Minkowski terms and `--freeze-nside` fall back to `host`.
 
-## Measured
+---
+
+## Pitfalls and costs
+
+### Measured
 
 | Case | Device | s / evaluation | Device memory |
 |---|---|---|---|
@@ -67,7 +88,7 @@ Sources: [bench_n128](../bench_n128.md), [gpu](../gpu.md) section 5,
 [planar_2d](../planar_2d.md) sections 5b and 5c. The T4 has 1/32 of its FP32 throughput in FP64;
 data-centre GPUs (A100, H100) are 40 to 130 times faster in FP64.
 
-## Large productions
+### Large productions
 
 - nside 1024 × 10 members with P. Campeti's method on one A100:
   [step by step](../campeti_production_1024.md);

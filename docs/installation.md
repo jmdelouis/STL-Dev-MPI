@@ -65,6 +65,17 @@ target/release/stl-synth --target map.npy --gpu --out run
 
 :::
 
+:::{tab-item} Python bindings
+
+```bash
+cargo build --release -p stl-bridge                  # add --features gpu for backend="gpu"
+export STL_NATIVE_LIBRARY=$PWD/target/release/libstl_bridge.so
+export PYTHONPATH=$PWD/python/stl_ensemble:$PYTHONPATH
+python -c "from stl_port.native import NativeEngine; print(NativeEngine(16, 3).ncoeff)"
+```
+
+:::
+
 :::{tab-item} GPU + MPI
 
 ```bash
@@ -81,6 +92,7 @@ mpirun -n 4 target/release/stl-synth --target map.npy --gpu --out run   # one de
 |---|---|---|
 | `mpi` | `stl-cli`, `stl-mpi` | the tools run under `mpirun` (`MPI_COMM_WORLD`); `stl-mpi-check` is built |
 | `gpu` | `stl-cli`, `stl-mpi` | `--gpu`: one CUDA device per rank (`crates/stl-gpu`) |
+| `gpu` | `stl-bridge` | `backend="gpu"` in the Python engines |
 
 Keep the build directory on local storage (`CARGO_TARGET_DIR`): network file systems and
 `/mnt/c` in WSL make the build much slower. Compute nodes without internet access build with
@@ -97,6 +109,13 @@ CUDARC_CUDA_VERSION=12040 cargo test --release -p stl-gpu   # skipped without a 
 Every test compares with fixtures dumped from STL-Dev (`fixtures/`, `tools/dump_reference.py`):
 statistics to 1e-11 absolute and 1e-10 relative, gradients to 1e-10, and 1, 2, 4 ranks
 identical to 1e-15.
+
+## Python bindings
+
+`python/stl_ensemble/stl_port/native.py` loads `libstl_bridge.so` with `ctypes`: it needs NumPy
+only (PyTorch for `PatchEngine.forward_device` / `vjp_device`). The library is found through
+`STL_NATIVE_LIBRARY`, or the `library=` argument of every engine; its SHA-256 is recorded in each
+engine's `info()`. See {doc}`user-guide/native-engine`.
 
 ## Python tools
 
