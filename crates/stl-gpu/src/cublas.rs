@@ -1,5 +1,5 @@
 //! The cuBLAS entry points of the batched Legendre sums (one DGEMM per m
-//! and parity), loaded at run time as cuFFT (`cufft.rs`): `STL_CUBLAS` (a
+//! and parity) and of the U-Net convolutions (SGEMM), loaded at run time as cuFFT (`cufft.rs`): `STL_CUBLAS` (a
 //! path) if set, else `libcublas.so` and its versioned names on the library
 //! path.  The C interface used here (`cublas*_v2`) is the same in cuBLAS 10
 //! to 13.  DGEMM runs on the FP64 tensor cores of an A100 by default
@@ -17,6 +17,7 @@ pub const OP_N: c_int = 0;
 /// `CUBLAS_OP_T`: the operand is transposed.
 pub const OP_T: c_int = 1;
 
+type Sgemm = unsafe extern "C" fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f32, *const f32, c_int, *const f32, c_int, *const f32, *mut f32, c_int) -> c_int;
 type Dgemm = unsafe extern "C" fn(Handle, c_int, c_int, c_int, c_int, c_int, *const f64, *const f64, c_int, *const f64, c_int, *const f64, *mut f64, c_int) -> c_int;
 
 /// The cuBLAS entry points resolved from the loaded library (see `cublas`).
@@ -26,6 +27,7 @@ pub struct CuBlas {
     destroy: unsafe extern "C" fn(Handle) -> c_int,
     set_stream: unsafe extern "C" fn(Handle, *mut c_void) -> c_int,
     dgemm: Dgemm,
+    sgemm: Sgemm,
 }
 
 // The handle is used from one thread at a time (the device's stream).
@@ -63,6 +65,7 @@ fn load() -> Result<CuBlas, String> {
             destroy: sym!("cublasDestroy_v2"),
             set_stream: sym!("cublasSetStream_v2"),
             dgemm: sym!("cublasDgemm_v2"),
+            sgemm: sym!("cublasSgemm_v2"),
             _lib: lib,
         })
     }
@@ -102,6 +105,18 @@ impl CuBlas {
         check(
             (self.dgemm)(h, ta, tb, m as c_int, n as c_int, k as c_int, &alpha, a as *const f64, lda as c_int, b as *const f64, ldb as c_int, &beta, c as *mut f64, ldc as c_int),
             "dgemm",
+        )
+    }
+
+    /// [`dgemm`](Self::dgemm) in single precision (the U-Net layers, `nn.rs`).
+    ///
+    /// # Safety
+    /// The addresses must hold the matrices with the given leading dimensions.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn sgemm(&self, h: Handle, ta: c_int, tb: c_int, m: usize, n: usize, k: usize, alpha: f32, a: u64, lda: usize, b: u64, ldb: usize, beta: f32, c: u64, ldc: usize) -> Result<(), String> {
+        check(
+            (self.sgemm)(h, ta, tb, m as c_int, n as c_int, k as c_int, &alpha, a as *const f32, lda as c_int, b as *const f32, ldb as c_int, &beta, c as *mut f32, ldc as c_int),
+            "sgemm",
         )
     }
 }

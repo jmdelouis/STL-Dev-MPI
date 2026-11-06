@@ -69,6 +69,18 @@ impl Masks {
         Masks { weights, counts }
     }
 
+    /// Masks given on every level, `weights[k][n]` (nonzero: in the mask),
+    /// e.g. the pixels of the spin front end that read valid data only
+    /// ([`crate::spin::SpinPyramid::valid_rows`]).
+    pub fn from_levels(weights: Vec<Vec<Vec<f64>>>) -> Self {
+        assert!(!weights.is_empty(), "no mask");
+        let weights: Vec<Vec<Vec<f64>>> =
+            weights.into_iter().map(|lv| lv.into_iter().map(|w| w.iter().map(|&v| if v != 0.0 { 1.0 } else { 0.0 }).collect()).collect()).collect();
+        let counts: Vec<Vec<usize>> = weights.iter().map(|lv| lv.iter().map(|w| w.iter().filter(|&&v| v != 0.0).count()).collect()).collect();
+        assert!(counts.iter().flatten().all(|&c| c > 0), "empty mask at some level");
+        Masks { weights, counts }
+    }
+
     /// Number of masks `K`.
     pub fn len(&self) -> usize {
         self.weights.len()

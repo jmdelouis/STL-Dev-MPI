@@ -346,6 +346,28 @@ impl<'a> LocalEngine<'a> {
         self.gm.clear();
     }
 
+    /// Loads the maps of every level `maps[d]` `[B, C, |layout d|]` as they
+    /// are, without decimating level 0 (the spin front end supplies its own
+    /// per-level fields, [`crate::spin`]); the stored moduli are zeroed.
+    /// The cotangents of [`reverse`](Self::reverse) are then those of these
+    /// maps, one per level.
+    pub fn reload_levels(&mut self, maps: &[Vec<f64>]) {
+        assert!(self.part.overlap.is_none(), "per-level maps are not available in the overlap mode");
+        assert_eq!(maps.len(), self.cfg.levels(), "one map per level");
+        let bc = self.batch * self.channels;
+        self.maps.truncate(0);
+        for (d, m) in maps.iter().enumerate() {
+            assert_eq!(m.len(), bc * self.part.layouts[d].len(), "map length of level {d}");
+            let mut v = m.clone();
+            self.ex.halo(d, &mut v, bc);
+            self.maps.push(v);
+        }
+        for v in self.m.values_mut() {
+            v.fill(0.0);
+        }
+        self.gm.clear();
+    }
+
     /// `maps[1..]`: the decimations of `maps[0]` (halo exchanged).
     fn decimate_levels(&mut self) {
         let bc = self.batch * self.channels;

@@ -1,0 +1,22 @@
+nside 64 J 5 levels 4 channels [32, 64, 96, 128] params 910593 sims 6 loss {'data': 1.0, 'l1': 1.0, 'l2': 1.0, 'l3': 1.0, 'cl': 1.0} optimizer adam bias biased coefficients only warmup 10 cond log857+sigma stat masks 0,20,30,45 cl masks 0,30,45,60, 4 bins
+eval 0 t=0.0s Q err/noise 0.000 loss 33.28 U err/noise 0.000 loss 35.954
+step 1 U loss 35.863 data 1.424 l1 0.5495 l2 0.3549 l3 0.04539 cl 33.49 1.432 s/step
+step 5 U loss 29.7325 data 1.193 l1 0.5526 l2 0.4333 l3 0.0643 cl 27.49 1.414 s/step
+step 10 Q loss 9.33198 data 0.8559 l1 0.6533 l2 0.5878 l3 0.2103 cl 7.025 1.415 s/step
+step 15 U loss 5.13092 data 0.5458 l1 0.4165 l2 0.5895 l3 0.1233 cl 3.456 1.484 s/step
+step 20 Q loss 2.72433 data 0.5143 l1 0.4242 l2 0.3187 l3 0.1626 cl 1.305 1.248 s/step
+eval 20 t=25.0s Q err/noise 0.510 loss 2.5512 U err/noise 0.306 loss 2.9321
+step 25 U loss 2.34459 data 0.3629 l1 0.3015 l2 0.462 l3 0.09344 cl 1.125 1.323 s/step
+step 30 Q loss 1.36333 data 0.376 l1 0.2706 l2 0.1316 l3 0.1101 cl 0.4749 1.193 s/step
+step 35 U loss 1.74625 data 0.3033 l1 0.2953 l2 0.3642 l3 0.08883 cl 0.6946 1.255 s/step
+step 40 Q loss 1.18496 data 0.3584 l1 0.2898 l2 0.1344 l3 0.1137 cl 0.2886 1.166 s/step
+eval 40 t=46.6s Q err/noise 0.370 loss 1.1844 U err/noise 0.263 loss 1.7193
+eval_Q.npz
+eval_U.npz
+history.json
+model.pt
+params.npy
+train.json
+SCRIPT VERSION: stl_port 2026-10-29-v2-variance-ratio
+SCRIPT VERSION: stl_port.native 2026-11-08-v11
+cond 2 model.pt vs native eval_Q: rel 1.3626382457533581e-06

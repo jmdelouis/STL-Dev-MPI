@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 
-const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"));
+const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"), include_str!("nn.cu"));
 
-const KERNELS: [&str; 91] = [
+const KERNELS: [&str; 113] = [
     "disc_terms",
     "disc_terms_rev",
     "ring_thetas",
@@ -105,6 +105,28 @@ const KERNELS: [&str; 91] = [
     "pl_spec_mult_sum",
     "pl_rings",
     "pl_rings_vjp",
+    "nn_gather",
+    "nn_scatter",
+    "nn_bias",
+    "nn_chan_sums",
+    "nn_chan_finish",
+    "nn_gn_stats",
+    "nn_gn_apply",
+    "nn_gn_params",
+    "nn_gn_back",
+    "nn_pool",
+    "nn_pool_back",
+    "nn_unpool",
+    "nn_unpool_back",
+    "nn_cols",
+    "nn_head",
+    "nn_head_back",
+    "nn_input",
+    "nn_output",
+    "nn_output_back",
+    "nn_add_f64",
+    "nn_adam",
+    "nn_axpy",
 ];
 
 /// Compiles the kernels to a native binary for the device (`sm_XY`): a

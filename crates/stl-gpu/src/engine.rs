@@ -1099,6 +1099,30 @@ impl<'a> GpuEngine<'a> {
         self.tick("gpu_load", started);
     }
 
+    /// Loads the maps of every level `maps[d]` `[B, C, |layout d|]` (host)
+    /// as they are, without decimating level 0
+    /// (`LocalEngine::reload_levels`).
+    pub fn load_levels(&mut self, ex: &dyn Exchange, maps: &[Vec<f64>]) {
+        let started = Instant::now();
+        let bc = self.batch * self.channels;
+        assert_eq!(maps.len(), self.levels(), "one map per level");
+        let mut old = std::mem::take(&mut self.maps);
+        for (d, m) in maps.iter().enumerate() {
+            assert_eq!(m.len(), bc * self.held(d), "map length of level {d}");
+            let mut v = match old.get_mut(d) {
+                Some(v) if v.len() == m.len() => {
+                    let mut v = std::mem::replace(v, self.gpu.zeros::<f64>(0));
+                    self.gpu.copy_in(m, &mut v);
+                    v
+                }
+                _ => self.gpu.upload(m),
+            };
+            self.halo(ex, d, &mut v, bc);
+            self.maps.push(v);
+        }
+        self.tick("gpu_load", started);
+    }
+
     /// The level-0 map of the last load, taken from the engine (a later
     /// sweep needs a new load).
     pub fn take_map(&mut self) -> CudaSlice<f64> {

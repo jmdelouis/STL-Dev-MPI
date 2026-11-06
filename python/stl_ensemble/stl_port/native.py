@@ -13,10 +13,13 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-06-v6"
+SCRIPT_VERSION = "2026-11-08-v11"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
+_FLOAT = C.POINTER(C.c_float)
+_UINT32 = C.POINTER(C.c_uint32)
+_UINT64 = C.POINTER(C.c_uint64)
 _INT64 = C.POINTER(C.c_int64)
 _SIZE = C.POINTER(C.c_size_t)
 _VOID = C.c_void_p
@@ -61,6 +64,8 @@ def _library(path=None):
         "stlp_checkpoint_free": ([_VOID], None),
         "stlp_restore": ([_VOID, _VOID, C.c_uint64, C.c_uint64, C.c_uint64], C.c_int),
         "stlp_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_spin_fields": ([_VOID, _DOUBLE, C.c_size_t, C.c_size_t, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_forward_levels": ([_VOID, _DOUBLE, C.c_size_t, _DOUBLE], C.c_int),
         "stlp_native_pixels": ([_VOID, _SIZE], C.c_int),
         "stlp_lbfgs": ([_DOUBLE, C.c_size_t, C.c_char_p, _CALLBACK, _VOID], C.c_int64),
         "stlp_patch_new": ([C.c_char_p], _VOID),
@@ -80,6 +85,26 @@ def _library(path=None):
         "stlp_spec_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
         "stlp_spec_forward": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
         "stlp_spec_vjp": ([_VOID, _DOUBLE, C.c_size_t, C.c_uint64, C.c_uint64, C.c_uint64, _DOUBLE], C.c_int),
+        "stlp_unet_new": ([C.c_char_p], _VOID),
+        "stlp_unet_free": ([_VOID], None),
+        "stlp_unet_info": ([_VOID], _VOID),
+        "stlp_unet_get_params": ([_VOID, _FLOAT], C.c_int),
+        "stlp_unet_set_params": ([_VOID, _FLOAT, C.c_size_t], C.c_int),
+        "stlp_unet_get_grads": ([_VOID, _FLOAT], C.c_int),
+        "stlp_unet_zero_grad": ([_VOID], C.c_int),
+        "stlp_unet_adam": ([_VOID, C.c_double], C.c_int),
+        "stlp_unet_set_cond": ([_VOID, _FLOAT, C.c_size_t], C.c_int),
+        "stlp_unet_apply": ([_VOID, _DOUBLE, C.c_size_t, C.c_double, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_train_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_train_set_common": ([_VOID, _DOUBLE], C.c_int),
+        "stlp_train_set_field": ([_VOID, C.c_uint32, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE,
+                                  C.c_size_t, C.c_double], C.c_int),
+        "stlp_train_bias": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t], C.c_int),
+        "stlp_train_loss": ([_VOID, C.c_uint32, C.c_bool, _DOUBLE], C.c_int),
+        "stlp_train_step": ([_VOID, C.c_uint32, C.c_double, _DOUBLE], C.c_int),
+        "stlp_train_live": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t, _UINT64, _DOUBLE, C.c_size_t, C.c_bool,
+                             C.c_double, _DOUBLE], C.c_int),
+        "stlp_train_lbfgs": ([_VOID, _UINT32, C.c_size_t, C.c_char_p], _VOID),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -141,11 +166,31 @@ class NativeEngine:
     of the full sky; values, variances and cotangents are [batch, K,
     ncoeff], and native_pixels() gives the [K, ncoeff] pixel counts of the
     averages (for the ergodic weights).
+
+    spin=2: the maps are (Q, U) [batch, 2, npix] NESTED. Level 0 holds
+    chi_E + i chi_B = -(d_x - i d_y)^2 P, P = Q + iU, the derivative a local
+    stencil on the pixels within spin_kernel // 2 rings (pixel units), and
+    the coarser levels its scalar decimations (spin_pyramid="scalar", the
+    default); spin_pyramid="transported": every level j holds the operator
+    applied at level j to P_j, the mean of the four children of P_{j-1}
+    transported into the parent's frame (weight (l / l_j)^2); the
+    statistics are those of chi_E and chi_B with the one-channel plan:
+    values [batch, 2 (E, B), (K,) ncoeff], gradients [batch, 2, npix].
+    Masks (indicators of the valid data) are eroded by the stencil at every
+    level. spin_fields(maps, level) returns (Q, U) and (chi_E, chi_B) of a
+    level (scalar pyramid: level 0 only).
+
+    spin=2, cross=True (scalar pyramid): pairs (a, b), b a (Q, U) field
+    [batch, 2, npix] and a another one (spin_a=2) or a scalar map T
+    [batch, npix] (spin_a=0); forward_cross(a, b) gives the cross plan of
+    (chi_E^a, chi_E^b) and (chi_B^a, chi_B^b), or (T, chi_E^b) and
+    (T, chi_B^b): [batch, 2 (E, B), (K,) ncoeff]; vjp_cross returns
+    (grad_a, grad_b) in the shapes of a and b.
     """
     def __init__(self, nside, j, batch=1, backend="cpu", kernel=5,
                  orientations=4, block_pixels=4096, cache_bytes=1 << 30,
                  threads=1, cache="transposition", device=0, library=None,
-                 cross=False, masks=None):
+                 cross=False, masks=None, spin=0, spin_kernel=5, spin_pyramid="scalar", spin_a=2):
         self._lib = _library(library)
         self.library_sha256 = self._lib._stlp_binary_sha256
         self._handle = None
@@ -160,11 +205,24 @@ class NativeEngine:
         self.npix = 12 * self.nside**2
         self.backend = backend
         self.cross = bool(cross)
+        if spin not in (0, 2) or spin_kernel not in (3, 5, 7, 9):
+            raise ValueError("spin must be 0 or 2, spin_kernel 3, 5, 7 or 9")
+        if spin and self.cross and spin_pyramid != "scalar":
+            raise ValueError("spin=2 with cross=True needs spin_pyramid='scalar'")
+        if spin_a not in (0, 2):
+            raise ValueError("spin_a must be 0 (scalar map) or 2 (Q, U)")
+        self.spin_a = int(spin_a) if spin and self.cross else None
+        if spin_pyramid not in ("transported", "scalar"):
+            raise ValueError("spin_pyramid must be transported or scalar")
+        self.spin = int(spin)
         self.channels = 2 if self.cross else 1
+        self._pairs = self.cross or self.spin == 2
         self.config = dict(nside=self.nside, j=self.j, batch=self.batch,
                            backend=backend, kernel=int(kernel), orientations=int(orientations),
                            block_pixels=int(block_pixels), cache_bytes=int(cache_bytes),
-                           threads=int(threads), cache=cache, device=int(device), cross=self.cross)
+                           threads=int(threads), cache=cache, device=int(device), cross=self.cross,
+                           spin=self.spin, spin_kernel=int(spin_kernel), spin_pyramid=spin_pyramid,
+                           spin_a=int(spin_a))
         self._handle = self._lib.stlp_new(json.dumps(self.config).encode())
         if not self._handle:
             raise _error(self._lib)
@@ -214,7 +272,47 @@ class NativeEngine:
             return out if self.nmasks else out[0]
 
     def _shape(self):
-        return (self.batch, self.nmasks, self.ncoeff) if self.nmasks else (self.batch, self.ncoeff)
+        head = (self.batch, 2) if self.spin else (self.batch,)
+        return head + ((self.nmasks, self.ncoeff) if self.nmasks else (self.ncoeff,))
+
+    def _map_shape(self):
+        if self.spin and self.cross:
+            return (self.batch, (2 if self.spin_a == 2 else 1) + 2, self.npix)
+        return (self.batch, 2, self.npix) if self._pairs else (self.batch, self.npix)
+
+    def _pack_spin_cross(self, a, b):
+        """(a, b) -> the bridge's input: a [batch, 1 or 2, npix] then b [batch, 2, npix]."""
+        pa = 2 if self.spin_a == 2 else 1
+        a = np.asarray(a, dtype=np.float64).reshape(self.batch, pa, self.npix)
+        b = np.asarray(b, dtype=np.float64).reshape(self.batch, 2, self.npix)
+        return np.concatenate([a.ravel(), b.ravel()])
+
+    def forward_levels(self, levels):
+        """Statistics of maps given at every level (no decimation, no spin
+        front end; for validation): levels[d] [engine rows, 12 (nside/2^d)^2],
+        engine rows = batch (spin=2: batch x (chi_E, chi_B))."""
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(np.concatenate([np.asarray(v, dtype=np.float64).ravel() for v in levels]))
+            values = np.empty(self._shape(), dtype=np.complex128)
+            self._current_key = None
+            if self._lib.stlp_forward_levels(self._handle, _pointer(x), x.size, _pointer(values.view(np.float64))):
+                raise _error(self._lib)
+            return values
+
+    def spin_fields(self, maps, level=0):
+        """spin=2: ((Q, U), (chi_E, chi_B)) of `level`, each [batch, 2, npix_level]."""
+        if not self.spin:
+            raise RuntimeError("spin_fields needs NativeEngine(..., spin=2)")
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(maps, dtype=np.float64).reshape(self._map_shape())
+            n = 12 * (self.nside >> int(level))**2
+            qu = np.empty((self.batch, 2, n))
+            chi = np.empty((self.batch, 2, n))
+            if self._lib.stlp_spin_fields(self._handle, _pointer(x), x.size, int(level), _pointer(qu), _pointer(chi)):
+                raise _error(self._lib)
+            return qu, chi
 
     def info(self):
         """The engine's description, from the library: version, sizes, backend, the plan
@@ -261,12 +359,17 @@ class NativeEngine:
         with self._lock:
             self._open()
             key = _key(generation, member, objective)
-            x = np.ascontiguousarray(maps, dtype=np.float64)
-            shape = (self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix)
-            if x.shape == shape[1:] and self.batch == 1:
-                x = x[None]
-            if x.shape != shape:
-                raise ValueError(f"expected maps {shape}, got {x.shape}")
+            if self.spin and self.cross:
+                if not (isinstance(maps, (tuple, list)) and len(maps) == 2):
+                    raise ValueError("spin=2, cross=True: maps = (a, b), or use forward_cross")
+                x = self._pack_spin_cross(*maps)
+            else:
+                x = np.ascontiguousarray(maps, dtype=np.float64)
+                shape = self._map_shape()
+                if x.shape == shape[1:] and self.batch == 1:
+                    x = x[None]
+                if x.shape != shape:
+                    raise ValueError(f"expected maps {shape}, got {x.shape}")
             if not np.isfinite(x).all():
                 raise ValueError("input map contains non-finite values")
             values = np.empty(self._shape(), dtype=np.complex128)
@@ -309,23 +412,35 @@ class NativeEngine:
                 raise ValueError(f"expected cotangents {shape}, got {c.shape}")
             if not np.isfinite(c).all():
                 raise ValueError("non-finite coefficient cotangent")
-            grad = np.empty((self.batch, self.npix) if not self.cross else (self.batch, 2, self.npix), dtype=np.float64)
+            if self.spin and self.cross:
+                pa = 2 if self.spin_a == 2 else 1
+                grad = np.empty(self.batch * (pa + 2) * self.npix)
+            else:
+                grad = np.empty(self._map_shape(), dtype=np.float64)
             status = self._lib.stlp_vjp(self._handle, _pointer(c.view(np.float64)), c.size, *key, _pointer(grad))
             if status:
                 raise _error(self._lib)
+            if self.spin and self.cross:
+                ga, gb = np.split(grad, [self.batch * pa * self.npix])
+                ga = ga.reshape(self.batch, 2, self.npix) if pa == 2 else ga.reshape(self.batch, self.npix)
+                return ga, gb.reshape(self.batch, 2, self.npix)
             return grad
 
     def forward_cross(self, a, b, generation=0, member=0, objective="gaussian", moments=False):
         """Cross statistics S(a, b) of the pairs a, b [batch, npix] (cross=True)."""
         if not self.cross:
             raise RuntimeError("forward_cross needs NativeEngine(..., cross=True)")
+        if self.spin:
+            return self.forward((a, b), generation, member, objective, moments)
         a = np.asarray(a, dtype=np.float64).reshape(self.batch, self.npix)
         b = np.asarray(b, dtype=np.float64).reshape(self.batch, self.npix)
         return self.forward(np.stack([a, b], 1), generation, member, objective, moments)
 
     def vjp_cross(self, cotangents, generation=0, member=0, objective="gaussian"):
-        """(grad_a, grad_b), each [batch, npix], after forward_cross."""
+        """(grad_a, grad_b), each [batch, npix] (spin=2: the shapes of a and b), after forward_cross."""
         g = self.vjp(cotangents, generation, member, objective)
+        if self.spin:
+            return g
         return g[:, 0], g[:, 1]
 
     def checkpoint(self):
@@ -548,6 +663,288 @@ class SpectrumEngine:
         """Free the native engine."""
         if getattr(self, "_handle", None):
             self._lib.stlp_spec_free(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+class NativeUNet:
+    """The spherical U-Net of Healpix-STL-IA (stlia.unet.UNet, conv="sphere",
+    norm="group") in Rust, on the CPU or one GPU, with its training by the
+    scattering losses on that device (frozen noise biases).
+
+    Network: d [B, npix] NESTED (float64) -> u = d - scale r(d / scale), r
+    the float32 network; scale = std(d) (unbiased) unless given. Parameters:
+    one float32 buffer in the order and shapes of the torch state_dict
+    (state_dict(), load_state_dict() exchange with stlia.unet.UNet).
+
+    Training (j, loss weights): set_common(T857), set_field(name, d, d1, d2,
+    noise, noise1, noise2) upload the observations and noise pools once;
+    estimate_bias(name, sims, signs) freezes the biases at the current u;
+    step(name, lr) is one Adam step (torch's Adam); lbfgs(names, options)
+    the native strong-Wolfe L-BFGS on the parameters for the frozen-bias
+    loss of the fields; loss(name) the terms without update. Terms: total,
+    data, l1, l2, l3 (stlia train_denoise.py frozen_losses).
+    """
+    TERMS = ("total", "data", "l1", "l2", "l3")
+
+    def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
+                 backend="cpu", device=0, j=None, loss=None, bias_batch=5, block_pixels=4096, library=None,
+                 engine=None, bias_all=False):
+        """engine: options of the GPU statistics engines (cache, cache_bytes,
+        threads, conv, fields; as NativeEngine). bias_all: estimate the frozen
+        bias of every coefficient (default: zero on those without noise bias,
+        the mean of data, S2 of l1/l2/l3, S3 with the noise-free modulus of
+        l2/l3, as train_denoise.py without --bias-all)."""
+        self._lib = _library(library)
+        self.library_sha256 = self._lib._stlp_binary_sha256
+        self._handle = None
+        self._lock = threading.RLock()
+        if backend not in ("cpu", "gpu"):
+            raise ValueError("backend must be cpu or gpu")
+        self.nside, self.npix, self.cond = int(nside), 12 * int(nside)**2, int(cond)
+        self.config = dict(nside=self.nside, channels=[int(c) for c in channels], ksz=int(ksz), gauge=gauge,
+                           slope=float(slope), cond=self.cond, scale=None if scale is None else float(scale),
+                           seed=int(seed), backend=backend, device=int(device), bias_batch=int(bias_batch),
+                           block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()},
+                           bias_all=bool(bias_all))
+        if j is not None:
+            self.config["j"] = int(j)
+        self.config.update(engine or {})
+        self._handle = self._lib.stlp_unet_new(json.dumps(self.config).encode())
+        if not self._handle:
+            raise _error(self._lib)
+        info = self.info()
+        self.params, self.size = info["params"], info["size"]
+        self._fields = {}
+
+    def _open(self):
+        if not self._handle:
+            raise RuntimeError("native U-Net is closed")
+
+    def _check(self, status):
+        if status:
+            raise _error(self._lib)
+
+    def info(self):
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_unet_info(self._handle)
+            if not p:
+                raise _error(self._lib)
+            try:
+                result = json.loads(C.string_at(p))
+                result["library_sha256"] = self.library_sha256
+                return result
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def get_params(self):
+        with self._lock:
+            self._open()
+            w = np.empty(self.size, dtype=np.float32)
+            self._check(self._lib.stlp_unet_get_params(self._handle, w.ctypes.data_as(_FLOAT)))
+            return w
+
+    def set_params(self, w):
+        with self._lock:
+            self._open()
+            w = np.ascontiguousarray(w, dtype=np.float32).ravel()
+            self._check(self._lib.stlp_unet_set_params(self._handle, w.ctypes.data_as(_FLOAT), w.size))
+
+    def grads(self):
+        """Accumulated parameter cotangents (flat float32)."""
+        with self._lock:
+            self._open()
+            g = np.empty(self.size, dtype=np.float32)
+            self._check(self._lib.stlp_unet_get_grads(self._handle, g.ctypes.data_as(_FLOAT)))
+            return g
+
+    def _unflatten(self, flat):
+        return {s["name"]: flat[s["offset"]:s["offset"] + s["len"]].reshape(s["shape"]).copy() for s in self.params}
+
+    def state_dict(self):
+        """{name: float32 array} with the names and shapes of the torch state_dict."""
+        return self._unflatten(self.get_params())
+
+    def grads_dict(self):
+        return self._unflatten(self.grads())
+
+    def load_state_dict(self, state):
+        """From a torch state_dict (tensors or arrays) of stlia.unet.UNet."""
+        w = np.empty(self.size, dtype=np.float32)
+        for s in self.params:
+            v = state[s["name"]]
+            v = v.detach().cpu().numpy() if hasattr(v, "detach") else np.asarray(v)
+            if tuple(v.shape) != tuple(s["shape"]):
+                raise ValueError(f"{s['name']}: shape {tuple(v.shape)} != {tuple(s['shape'])}")
+            w[s["offset"]:s["offset"] + s["len"]] = v.ravel()
+        self.set_params(w)
+
+    def zero_grad(self):
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_zero_grad(self._handle))
+
+    def adam_step(self, lr):
+        """One Adam step from the accumulated cotangents (torch's Adam)."""
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_adam(self._handle, float(lr)))
+
+    def reset_adam(self):
+        with self._lock:
+            self._open()
+            self._check(self._lib.stlp_unet_adam(self._handle, -1.0))
+
+    def set_cond(self, cond):
+        """Conditioning maps [cond, npix] (NESTED, float32 after the caller's standardisation)."""
+        with self._lock:
+            self._open()
+            c = np.ascontiguousarray(cond, dtype=np.float32).reshape(-1)
+            if c.size != self.cond * self.npix:
+                raise ValueError(f"expected {self.cond} conditioning maps of {self.npix} pixels")
+            self._check(self._lib.stlp_unet_set_cond(self._handle, c.ctypes.data_as(_FLOAT), c.size))
+
+    def apply(self, d, scale=None, cot=None):
+        """u = d - scale r(d / scale) of d [B, npix] or [npix]; with cot (same
+        shape), the parameter cotangents of sum(cot * u) are added (see grads)."""
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(d, dtype=np.float64)
+            single = x.ndim == 1
+            x = x.reshape(-1, self.npix)
+            if not np.isfinite(x).all():
+                raise ValueError("non-finite input map")
+            c = None if cot is None else np.ascontiguousarray(cot, dtype=np.float64).reshape(x.shape)
+            u = np.empty_like(x)
+            self._check(self._lib.stlp_unet_apply(self._handle, _pointer(x), x.shape[0],
+                                                  0.0 if scale is None else float(scale),
+                                                  None if c is None else _pointer(c), _pointer(u)))
+            return u[0] if single else u
+
+    __call__ = apply
+
+    # -- training ------------------------------------------------------------
+
+    def _field_id(self, name):
+        if name not in self._fields:
+            self._fields[name] = len(self._fields)
+        return self._fields[name]
+
+    def set_masks(self, masks):
+        """Statistics averaged over masks ([K, npix] indicators or NESTED id
+        lists, as NativeEngine.set_masks); None: the whole sky."""
+        with self._lock:
+            self._open()
+            if masks is None:
+                w = np.zeros((0, self.npix))
+            elif isinstance(masks, np.ndarray) and masks.dtype != object and masks.shape[-1] == self.npix:
+                w = np.ascontiguousarray(np.atleast_2d(masks), dtype=np.float64)
+            else:
+                w = np.zeros((len(masks), self.npix))
+                for k, ids in enumerate(masks):
+                    w[k, np.asarray(ids, dtype=np.int64)] = 1.0
+            self._check(self._lib.stlp_train_set_masks(self._handle, _pointer(w), w.shape[0]))
+
+    def set_common(self, t857):
+        """The 857 GHz map of the l terms (NESTED, float64)."""
+        with self._lock:
+            self._open()
+            t = np.ascontiguousarray(t857, dtype=np.float64).reshape(self.npix)
+            self._check(self._lib.stlp_train_set_common(self._handle, _pointer(t)))
+
+    def set_field(self, name, d, d1=None, d2=None, noise=None, noise1=None, noise2=None, scale=None):
+        """Observation d, half missions d1, d2 and noise pools [S, npix]
+        (full mission; half missions of the same simulations), uploaded once."""
+        with self._lock:
+            self._open()
+            arr = lambda a, shape: None if a is None else np.ascontiguousarray(a, dtype=np.float64).reshape(shape)
+            pools = [arr(p, (-1, self.npix)) for p in (noise, noise1, noise2)]
+            sims = 0 if pools[0] is None else pools[0].shape[0]
+            if any(p is not None and p.shape[0] != sims for p in pools):
+                raise ValueError("noise pools of different sizes")
+            maps = [arr(m, self.npix) for m in (d, d1, d2)]
+            ptr = lambda a: None if a is None else _pointer(a)
+            self._check(self._lib.stlp_train_set_field(self._handle, self._field_id(name), *[ptr(m) for m in maps],
+                                                       *[ptr(p) for p in pools], sims,
+                                                       0.0 if scale is None else float(scale)))
+
+    def estimate_bias(self, name, sims, signs):
+        """Frozen noise biases of field `name` at the current network output,
+        from the draws (simulation index, sign) of its pools."""
+        with self._lock:
+            self._open()
+            s = np.ascontiguousarray(sims, dtype=np.uint64)
+            g = np.ascontiguousarray(signs, dtype=np.float64)
+            if s.shape != g.shape or s.ndim != 1:
+                raise ValueError("sims and signs: two arrays of the same length")
+            self._check(self._lib.stlp_train_bias(self._handle, self._field_id(name), s.ctypes.data_as(_UINT64),
+                                                  _pointer(g), s.size))
+
+    def _terms(self, out):
+        return dict(zip(self.TERMS, map(float, out)))
+
+    def loss(self, name, backward=False):
+        """Loss terms of field `name` (frozen biases); with backward, their
+        parameter cotangents are added to grads()."""
+        with self._lock:
+            self._open()
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_loss(self._handle, self._field_id(name), bool(backward), _pointer(out)))
+            return self._terms(out)
+
+    def step(self, name, lr):
+        """One Adam step on field `name`; returns the terms before the update."""
+        with self._lock:
+            self._open()
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_step(self._handle, self._field_id(name), float(lr), _pointer(out)))
+            return self._terms(out)
+
+    def live(self, name, data_draws, hm_draws, lr=0.0, backward=False):
+        """Live-bias loss of field `name` (train_denoise.py --bias live): the
+        models are means over fresh draws with the gradient through them,
+        data_draws = (sims, signs) of the data term, hm_draws those of the l
+        terms (full and half missions of the same simulations). lr > 0: one
+        Adam step (cotangents zeroed first); backward: cotangents added."""
+        with self._lock:
+            self._open()
+            (ds, dg), (hs, hg) = [(np.ascontiguousarray(s, dtype=np.uint64), np.ascontiguousarray(g, dtype=np.float64))
+                                  for s, g in (data_draws, hm_draws)]
+            out = np.empty(5)
+            self._check(self._lib.stlp_train_live(self._handle, self._field_id(name), ds.ctypes.data_as(_UINT64),
+                                                  _pointer(dg), ds.size, hs.ctypes.data_as(_UINT64), _pointer(hg),
+                                                  hs.size, bool(backward), float(lr), _pointer(out)))
+            return self._terms(out)
+
+    def lbfgs(self, names, options=None):
+        """Native strong-Wolfe L-BFGS on the parameters for the sum of the
+        frozen-bias losses of the fields `names` (one round: refresh the
+        biases with estimate_bias before). options: lr, max_iter, max_eval,
+        tolerance_grad, tolerance_change, history_size."""
+        with self._lock:
+            self._open()
+            ids = np.array([self._field_id(n) for n in ([names] if isinstance(names, str) else names)], dtype=np.uint32)
+            p = self._lib.stlp_train_lbfgs(self._handle, ids.ctypes.data_as(_UINT32), ids.size,
+                                           json.dumps(options or {}).encode())
+            if not p:
+                raise _error(self._lib)
+            try:
+                return json.loads(C.string_at(p))
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def close(self):
+        if getattr(self, "_handle", None):
+            self._lib.stlp_unet_free(self._handle)
             self._handle = None
 
     def __del__(self):
