@@ -1,7 +1,9 @@
 //! Spin-2 front end of the scattering engine: the polarisation `P = Q + iU`
 //! of level 0 becomes, at every pyramid level `j`, the spin-0 field
 //!
-//!     chi_j = chi_E + i chi_B = -(d_x - i d_y)^2 P_j      (pixel units of level j)
+//! ```text
+//! chi_j = chi_E + i chi_B = -(d_x - i d_y)^2 P_j      (pixel units of level j)
+//! ```
 //!
 //! where `P_j` is the mean of the four NESTED children of `P_{j-1}`, each
 //! rotated into the parent's frame by parallel transport, and the
