@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-08-v11"
+SCRIPT_VERSION = "2026-11-09-v12"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -94,7 +94,7 @@ def _library(path=None):
         "stlp_unet_zero_grad": ([_VOID], C.c_int),
         "stlp_unet_adam": ([_VOID, C.c_double], C.c_int),
         "stlp_unet_set_cond": ([_VOID, _FLOAT, C.c_size_t], C.c_int),
-        "stlp_unet_apply": ([_VOID, _DOUBLE, C.c_size_t, C.c_double, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_unet_apply": ([_VOID, _DOUBLE, C.c_size_t, _DOUBLE, _DOUBLE, _DOUBLE], C.c_int),
         "stlp_train_set_masks": ([_VOID, _DOUBLE, C.c_size_t], C.c_int),
         "stlp_train_set_common": ([_VOID, _DOUBLE], C.c_int),
         "stlp_train_set_field": ([_VOID, C.c_uint32, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE, _DOUBLE,
@@ -105,6 +105,8 @@ def _library(path=None):
         "stlp_train_live": ([_VOID, C.c_uint32, _UINT64, _DOUBLE, C.c_size_t, _UINT64, _DOUBLE, C.c_size_t, C.c_bool,
                              C.c_double, _DOUBLE], C.c_int),
         "stlp_train_lbfgs": ([_VOID, _UINT32, C.c_size_t, C.c_char_p], _VOID),
+        "stlp_train_set_joint": ([_VOID, _DOUBLE, _DOUBLE, C.c_uint32, C.c_uint32, C.c_char_p, C.c_double], C.c_int),
+        "stlp_train_front": ([_VOID, _DOUBLE, C.c_size_t, C.c_bool, _DOUBLE], C.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -681,9 +683,11 @@ class NativeUNet:
     scattering losses on that device (frozen noise biases).
 
     Network: d [B, npix] NESTED (float64) -> u = d - scale r(d / scale), r
-    the float32 network; scale = std(d) (unbiased) unless given. Parameters:
-    one float32 buffer in the order and shapes of the torch state_dict
-    (state_dict(), load_state_dict() exchange with stlia.unet.UNet).
+    the float32 network; scale = std(d) (unbiased) unless given. maps=2
+    (UNet(maps=2)): d [B, 2, npix], a pair of maps in and out, one scale per
+    map. Parameters: one float32 buffer in the order and shapes of the torch
+    state_dict (state_dict(), load_state_dict() exchange with
+    stlia.unet.UNet).
 
     Training (j, loss weights): set_common(T857), set_field(name, d, d1, d2,
     noise, noise1, noise2) upload the observations and noise pools once;
@@ -692,12 +696,20 @@ class NativeUNet:
     the native strong-Wolfe L-BFGS on the parameters for the frozen-bias
     loss of the fields; loss(name) the terms without update. Terms: total,
     data, l1, l2, l3 (stlia train_denoise.py frozen_losses).
+
+    Joint pair (maps=2): set_joint(d2, fields, front, scales, weight) sets
+    the network input [2, npix] and the two fields of the terms of its
+    outputs (set_field, in the domain of the front end: front(x) brings
+    (Q, U) pairs there); the calls on the name "joint" (estimate_bias,
+    loss, step, live, lbfgs) then train the pair, one network pass per step
+    and the terms of both fields summed.
     """
     TERMS = ("total", "data", "l1", "l2", "l3")
+    JOINT = 0xFFFFFFFF
 
     def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
                  backend="cpu", device=0, j=None, loss=None, bias_batch=5, block_pixels=4096, library=None,
-                 engine=None, bias_all=False):
+                 engine=None, bias_all=False, maps=1):
         """engine: options of the GPU statistics engines (cache, cache_bytes,
         threads, conv, fields; as NativeEngine). bias_all: estimate the frozen
         bias of every coefficient (default: zero on those without noise bias,
@@ -709,9 +721,10 @@ class NativeUNet:
         self._lock = threading.RLock()
         if backend not in ("cpu", "gpu"):
             raise ValueError("backend must be cpu or gpu")
-        self.nside, self.npix, self.cond = int(nside), 12 * int(nside)**2, int(cond)
+        self.nside, self.npix, self.cond, self.maps = int(nside), 12 * int(nside)**2, int(cond), int(maps)
         self.config = dict(nside=self.nside, channels=[int(c) for c in channels], ksz=int(ksz), gauge=gauge,
-                           slope=float(slope), cond=self.cond, scale=None if scale is None else float(scale),
+                           slope=float(slope), cond=self.cond, maps=self.maps,
+                           scale=None if scale is None else float(scale),
                            seed=int(seed), backend=backend, device=int(device), bias_batch=int(bias_batch),
                            block_pixels=int(block_pixels), loss={k: float(v) for k, v in (loss or {}).items()},
                            bias_all=bool(bias_all))
@@ -814,27 +827,34 @@ class NativeUNet:
             self._check(self._lib.stlp_unet_set_cond(self._handle, c.ctypes.data_as(_FLOAT), c.size))
 
     def apply(self, d, scale=None, cot=None):
-        """u = d - scale r(d / scale) of d [B, npix] or [npix]; with cot (same
-        shape), the parameter cotangents of sum(cot * u) are added (see grads)."""
+        """u = d - scale r(d / scale) of d [B, npix] or [npix] ([B, 2, npix]
+        or [2, npix] with maps=2); scale: one value, or one per map (default:
+        the configured scale, else the std of each map over the batch); with
+        cot (same shape), the parameter cotangents of sum(cot * u) are added
+        (see grads)."""
         with self._lock:
             self._open()
             x = np.ascontiguousarray(d, dtype=np.float64)
-            single = x.ndim == 1
-            x = x.reshape(-1, self.npix)
+            shape = x.shape
+            x = x.reshape(-1, self.maps * self.npix)
             if not np.isfinite(x).all():
                 raise ValueError("non-finite input map")
             c = None if cot is None else np.ascontiguousarray(cot, dtype=np.float64).reshape(x.shape)
+            s = None if scale is None else np.ascontiguousarray(np.broadcast_to(np.asarray(scale, dtype=np.float64).ravel(),
+                                                                                (self.maps,)))
             u = np.empty_like(x)
             self._check(self._lib.stlp_unet_apply(self._handle, _pointer(x), x.shape[0],
-                                                  0.0 if scale is None else float(scale),
+                                                  None if s is None else _pointer(s),
                                                   None if c is None else _pointer(c), _pointer(u)))
-            return u[0] if single else u
+            return u.reshape(shape)
 
     __call__ = apply
 
     # -- training ------------------------------------------------------------
 
     def _field_id(self, name):
+        if name == "joint":
+            return self.JOINT
         if name not in self._fields:
             self._fields[name] = len(self._fields)
         return self._fields[name]
@@ -876,6 +896,33 @@ class NativeUNet:
             self._check(self._lib.stlp_train_set_field(self._handle, self._field_id(name), *[ptr(m) for m in maps],
                                                        *[ptr(p) for p in pools], sims,
                                                        0.0 if scale is None else float(scale)))
+
+    def set_joint(self, d, fields=("E", "B"), front=None, scales=None, weight=1.0):
+        """The joint pair (maps=2): network input d [2, npix], the fields of
+        the terms of its two outputs (set_field), the front end from the
+        output to those fields (None: identity; "eth": chi_E + i chi_B =
+        conj-eth^2 (Q + iU) at level 0, as NativeEngine(spin=2), the masks
+        then eroded as there), the input scales (default: the std of each
+        map) and the factor on the terms of each field."""
+        with self._lock:
+            self._open()
+            x = np.ascontiguousarray(d, dtype=np.float64).reshape(2 * self.npix)
+            s = None if scales is None else np.ascontiguousarray(np.broadcast_to(
+                np.asarray(scales, dtype=np.float64).ravel(), (2,)))
+            ids = [self._field_id(f) for f in fields]
+            self._check(self._lib.stlp_train_set_joint(self._handle, _pointer(x), None if s is None else _pointer(s),
+                                                       ids[0], ids[1], (front or "none").encode(), float(weight)))
+
+    def front(self, x, adjoint=False):
+        """The front end of the joint pair (or its transpose) on pairs x [B, 2, npix] or [2, npix]."""
+        with self._lock:
+            self._open()
+            a = np.ascontiguousarray(x, dtype=np.float64)
+            flat = a.reshape(-1, 2 * self.npix)
+            out = np.empty_like(flat)
+            self._check(self._lib.stlp_train_front(self._handle, _pointer(flat), flat.shape[0], bool(adjoint),
+                                                   _pointer(out)))
+            return out.reshape(a.shape)
 
     def estimate_bias(self, name, sims, signs):
         """Frozen noise biases of field `name` at the current network output,

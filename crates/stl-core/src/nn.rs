@@ -14,8 +14,11 @@
 //! Network (levels `k = 0..L`, level `k` at `nside >> k`): encoder `pool`
 //! (mean of the 4 NESTED children) then `SphereBlock`; decoder
 //! `cat[unpool(x), skip_k, cond_k]` then `SphereBlock`; `SphereBlock` = (conv,
-//! GroupNorm(min(8, c)), LeakyReLU) twice; head `1 x 1` conv to one channel.
-//! Activations are pixel-major `[n, C]` per map.  Parameters are one flat
+//! GroupNorm(min(8, c)), LeakyReLU) twice; head `1 x 1` conv to `maps`
+//! channels.  `maps` = 2 (`UNet(maps=2)`): a pair of maps, both in the
+//! input and in the output, each standardised by its own scale.
+//! Activations are pixel-major `[n, C]` per map; the network's inputs and
+//! outputs are map-major `[maps, n]`.  Parameters are one flat
 //! buffer in the order and layouts of the torch `state_dict`
 //! ([`UNet::params`]).
 //!
@@ -413,6 +416,8 @@ pub struct UNetConfig {
     pub slope: f32,
     /// Number of conditioning maps.
     pub cond: usize,
+    /// Maps denoised together (1 or 2).
+    pub maps: usize,
     /// Fixed input scale; `None`: the standard deviation of the input batch.
     pub scale: Option<f64>,
 }
@@ -458,6 +463,7 @@ impl UNet {
         let levels = cfg.channels.len();
         assert!(levels >= 1 && cfg.nside >> (levels - 1) >= 1, "too many levels for nside");
         assert!(cfg.ksz % 2 == 1, "odd kernel size");
+        assert!(cfg.maps == 1 || cfg.maps == 2, "maps: 1 or 2");
         let stencils = (0..levels).map(|k| SphereStencil::new(cfg.nside >> k, cfg.ksz, cfg.gauge, 0, 1)).collect();
         let mut params = Vec::new();
         let mut size = 0;
@@ -482,15 +488,15 @@ impl UNet {
             let n2b = add(format!("{prefix}.n2.bias"), vec![cout]);
             BlockParams { cin, cout, level, groups, at: [c1w, c1b, c2w, c2b, n1w, n1b, n2w, n2b] }
         };
-        let enc: Vec<_> = (0..levels).map(|k| block(format!("enc.{k}"), if k == 0 { 1 + cfg.cond } else { ch[k - 1] }, ch[k], k)).collect();
+        let enc: Vec<_> = (0..levels).map(|k| block(format!("enc.{k}"), if k == 0 { cfg.maps + cfg.cond } else { ch[k - 1] }, ch[k], k)).collect();
         let dec: Vec<_> = (0..levels.saturating_sub(1))
             .map(|i| {
                 let k = levels - 2 - i;
                 block(format!("dec.{i}"), ch[k + 1] + ch[k] + cfg.cond, ch[k], k)
             })
             .collect();
-        let hw = add("head.weight".into(), vec![1, ch[0], 1]);
-        let hb = add("head.bias".into(), vec![1]);
+        let hw = add("head.weight".into(), vec![cfg.maps, ch[0], 1]);
+        let hb = add("head.bias".into(), vec![cfg.maps]);
         UNet { cfg, stencils, enc, dec, head: [hw, hb], params, size }
     }
 
@@ -579,14 +585,17 @@ impl UNet {
         dx
     }
 
-    /// The correction `r` `[n_0]` of one standardised map `x` `[n_0]`, with
-    /// the conditioning maps of [`cond_levels`](Self::cond_levels), and the
-    /// tape of its reverse pass.
+    /// The correction `r` `[maps, n_0]` of one standardised input `x`
+    /// `[maps, n_0]`, with the conditioning maps of
+    /// [`cond_levels`](Self::cond_levels), and the tape of its reverse pass.
     pub fn forward(&self, w: &[f32], x: &[f32], cond: &[Vec<f32>]) -> (Vec<f32>, Tape) {
         assert_eq!(w.len(), self.size, "parameter buffer");
         let levels = self.stencils.len();
-        let nc = self.cfg.cond;
-        let mut h = if nc > 0 { concat(&[(x, 1), (&cond[0], nc)]) } else { x.to_vec() };
+        let (nc, m) = (self.cfg.cond, self.cfg.maps);
+        let n0 = self.pixels(0);
+        assert_eq!(x.len(), m * n0, "input maps");
+        let xp = transpose(x, m, n0);
+        let mut h = if nc > 0 { concat(&[(&xp, m), (&cond[0], nc)]) } else { xp };
         let mut enc = Vec::with_capacity(levels);
         for (k, b) in self.enc.iter().enumerate() {
             if k > 0 {
@@ -610,24 +619,32 @@ impl UNet {
             dec.push(t);
         }
         let c0 = self.cfg.channels[0];
-        let hw = &w[self.head[0]..self.head[0] + c0];
-        let hb = w[self.head[1]];
-        let r = h.chunks(c0).map(|row| hb + row.iter().zip(hw).map(|(a, b)| a * b).sum::<f32>()).collect();
+        let mut r = Vec::with_capacity(m * n0);
+        for j in 0..m {
+            let hw = &w[self.head[0] + j * c0..self.head[0] + (j + 1) * c0];
+            let hb = w[self.head[1] + j];
+            r.extend(h.chunks(c0).map(|row| hb + row.iter().zip(hw).map(|(a, b)| a * b).sum::<f32>()));
+        }
         (r, Tape { enc, dec, last: h })
     }
 
-    /// Adds to `g` the parameter cotangent of `dr` `[n_0]` (the cotangent of
-    /// `r` of [`forward`](Self::forward)); returns the cotangent of `x`.
+    /// Adds to `g` the parameter cotangent of `dr` `[maps, n_0]` (the
+    /// cotangent of `r` of [`forward`](Self::forward)); returns the cotangent
+    /// of `x` `[maps, n_0]`.
     pub fn backward(&self, w: &[f32], tape: &Tape, dr: &[f32], g: &mut [f32]) -> Vec<f32> {
         let c0 = self.cfg.channels[0];
-        let nc = self.cfg.cond;
-        let hw = &w[self.head[0]..self.head[0] + c0];
+        let (nc, m) = (self.cfg.cond, self.cfg.maps);
+        let n0 = self.pixels(0);
+        assert_eq!(dr.len(), m * n0, "output cotangent");
         let mut dh = vec![0f32; tape.last.len()];
-        for (i, (&d, row)) in dr.iter().zip(tape.last.chunks(c0)).enumerate() {
-            g[self.head[1]] += d;
-            for ch in 0..c0 {
-                g[self.head[0] + ch] += d * row[ch];
-                dh[i * c0 + ch] = d * hw[ch];
+        for j in 0..m {
+            let hw = &w[self.head[0] + j * c0..self.head[0] + (j + 1) * c0];
+            for (i, (&d, row)) in dr[j * n0..(j + 1) * n0].iter().zip(tape.last.chunks(c0)).enumerate() {
+                g[self.head[1] + j] += d;
+                for ch in 0..c0 {
+                    g[self.head[0] + j * c0 + ch] += d * row[ch];
+                    dh[i * c0 + ch] += d * hw[ch];
+                }
             }
         }
         let levels = self.stencils.len();
@@ -656,17 +673,15 @@ impl UNet {
             let din = self.block_backward(b, w, &tape.enc[k], &dh, g);
             dh = if k > 0 { pool_backward(&din, self.enc[k - 1].cout) } else { din };
         }
-        if nc > 0 {
-            concat_backward(&dh, &[1, nc]).swap_remove(0)
-        } else {
-            dh
-        }
+        let dx = if nc > 0 { concat_backward(&dh, &[m, nc]).swap_remove(0) } else { dh };
+        transpose(&dx, n0, m)
     }
 
     /// `u = d - scale r(d / scale)` of a batch `d` `[B, n_0]` (`scale`: the
     /// configured one, else the standard deviation of the batch, unbiased),
-    /// with the tapes and the scale.
+    /// with the tapes and the scale (one map per input: `maps` = 1).
     pub fn apply(&self, w: &[f32], d: &[f64], cond: &[Vec<f32>]) -> (Vec<f64>, Vec<Tape>, f64) {
+        assert_eq!(self.cfg.maps, 1, "apply: one map per input");
         let n = self.pixels(0);
         let scale = self.cfg.scale.unwrap_or_else(|| std_unbiased(d));
         let levels = self.cond_levels(cond);
@@ -690,6 +705,20 @@ impl UNet {
             self.backward(w, t, &dr, g);
         }
     }
+}
+
+/// `[a, b]` -> `[b, a]` (row-major); a copy when either is 1.
+fn transpose(x: &[f32], a: usize, b: usize) -> Vec<f32> {
+    if a == 1 || b == 1 {
+        return x.to_vec();
+    }
+    let mut y = vec![0f32; x.len()];
+    for i in 0..a {
+        for j in 0..b {
+            y[j * a + i] = x[i * b + j];
+        }
+    }
+    y
 }
 
 /// Mutable references to entries `i < j` of `v`.

@@ -295,16 +295,23 @@ impl GpuUNet {
         out
     }
 
-    /// `u = d - scale r(d / scale)` of one map `d` `[n_0]` on the device,
-    /// with the conditioning maps of [`cond_levels`](Self::cond_levels), and
-    /// the tape.
-    pub fn forward(&self, d: &CudaSlice<f64>, scale: f64, cond: &[CudaSlice<f32>]) -> (CudaSlice<f64>, Tape) {
+    /// `(s_0, s_1)` of the per-map scales.
+    fn scale_pair(&self, scales: &[f64]) -> (f64, f64) {
+        assert_eq!(scales.len(), self.net.cfg.maps, "one scale per map");
+        (scales[0], *scales.last().unwrap())
+    }
+
+    /// `u = d - scale r(d / scale)` of one input `d` `[maps, n_0]` on the
+    /// device (`scales`: one per map), with the conditioning maps of
+    /// [`cond_levels`](Self::cond_levels), and the tape.
+    pub fn forward(&self, d: &CudaSlice<f64>, scales: &[f64], cond: &[CudaSlice<f32>]) -> (CudaSlice<f64>, Tape) {
         let g = &self.gpu;
-        let nc = self.net.cfg.cond;
+        let (nc, m) = (self.net.cfg.cond, self.net.cfg.maps);
+        let (s0, s1) = self.scale_pair(scales);
         let n0 = self.stencils[0].n;
-        assert_eq!(d.len(), n0, "one map");
-        let x = g.zeros::<f32>(n0 * (1 + nc));
-        g.launch1("nn_input", n0, &[g.a(d), scale.into(), if nc > 0 { g.a(&cond[0]) } else { NULL }, n0.into(), nc.into(), g.a(&x)]);
+        assert_eq!(d.len(), m * n0, "one input of maps");
+        let x = g.zeros::<f32>(n0 * (m + nc));
+        g.launch1("nn_input", n0, &[g.a(d), s0.into(), s1.into(), if nc > 0 { g.a(&cond[0]) } else { NULL }, n0.into(), m.into(), nc.into(), g.a(&x)]);
         let mut h = x;
         let mut enc: Vec<BlockTape> = Vec::new();
         for (k, b) in self.net.enc.iter().enumerate() {
@@ -338,31 +345,36 @@ impl GpuUNet {
             dec.push(t);
         }
         let c0 = ch[0];
-        let r = g.zeros::<f32>(n0);
-        g.launch1("nn_head", n0, &[g.a(&h), self.wp(self.net.head[0]), self.wp(self.net.head[1]), n0.into(), c0.into(), g.a(&r)]);
-        let u = g.zeros::<f64>(n0);
-        g.launch1("nn_output", n0, &[g.a(d), g.a(&r), scale.into(), n0.into(), g.a(&u)]);
+        let r = g.zeros::<f32>(m * n0);
+        g.launch1("nn_head", m * n0, &[g.a(&h), self.wp(self.net.head[0]), self.wp(self.net.head[1]), n0.into(), c0.into(), m.into(), g.a(&r)]);
+        let u = g.zeros::<f64>(m * n0);
+        g.launch1("nn_output", m * n0, &[g.a(d), g.a(&r), s0.into(), s1.into(), n0.into(), m.into(), g.a(&u)]);
         (u, Tape { enc, dec })
     }
 
-    /// Adds to the parameter cotangents those of `du` (the cotangent of `u`
-    /// of [`forward`](Self::forward), at fixed `d` and `scale`).
-    pub fn backward(&self, tape: &Tape, scale: f64, du: &CudaSlice<f64>) {
+    /// Adds to the parameter cotangents those of `du` `[maps, n_0]` (the
+    /// cotangent of `u` of [`forward`](Self::forward), at fixed `d` and
+    /// `scales`).
+    pub fn backward(&self, tape: &Tape, scales: &[f64], du: &CudaSlice<f64>) {
         let g = &self.gpu;
-        let nc = self.net.cfg.cond;
+        let (nc, m) = (self.net.cfg.cond, self.net.cfg.maps);
+        let (s0, s1) = self.scale_pair(scales);
         let ch = &self.net.cfg.channels;
         let n0 = self.stencils[0].n;
         let c0 = ch[0];
-        let dr = g.zeros::<f32>(n0);
-        g.launch1("nn_output_back", n0, &[g.a(du), scale.into(), n0.into(), g.a(&dr)]);
+        let dr = g.zeros::<f32>(m * n0);
+        g.launch1("nn_output_back", m * n0, &[g.a(du), s0.into(), s1.into(), n0.into(), m.into(), g.a(&dr)]);
         let last = &tape.dec.last().map_or(&tape.enc[0].out, |t| &t.out);
-        // Head: weight (sum dr h), bias (sum dr), input (dr hw).
-        let hs = self.chan_sums(3, g.a(last), g.a(&dr), NULL, NULL, NULL, n0, c0, 1);
-        g.launch1("nn_add_f64", c0, &[g.a(&hs), c0.into(), self.gp(self.net.head[0])]);
-        let hb = self.chan_sums(2, g.a(&dr), NULL, NULL, NULL, NULL, n0, 1, 1);
-        g.launch1("nn_add_f64", 1, &[g.a(&hb), 1usize.into(), self.gp(self.net.head[1])]);
+        // Head, per output map: weight (sum dr h), bias (sum dr); input (sum over the maps of dr hw).
+        for j in 0..m {
+            let drj = g.at(&dr, j * n0);
+            let hs = self.chan_sums(3, g.a(last), drj, NULL, NULL, NULL, n0, c0, 1);
+            g.launch1("nn_add_f64", c0, &[g.a(&hs), c0.into(), self.gp(self.net.head[0] + j * c0)]);
+            let hb = self.chan_sums(2, drj, NULL, NULL, NULL, NULL, n0, 1, 1);
+            g.launch1("nn_add_f64", 1, &[g.a(&hb), 1usize.into(), self.gp(self.net.head[1] + j)]);
+        }
         let mut dh = g.zeros::<f32>(n0 * c0);
-        g.launch1("nn_head_back", n0 * c0, &[g.a(&dr), self.wp(self.net.head[0]), n0.into(), c0.into(), g.a(&dh)]);
+        g.launch1("nn_head_back", n0 * c0, &[g.a(&dr), self.wp(self.net.head[0]), n0.into(), c0.into(), m.into(), g.a(&dh)]);
         let levels = self.stencils.len();
         let mut dskip: Vec<Option<CudaSlice<f32>>> = (0..levels).map(|_| None).collect();
         for i in (0..self.net.dec.len()).rev() {

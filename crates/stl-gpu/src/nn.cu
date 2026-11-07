@@ -191,42 +191,50 @@ extern "C" __global__ void nn_cols(int mode, const float* src, float* dst, long 
     else dst[e] += src[i * cd + off + ch];
 }
 
-// r[i] = hb + sum_c hw[c] h[i, c].
-extern "C" __global__ void nn_head(const float* h, const float* hw, const float* hb, long long n, long long c, float* r) {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    if (i >= n) return;
+// r[j, i] = hb[j] + sum_c hw[j, c] h[i, c], j < m (map-major output).
+extern "C" __global__ void nn_head(const float* h, const float* hw, const float* hb, long long n, long long c, long long m,
+                                   float* r) {
+    long long e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (e >= n * m) return;
+    long long j = e / n, i = e % n;
     float s = 0.0f;
-    for (long long ch = 0; ch < c; ch++) s += h[i * c + ch] * hw[ch];
-    r[i] = hb[0] + s;
+    for (long long ch = 0; ch < c; ch++) s += h[i * c + ch] * hw[j * c + ch];
+    r[e] = hb[j] + s;
 }
 
-// dh[i, c] = dr[i] hw[c].
-extern "C" __global__ void nn_head_back(const float* dr, const float* hw, long long n, long long c, float* dh) {
+// dh[i, c] = sum_j dr[j, i] hw[j, c].
+extern "C" __global__ void nn_head_back(const float* dr, const float* hw, long long n, long long c, long long m, float* dh) {
     long long e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (e >= n * c) return;
-    dh[e] = dr[e / c] * hw[e % c];
+    long long i = e / c, ch = e % c;
+    float s = 0.0f;
+    for (long long j = 0; j < m; j++) s += dr[j * n + i] * hw[j * c + ch];
+    dh[e] = s;
 }
 
-// x[i, 0] = d[i] / scale, x[i, 1 + k] = cond[i, k].
-extern "C" __global__ void nn_input(const double* d, double scale, const float* cond, long long n, long long nc, float* x) {
+// x[i, j] = d[j, i] / scale_j (j < m, scales s0, s1), x[i, m + k] = cond[i, k].
+extern "C" __global__ void nn_input(const double* d, double s0, double s1, const float* cond, long long n, long long m,
+                                    long long nc, float* x) {
     long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (i >= n) return;
-    x[i * (1 + nc)] = (float)(d[i] / scale);
-    for (long long k = 0; k < nc; k++) x[i * (1 + nc) + 1 + k] = cond[i * nc + k];
+    long long w = m + nc;
+    for (long long j = 0; j < m; j++) x[i * w + j] = (float)(d[j * n + i] / (j == 0 ? s0 : s1));
+    for (long long k = 0; k < nc; k++) x[i * w + m + k] = cond[i * nc + k];
 }
 
-// u = d - scale r.
-extern "C" __global__ void nn_output(const double* d, const float* r, double scale, long long n, double* u) {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    u[i] = d[i] - scale * (double)r[i];
+// u[j, i] = d[j, i] - scale_j r[j, i], `m n` values.
+extern "C" __global__ void nn_output(const double* d, const float* r, double s0, double s1, long long n, long long m,
+                                     double* u) {
+    long long e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (e >= n * m) return;
+    u[e] = d[e] - (e < n ? s0 : s1) * (double)r[e];
 }
 
-// dr = -scale du.
-extern "C" __global__ void nn_output_back(const double* du, double scale, long long n, float* dr) {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    dr[i] = (float)(-scale * du[i]);
+// dr[j, i] = -scale_j du[j, i].
+extern "C" __global__ void nn_output_back(const double* du, double s0, double s1, long long n, long long m, float* dr) {
+    long long e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (e >= n * m) return;
+    dr[e] = (float)(-(e < n ? s0 : s1) * du[e]);
 }
 
 // dst[i] = a[i] + s b[i] (b null: dst = a); in place when dst == a.
