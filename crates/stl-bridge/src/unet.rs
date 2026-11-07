@@ -25,6 +25,16 @@
 //! Phi(T, u)`, the means over draws `(n, n1, n2)` of one simulation with a
 //! sign, set to zero on the coefficients without noise bias (`Stats::exact`;
 //! `bias_all` estimates every one).
+//!
+//! Joint pair (`maps` = 2, `stlp_train_set_joint`): one network maps an
+//! input pair (E, B; or Q, U) to an output pair `u`; a linear front end `F`
+//! (identity, or `conj-eth^2` from (Q, U) to `(chi_E, chi_B)`) gives the two
+//! fields of the terms, `F u`, whose observations and noise pools are set
+//! as two fields (already in the domain of `F`).  A joint step runs the
+//! network once, sums the terms of both fields (times a factor), and sends
+//! the cotangent `[2, npix]` back through `F^T` and the network once.  The
+//! frozen biases of both fields are estimated together from the same draws
+//! (the same simulations and signs for every term and both fields).
 
 use super::*;
 use std::collections::HashMap;
@@ -48,6 +58,8 @@ trait Backend {
     type Map;
     type Tape;
     fn npix(&self) -> usize;
+    /// Maps of the network's input and output (1 or 2).
+    fn maps(&self) -> usize;
     fn upload(&self, x: &[f64]) -> Self::Map;
     fn download(&self, m: &Self::Map) -> Vec<f64>;
     /// The maps `rows` one after the other.
@@ -55,8 +67,9 @@ trait Backend {
     /// `dst += s src[off..off + npix]`.
     fn add_scaled(&self, dst: &mut Self::Map, src: &Self::Map, off: usize, s: f64);
     fn zeros(&self, n: usize) -> Self::Map;
-    fn net_forward(&self, d: &Self::Map, scale: f64) -> (Self::Map, Self::Tape);
-    fn net_backward(&mut self, tape: &Self::Tape, scale: f64, du: &Self::Map);
+    /// `u = d - scale r(d / scale)` of one input `[maps, npix]`, one scale per map.
+    fn net_forward(&self, d: &Self::Map, scales: &[f64]) -> (Self::Map, Self::Tape);
+    fn net_backward(&mut self, tape: &Self::Tape, scales: &[f64], du: &Self::Map);
     /// Statistics of the batch `x` (`[batch, channels, npix]`), kept for [`stats_grad`](Self::stats_grad).
     fn stats(&mut self, kind: Kind, batch: usize, x: Self::Map, moments: bool) -> (Vec<C64>, Vec<f64>);
     /// Map cotangent of the last [`stats`](Self::stats) of this kind and batch.
@@ -75,6 +88,8 @@ trait Backend {
     fn stats_pixels(&self, kind: Kind) -> Vec<f64>;
     /// Coefficients without noise bias of a term ([`Stats::exact`]).
     fn exact(&self, term: &str) -> Vec<bool>;
+    /// Geometry of the statistics engines.
+    fn geometry(&self) -> &LocalGeometry;
 }
 
 /// Engine geometry shared by the backends (boxed: the engines borrow it).
@@ -157,6 +172,10 @@ impl Backend for CpuBack {
         self.net.pixels(0)
     }
 
+    fn maps(&self) -> usize {
+        self.net.cfg.maps
+    }
+
     fn upload(&self, x: &[f64]) -> Vec<f64> {
         x.to_vec()
     }
@@ -186,14 +205,17 @@ impl Backend for CpuBack {
         vec![0.0; n]
     }
 
-    fn net_forward(&self, d: &Vec<f64>, scale: f64) -> (Vec<f64>, Self::Tape) {
-        let x: Vec<f32> = d.iter().map(|&v| (v / scale) as f32).collect();
+    fn net_forward(&self, d: &Vec<f64>, scales: &[f64]) -> (Vec<f64>, Self::Tape) {
+        let n = self.npix();
+        assert_eq!(scales.len(), self.maps(), "one scale per map");
+        let x: Vec<f32> = d.iter().enumerate().map(|(i, &v)| (v / scales[i / n]) as f32).collect();
         let (r, t) = self.net.forward(&self.w, &x, &self.cond);
-        (d.iter().zip(&r).map(|(&a, &b)| a - scale * b as f64).collect(), t)
+        (d.iter().zip(&r).enumerate().map(|(i, (&a, &b))| a - scales[i / n] * b as f64).collect(), t)
     }
 
-    fn net_backward(&mut self, tape: &Self::Tape, scale: f64, du: &Vec<f64>) {
-        let dr: Vec<f32> = du.iter().map(|&v| (-scale * v) as f32).collect();
+    fn net_backward(&mut self, tape: &Self::Tape, scales: &[f64], du: &Vec<f64>) {
+        let n = self.npix();
+        let dr: Vec<f32> = du.iter().enumerate().map(|(i, &v)| (-scales[i / n] * v) as f32).collect();
         self.net.backward(&self.w, tape, &dr, &mut self.g);
     }
 
@@ -261,6 +283,10 @@ impl Backend for CpuBack {
     fn exact(&self, term: &str) -> Vec<bool> {
         self.stats.exact(term)
     }
+
+    fn geometry(&self) -> &LocalGeometry {
+        &self.stats.geo
+    }
 }
 
 // -- device backend --------------------------------------------------------------
@@ -304,6 +330,10 @@ impl Backend for GpuBack {
         self.net.net.pixels(0)
     }
 
+    fn maps(&self) -> usize {
+        self.net.net.cfg.maps
+    }
+
     fn upload(&self, x: &[f64]) -> Self::Map {
         self.gpu.upload(x)
     }
@@ -333,12 +363,12 @@ impl Backend for GpuBack {
         self.gpu.zeros(n)
     }
 
-    fn net_forward(&self, d: &Self::Map, scale: f64) -> (Self::Map, Self::Tape) {
-        self.net.forward(d, scale, &self.cond)
+    fn net_forward(&self, d: &Self::Map, scales: &[f64]) -> (Self::Map, Self::Tape) {
+        self.net.forward(d, scales, &self.cond)
     }
 
-    fn net_backward(&mut self, tape: &Self::Tape, scale: f64, du: &Self::Map) {
-        self.net.backward(tape, scale, du);
+    fn net_backward(&mut self, tape: &Self::Tape, scales: &[f64], du: &Self::Map) {
+        self.net.backward(tape, scales, du);
     }
 
     fn stats(&mut self, kind: Kind, batch: usize, x: Self::Map, moments: bool) -> (Vec<C64>, Vec<f64>) {
@@ -403,9 +433,16 @@ impl Backend for GpuBack {
     fn exact(&self, term: &str) -> Vec<bool> {
         self.stats.exact(term)
     }
+
+    fn geometry(&self) -> &LocalGeometry {
+        &self.stats.geo
+    }
 }
 
 // -- trainer ---------------------------------------------------------------------
+
+/// Field id of the joint pair (`stlp_train_set_joint`) in the `stlp_train_*` calls.
+const JOINT: u32 = u32::MAX;
 
 /// Loss weights of the terms.
 #[derive(Clone, Copy, Debug, Default)]
@@ -419,6 +456,10 @@ struct Weights {
 impl Weights {
     fn cross(&self) -> bool {
         self.l1 != 0.0 || self.l2 != 0.0 || self.l3 != 0.0
+    }
+
+    fn scaled(&self, s: f64) -> Self {
+        Weights { data: s * self.data, l1: s * self.l1, l2: s * self.l2, l3: s * self.l3 }
     }
 }
 
@@ -450,11 +491,26 @@ struct Field<M> {
     bias: Option<Bias>,
 }
 
+/// The joint network (`maps` = 2): its input `[2, npix]` and scales, the
+/// fields of the terms of its two outputs, and the linear front end from
+/// the output to those fields (`None`: the outputs are the fields; spin 2:
+/// `chi_E + i chi_B = conj-eth^2 (Q + iU)` at level 0, the scalar pyramid
+/// of `NativeEngine(spin=2)`).
+struct Joint<M> {
+    d: M,
+    scales: [f64; 2],
+    fields: [u32; 2],
+    front: Option<SpinPyramid>,
+    /// Factor on the terms of every field (0.5: their mean over the pair).
+    weight: f64,
+}
+
 struct Trainer<B: Backend> {
     back: B,
     weights: Weights,
     t857: Option<B::Map>,
     fields: HashMap<u32, Field<B::Map>>,
+    joint: Option<Joint<B::Map>>,
     /// Draws per statistics call of the bias estimates (`bias_batch` maps,
     /// or `3 bias_batch` pairs).
     bias_batch: usize,
@@ -498,6 +554,11 @@ fn add(a: &[C64], b: &[C64]) -> Vec<C64> {
     a.iter().zip(b).map(|(x, y)| x + y).collect()
 }
 
+/// `total = sum_t w_t terms[t]` of terms `[total, data, l1, l2, l3]`.
+fn total(w: &Weights, terms: &mut [f64; 5]) {
+    terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4];
+}
+
 impl<B: Backend> Trainer<B> {
     fn npix(&self) -> usize {
         self.back.npix()
@@ -507,18 +568,72 @@ impl<B: Backend> Trainer<B> {
         self.fields.get(&f).unwrap_or_else(|| panic!("field {f} not set"))
     }
 
+    fn joint(&self) -> &Joint<B::Map> {
+        self.joint.as_ref().expect("no joint pair (stlp_train_set_joint)")
+    }
+
+    /// The fields of the terms of `f` (`f` itself, or the joint pair) and
+    /// the factor on their terms.
+    fn parts(&self, f: u32) -> (Vec<u32>, f64) {
+        if f == JOINT {
+            let j = self.joint();
+            (j.fields.to_vec(), j.weight)
+        } else {
+            (vec![f], 1.0)
+        }
+    }
+
+    /// Simulations in the noise pools of every field of `f`.
+    fn sims(&self, f: u32) -> usize {
+        self.parts(f).0.iter().map(|&g| self.field(g).sims).min().unwrap()
+    }
+
+    /// The network output `u` of `f` (`[npix]`, or `[2, npix]` for the
+    /// joint pair), its tape and the scales.
+    fn output(&self, f: u32) -> (B::Map, B::Tape, Vec<f64>) {
+        let (d, scales) = if f == JOINT {
+            let j = self.joint();
+            (&j.d, j.scales.to_vec())
+        } else {
+            assert_eq!(self.back.maps(), 1, "a network of 2 maps trains on the joint pair");
+            let fd = self.field(f);
+            (&fd.d, vec![fd.scale])
+        };
+        let (u, tape) = self.back.net_forward(d, &scales);
+        (u, tape, scales)
+    }
+
+    /// The front end of `f` applied to the output `u` (`None`: identity).
+    fn front(&self, f: u32, u: &B::Map) -> Option<B::Map> {
+        let s = (f == JOINT).then(|| self.joint().front.as_ref()).flatten()?;
+        Some(self.back.upload(&s.eth[0].apply(&self.back.download(u), s.threads)))
+    }
+
+    /// Transpose of [`front`](Self::front).
+    fn front_adjoint(&self, f: u32, g: B::Map) -> B::Map {
+        match (f == JOINT).then(|| self.joint().front.as_ref()).flatten() {
+            Some(s) => self.back.upload(&s.eth[0].adjoint(&self.back.download(&g), s.threads)),
+            None => g,
+        }
+    }
+
+    /// The map cotangents of the fields, one after the other.
+    fn stack(&self, mut parts: Vec<B::Map>) -> B::Map {
+        if parts.len() == 1 {
+            return parts.pop().unwrap();
+        }
+        let rows: Vec<Row<B::Map>> = parts.iter().map(|m| (m, 0, None)).collect();
+        self.back.combine(&rows)
+    }
+
     /// The targets of field `f` that do not depend on `u` (computed once).
     fn targets(&mut self, f: u32) {
         if self.field(f).targets.is_some() {
             return;
         }
         let w = self.weights;
-        let n = self.npix();
         let fd = self.field(f);
-        let data = (w.data != 0.0).then(|| {
-            let x = self.back.combine(&[(&fd.d, 0, None)]);
-            x
-        });
+        let data = (w.data != 0.0).then(|| self.back.combine(&[(&fd.d, 0, None)]));
         let data = data.map(|x| self.back.stats(Kind::Auto, 1, x, true));
         let fd = self.field(f);
         let cross = w.cross().then(|| {
@@ -534,32 +649,39 @@ impl<B: Backend> Trainer<B> {
             }
             None => (None, None),
         };
-        let _ = n;
         self.fields.get_mut(&f).unwrap().targets = Some(Targets { data, l1, l3 });
     }
 
-    /// Frozen biases of field `f` at the current `u`, from the draws
-    /// `(sim, sign)`.
+    /// Frozen biases of `f` (a field, or both fields of the joint pair) at
+    /// the current network output, from the draws `(sim, sign)`: the same
+    /// draws for every term and every field.
     fn estimate_bias(&mut self, f: u32, draws: &[(usize, f64)]) {
+        assert!(!draws.is_empty(), "no draws");
+        let sims = self.sims(f);
+        for (s, _) in draws {
+            assert!(*s < sims, "simulation {s} of {sims}");
+        }
+        let (u, _, _) = self.output(f);
+        let y = self.front(f, &u);
+        let n = self.npix();
+        for (k, g) in self.parts(f).0.into_iter().enumerate() {
+            self.field_bias(g, y.as_ref().unwrap_or(&u), k * n, draws);
+        }
+    }
+
+    /// Frozen biases of field `f` at the output `u[uo..uo + npix]`.
+    fn field_bias(&mut self, f: u32, u: &B::Map, uo: usize, draws: &[(usize, f64)]) {
         let n = self.npix();
         let w = self.weights;
         let m = draws.len() as f64;
-        assert!(!draws.is_empty(), "no draws");
-        let (u, _) = {
-            let fd = self.field(f);
-            self.back.net_forward(&fd.d, fd.scale)
-        };
         let fd = self.fields.get(&f).unwrap();
-        for (s, _) in draws {
-            assert!(*s < fd.sims, "simulation {s} of {}", fd.sims);
-        }
         let mut bias = Bias::default();
         let bb = self.bias_batch.max(1);
         if w.data != 0.0 {
             let noise = fd.noise[0].as_ref().expect("noise pool");
             let mut acc: Vec<C64> = Vec::new();
             for chunk in draws.chunks(bb) {
-                let rows: Vec<Row<B::Map>> = chunk.iter().map(|&(s, sg)| (&u, 0, Some((noise, s * n, sg)))).collect();
+                let rows: Vec<Row<B::Map>> = chunk.iter().map(|&(s, sg)| (u, uo, Some((noise, s * n, sg)))).collect();
                 let x = self.back.combine(&rows);
                 let (v, _) = self.back.stats(Kind::Auto, chunk.len(), x, false);
                 let per = v.len() / chunk.len();
@@ -570,7 +692,7 @@ impl<B: Backend> Trainer<B> {
                     acc.iter_mut().zip(row).for_each(|(a, b)| *a += b);
                 }
             }
-            let x = self.back.combine(&[(&u, 0, None)]);
+            let x = self.back.combine(&[(u, uo, None)]);
             let (phi, _) = self.back.stats(Kind::Auto, 1, x, false);
             bias.data = acc.iter().zip(&phi).map(|(a, p)| a / m - p).collect();
         }
@@ -578,7 +700,7 @@ impl<B: Backend> Trainer<B> {
             let fd = self.fields.get(&f).unwrap();
             let t = self.t857.as_ref().expect("857 map");
             let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
-            let x = self.back.combine(&[(&u, 0, None), (&u, 0, None), (t, 0, None), (&u, 0, None)]);
+            let x = self.back.combine(&[(u, uo, None), (u, uo, None), (t, 0, None), (u, uo, None)]);
             let (phi, _) = self.back.stats(Kind::Cross, 2, x, false);
             let h = phi.len() / 2;
             let (uu, tu) = (&phi[..h], &phi[h..]);
@@ -586,16 +708,16 @@ impl<B: Backend> Trainer<B> {
             for chunk in draws.chunks(bb) {
                 let mut rows: Vec<Row<B::Map>> = Vec::new();
                 for &(s, sg) in chunk {
-                    rows.push((&u, 0, Some((n1, s * n, sg))));
-                    rows.push((&u, 0, Some((n2, s * n, sg))));
+                    rows.push((u, uo, Some((n1, s * n, sg))));
+                    rows.push((u, uo, Some((n2, s * n, sg))));
                 }
                 for &(s, sg) in chunk {
-                    rows.push((&u, 0, Some((n0, s * n, sg))));
-                    rows.push((&u, 0, None));
+                    rows.push((u, uo, Some((n0, s * n, sg))));
+                    rows.push((u, uo, None));
                 }
                 for &(s, sg) in chunk {
                     rows.push((t, 0, None));
-                    rows.push((&u, 0, Some((n0, s * n, sg))));
+                    rows.push((u, uo, Some((n0, s * n, sg))));
                 }
                 let k = chunk.len();
                 let x = self.back.combine(&rows);
@@ -623,20 +745,46 @@ impl<B: Backend> Trainer<B> {
         self.fields.get_mut(&f).unwrap().bias = Some(bias);
     }
 
-    /// The live-bias loss of field `f` (`train_denoise.py --bias live`):
-    /// the models are means over `B` draws with the gradient through every
-    /// one, `<Phi(u + n_i)>` (draws `data`), `<Phi(u + n1_i, u + n2_i)>`,
-    /// `<Phi(u + n_i, u)>`, `<Phi(T, u + n_i)>` (draws `hm`, full and half
-    /// missions of one simulation); targets and weights as the frozen loss.
-    fn loss_live(&mut self, f: u32, data: &[(usize, f64)], hm: &[(usize, f64)], backward: bool) -> [f64; 5] {
-        self.targets(f);
-        let w = self.weights;
+    /// The loss of `f` (a field, or the sum over the fields of the joint
+    /// pair): terms `[total, data, l1, l2, l3]`; `live = Some((data draws,
+    /// hm draws))` for the live-bias loss (else the frozen biases); with
+    /// `backward`, the parameter cotangents of the total are added.
+    fn loss_of(&mut self, f: u32, live: Option<(&[(usize, f64)], &[(usize, f64)])>, backward: bool) -> [f64; 5] {
+        let (u, tape, scales) = self.output(f);
+        let y = self.front(f, &u);
         let n = self.npix();
-        let (u, tape) = {
-            let fd = self.field(f);
-            self.back.net_forward(&fd.d, fd.scale)
-        };
-        let scale = self.field(f).scale;
+        let (fields, wt) = self.parts(f);
+        let mut terms = [0.0; 5];
+        let mut du = Vec::new();
+        for (k, g) in fields.into_iter().enumerate() {
+            let x = y.as_ref().unwrap_or(&u);
+            let (t, d) = match live {
+                Some((data, hm)) => self.field_live(g, x, k * n, data, hm, wt, backward),
+                None => self.field_loss(g, x, k * n, wt, backward),
+            };
+            terms.iter_mut().zip(&t).for_each(|(a, b)| *a += b);
+            du.extend(d);
+        }
+        if backward {
+            let du = self.stack(du);
+            let du = self.front_adjoint(f, du);
+            self.back.net_backward(&tape, &scales, &du);
+        }
+        terms
+    }
+
+    /// The live-bias terms of field `f` at the output `u[uo..uo + npix]`
+    /// (`train_denoise.py --bias live`), times `wt`, and with `backward`
+    /// the map cotangent of their total: the models are means over the draws
+    /// with the gradient through every one, `<Phi(u + n_i)>` (draws `data`),
+    /// `<Phi(u + n1_i, u + n2_i)>`, `<Phi(u + n_i, u)>`, `<Phi(T, u + n_i)>`
+    /// (draws `hm`, full and half missions of one simulation); targets and
+    /// weights as the frozen loss.
+    #[allow(clippy::too_many_arguments)]
+    fn field_live(&mut self, f: u32, u: &B::Map, uo: usize, data: &[(usize, f64)], hm: &[(usize, f64)], wt: f64, backward: bool) -> ([f64; 5], Option<B::Map>) {
+        self.targets(f);
+        let w = self.weights.scaled(wt);
+        let n = self.npix();
         let mut du = self.back.zeros(n);
         let mut terms = [0.0; 5];
         let targets = self.field(f).targets.as_ref().unwrap();
@@ -653,7 +801,7 @@ impl<B: Backend> Trainer<B> {
             assert!(!data.is_empty(), "live data term: no draws");
             let fd = self.fields.get(&f).unwrap();
             let noise = fd.noise[0].as_ref().expect("noise pool");
-            let rows: Vec<Row<B::Map>> = data.iter().map(|&(s, sg)| (&u, 0, Some((noise, s * n, sg)))).collect();
+            let rows: Vec<Row<B::Map>> = data.iter().map(|&(s, sg)| (u, uo, Some((noise, s * n, sg)))).collect();
             let x = self.back.combine(&rows);
             let k = data.len();
             let (v, _) = self.back.stats(Kind::Auto, k, x, false);
@@ -677,18 +825,18 @@ impl<B: Backend> Trainer<B> {
             let fd = self.fields.get(&f).unwrap();
             let t857 = self.t857.as_ref().expect("857 map");
             let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
-            let mut rows: Vec<Row<B::Map>> = vec![(&fd.d, 0, None), (&u, 0, None)];
+            let mut rows: Vec<Row<B::Map>> = vec![(&fd.d, 0, None), (u, uo, None)];
             for &(s, sg) in hm {
-                rows.push((&u, 0, Some((n1, s * n, sg))));
-                rows.push((&u, 0, Some((n2, s * n, sg))));
+                rows.push((u, uo, Some((n1, s * n, sg))));
+                rows.push((u, uo, Some((n2, s * n, sg))));
             }
             for &(s, sg) in hm {
-                rows.push((&u, 0, Some((n0, s * n, sg))));
-                rows.push((&u, 0, None));
+                rows.push((u, uo, Some((n0, s * n, sg))));
+                rows.push((u, uo, None));
             }
             for &(s, sg) in hm {
                 rows.push((t857, 0, None));
-                rows.push((&u, 0, Some((n0, s * n, sg))));
+                rows.push((u, uo, Some((n0, s * n, sg))));
             }
             let x = self.back.combine(&rows);
             let batch = 1 + 3 * k;
@@ -725,24 +873,17 @@ impl<B: Backend> Trainer<B> {
                 }
             }
         }
-        terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4];
-        if backward {
-            self.back.net_backward(&tape, scale, &du);
-        }
-        terms
+        terms[1..].iter_mut().for_each(|t| *t *= wt);
+        total(&self.weights, &mut terms);
+        (terms, backward.then_some(du))
     }
 
-    /// The frozen-bias loss of field `f`: terms `[total, data, l1, l2, l3]`;
-    /// with `backward`, the parameter cotangents of the total are added.
-    fn loss(&mut self, f: u32, backward: bool) -> [f64; 5] {
+    /// The frozen-bias terms of field `f` at the output `u[uo..uo + npix]`,
+    /// times `wt`, and with `backward` the map cotangent of their total.
+    fn field_loss(&mut self, f: u32, u: &B::Map, uo: usize, wt: f64, backward: bool) -> ([f64; 5], Option<B::Map>) {
         self.targets(f);
-        let w = self.weights;
+        let w = self.weights.scaled(wt);
         let n = self.npix();
-        let (u, tape) = {
-            let fd = self.field(f);
-            self.back.net_forward(&fd.d, fd.scale)
-        };
-        let scale = self.field(f).scale;
         let mut du = self.back.zeros(n);
         let mut terms = [0.0; 5];
         let fd = self.fields.get(&f).unwrap();
@@ -752,7 +893,7 @@ impl<B: Backend> Trainer<B> {
         let (l1_t, l3_t) = (targets.l1.clone(), targets.l3.clone());
         if w.data != 0.0 {
             let (t, tv) = data_t.unwrap();
-            let x = self.back.combine(&[(&u, 0, None)]);
+            let x = self.back.combine(&[(u, uo, None)]);
             let (v, _) = self.back.stats(Kind::Auto, 1, x, false);
             let wc = chi2_weights(&tv, &self.back.stats_pixels(Kind::Auto));
             let (l, cot) = chi2(&add(&v, &bias.data), &t, &wc);
@@ -766,7 +907,7 @@ impl<B: Backend> Trainer<B> {
         if w.cross() {
             let fd = self.fields.get(&f).unwrap();
             let t857 = self.t857.as_ref().unwrap();
-            let x = self.back.combine(&[(&fd.d, 0, None), (&u, 0, None), (&u, 0, None), (&u, 0, None), (t857, 0, None), (&u, 0, None)]);
+            let x = self.back.combine(&[(&fd.d, 0, None), (u, uo, None), (u, uo, None), (u, uo, None), (t857, 0, None), (u, uo, None)]);
             let (v, var) = self.back.stats(Kind::Cross, 3, x, true);
             let h = v.len() / 3;
             let pix = self.back.stats_pixels(Kind::Cross);
@@ -791,11 +932,19 @@ impl<B: Backend> Trainer<B> {
                 }
             }
         }
-        terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4];
-        if backward {
-            self.back.net_backward(&tape, scale, &du);
-        }
-        terms
+        terms[1..].iter_mut().for_each(|t| *t *= wt);
+        total(&self.weights, &mut terms);
+        (terms, backward.then_some(du))
+    }
+
+    /// The frozen-bias loss of `f` (see [`loss_of`](Self::loss_of)).
+    fn loss(&mut self, f: u32, backward: bool) -> [f64; 5] {
+        self.loss_of(f, None, backward)
+    }
+
+    /// The live-bias loss of `f` (see [`loss_of`](Self::loss_of)).
+    fn loss_live(&mut self, f: u32, data: &[(usize, f64)], hm: &[(usize, f64)], backward: bool) -> [f64; 5] {
+        self.loss_of(f, Some((data, hm)), backward)
     }
 }
 
@@ -831,11 +980,37 @@ pub struct UNetHandle {
     config: Value,
     /// Levels of the statistics engines (for the masks).
     levels: usize,
+    /// Maps of the network.
+    maps: usize,
+    /// Indicators `[K][npix]` of the statistics masks (empty: the whole sky).
+    mask_weights: Vec<Vec<f64>>,
+}
+
+/// The masks of the statistics from the stored indicators; with the
+/// spin-2 front end, eroded as `NativeEngine(spin=2)`'s (`stlp_set_masks`):
+/// the pixels whose `chi` and decimations only read pixels of the mask.
+/// Drops the targets and biases.
+fn install_masks(h: &mut UNetHandle) {
+    let nside = h.config["nside"].as_u64().unwrap() as i64;
+    let levels = h.levels;
+    let w = h.mask_weights.clone();
+    with!(h, t => {
+        let masks = (!w.is_empty()).then(|| match t.joint.as_ref().and_then(|j| j.front.as_ref()) {
+            Some(s) => Masks::from_levels(w.iter().map(|m| keep_nonempty(scalar_pyramid_valid(t.back.geometry(), levels, s.valid_rows(m).swap_remove(0)))).collect()),
+            None => Masks::from_weights(nside, levels, w),
+        });
+        t.back.set_masks(masks);
+        t.fields.values_mut().for_each(|f| {
+            f.targets = None;
+            f.bias = None;
+        });
+    });
 }
 
 /// New U-Net handle from a JSON configuration: network `nside`, `channels`
 /// (list, one per level), `ksz` (3), `gauge` (`phi`), `slope` (0.2), `cond`
-/// (0), `scale` (null: the standard deviation of the input), `seed` (0, of
+/// (0), `maps` (1, or 2: a pair of maps in and out, `UNet(maps=2)`), `scale`
+/// (null: the standard deviation of the input), `seed` (0, of
 /// torch's initialisation scheme); `backend` (`cpu` | `gpu`), `device` (0);
 /// training: `j` (scales, `log2(nside) - 1`), `loss` (`{"data", "l1", "l2",
 /// "l3"}` weights, 0 by default), `bias_batch` (5, draws per statistics
@@ -860,12 +1035,13 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
             gauge,
             slope: real(&v, "slope", 0.2) as f32,
             cond: integer(&v, "cond", 0),
+            maps: integer(&v, "maps", 1),
             scale: v["scale"].as_f64(),
         };
         let net = UNet::new(cfg);
         let w = net.init(integer(&v, "seed", 0) as u64);
         let specs = net.params.clone();
-        let (size, npix, cond) = (net.size, net.pixels(0), net.cfg.cond);
+        let (size, npix, cond, maps) = (net.size, net.pixels(0), net.cfg.cond, net.cfg.maps);
         let j = integer(&v, "j", (nside.ilog2() as usize).saturating_sub(1).max(1));
         assert!(j > 0 && j <= nside.ilog2() as usize + 1, "invalid number of scales");
         let stats = Stats::new(nside, j, integer(&v, "block_pixels", 4096));
@@ -881,6 +1057,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 weights,
                 t857: None,
                 fields: HashMap::new(),
+                joint: None,
                 bias_batch,
                 bias_all,
             }),
@@ -901,14 +1078,14 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), bias_batch, bias_all })
+                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
             other => panic!("backend must be cpu or gpu, not {other:?}"),
         };
         let backend = if backend == "gpu" { "gpu" } else { "cpu" };
-        Box::into_raw(Box::new(UNetHandle { inner, specs, size, npix, cond, backend, config: v, levels }))
+        Box::into_raw(Box::new(UNetHandle { inner, specs, size, npix, cond, backend, config: v, levels, maps, mask_weights: Vec::new() }))
     })
 }
 
@@ -934,7 +1111,7 @@ pub unsafe extern "C" fn stlp_unet_info(p: *mut UNetHandle) -> *mut c_char {
             (f, [t.back.stats_pixels(Kind::Auto).len(), t.back.stats_pixels(Kind::Cross).len()])
         });
         let info = json!({"version": VERSION, "upstream_revision": env!("STL_BRIDGE_REVISION"), "config": h.config,
-            "backend": h.backend, "size": h.size, "npix": h.npix, "cond": h.cond, "params": params, "fields": fields,
+            "backend": h.backend, "size": h.size, "npix": h.npix, "cond": h.cond, "maps": h.maps, "params": params, "fields": fields,
             "coefficients": {"auto": ncoeff[0], "cross": ncoeff[1]}, "dtype": "float32 network, float64 maps and statistics"});
         CString::new(info.to_string()).unwrap().into_raw()
     })
@@ -1012,29 +1189,43 @@ pub unsafe extern "C" fn stlp_unet_set_cond(p: *mut UNetHandle, cond: *const f32
     })
 }
 
-/// `u = d - scale r(d / scale)` of the batch `d` (`b` NESTED maps) to `out`;
-/// `scale <= 0`: the standard deviation of the batch (unbiased; the
-/// configured scale if any).  With `cot` (non-null, `b` maps), the
-/// parameter cotangents of `sum(cot u)` are added.  0, or -1 on failure.
+/// Standard deviation (unbiased) of map `j` of every input of `d` `[b,
+/// maps, n]`.
+fn map_std(d: &[f64], maps: usize, n: usize, j: usize) -> f64 {
+    let x: Vec<f64> = d.chunks(maps * n).flat_map(|r| r[j * n..(j + 1) * n].iter().cloned()).collect();
+    std_unbiased(&x)
+}
+
+/// `u = d - scale r(d / scale)` of the batch `d` (`b` inputs of `maps`
+/// NESTED maps) to `out`; `scales` (`maps` values, or null: the configured
+/// scale if any, else the standard deviation, unbiased, of each map over
+/// the batch).  With `cot` (non-null, shaped as `d`), the parameter
+/// cotangents of `sum(cot u)` are added.  0, or -1 on failure.
 #[no_mangle]
-pub unsafe extern "C" fn stlp_unet_apply(p: *mut UNetHandle, d: *const f64, b: usize, scale: f64, cot: *const f64, out: *mut f64) -> i32 {
+pub unsafe extern "C" fn stlp_unet_apply(p: *mut UNetHandle, d: *const f64, b: usize, scales: *const f64, cot: *const f64, out: *mut f64) -> i32 {
     guard(-1, || {
         let h = &mut *p;
-        let n = h.npix;
-        let d = std::slice::from_raw_parts(d, b * n);
+        let (n, m) = (h.npix, h.maps);
+        let len = m * n;
+        let d = std::slice::from_raw_parts(d, b * len);
         let fixed = h.config["scale"].as_f64();
-        let scale = if scale > 0.0 { scale } else { fixed.unwrap_or_else(|| std_unbiased(d)) };
-        let cot = (!cot.is_null()).then(|| std::slice::from_raw_parts(cot, b * n));
-        let o = std::slice::from_raw_parts_mut(out, b * n);
+        let scales: Vec<f64> = if scales.is_null() {
+            (0..m).map(|j| fixed.unwrap_or_else(|| map_std(d, m, n, j))).collect()
+        } else {
+            std::slice::from_raw_parts(scales, m).to_vec()
+        };
+        assert!(scales.iter().all(|s| *s > 0.0 && s.is_finite()), "scales must be positive");
+        let cot = (!cot.is_null()).then(|| std::slice::from_raw_parts(cot, b * len));
+        let o = std::slice::from_raw_parts_mut(out, b * len);
         with!(h, t => {
             for i in 0..b {
-                let di = t.back.upload(&d[i * n..(i + 1) * n]);
-                let (u, tape) = t.back.net_forward(&di, scale);
+                let di = t.back.upload(&d[i * len..(i + 1) * len]);
+                let (u, tape) = t.back.net_forward(&di, &scales);
                 if let Some(c) = cot {
-                    let ci = t.back.upload(&c[i * n..(i + 1) * n]);
-                    t.back.net_backward(&tape, scale, &ci);
+                    let ci = t.back.upload(&c[i * len..(i + 1) * len]);
+                    t.back.net_backward(&tape, &scales, &ci);
                 }
-                o[i * n..(i + 1) * n].copy_from_slice(&t.back.download(&u));
+                o[i * len..(i + 1) * len].copy_from_slice(&t.back.download(&u));
             }
         });
         0
@@ -1042,26 +1233,16 @@ pub unsafe extern "C" fn stlp_unet_apply(p: *mut UNetHandle, d: *const f64, b: u
 }
 
 /// Statistics averaged over the `k` masks `weights` (`[k, 12 nside^2]`
-/// indicators, as `stlp_set_masks`), or the whole sky (`k = 0`); drops the
-/// targets and biases.  0, or -1 on failure.
+/// indicators, as `stlp_set_masks`; eroded with the spin-2 front end of
+/// the joint pair), or the whole sky (`k = 0`); drops the targets and
+/// biases.  0, or -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_train_set_masks(p: *mut UNetHandle, weights: *const f64, k: usize) -> i32 {
     guard(-1, || {
         let h = &mut *p;
         let n = h.npix;
-        let nside = h.config["nside"].as_u64().unwrap() as i64;
-        let levels = h.levels;
-        with!(h, t => {
-            let masks = (k > 0).then(|| {
-                let w = std::slice::from_raw_parts(weights, k * n);
-                Masks::from_weights(nside, levels, w.chunks(n).map(<[f64]>::to_vec).collect())
-            });
-            t.back.set_masks(masks);
-            t.fields.values_mut().for_each(|f| {
-                f.targets = None;
-                f.bias = None;
-            });
-        });
+        h.mask_weights = if k > 0 { std::slice::from_raw_parts(weights, k * n).chunks(n).map(<[f64]>::to_vec).collect() } else { Vec::new() };
+        install_masks(h);
         0
     })
 }
@@ -1129,8 +1310,70 @@ pub unsafe extern "C" fn stlp_train_set_field(
     })
 }
 
-/// Frozen biases of `field` at the current network output, from the `m`
-/// draws `(sims[i], signs[i])` of its noise pools.  0, or -1 on failure.
+/// The joint pair of a network of 2 maps (see the module documentation):
+/// the network input `d` `[2, 12 nside^2]`, its `scales` (2 values, or
+/// null: the configured scale if any, else the standard deviation of each
+/// map), the fields `f0`, `f1` of the terms of the two outputs (set by
+/// `stlp_train_set_field` in the domain of the front end, with the
+/// simulations of the noise pools in the same rows), the front end `front`
+/// (`"none"` or null: identity; `"eth"`: `conj-eth^2` of `(Q, U)` at level
+/// 0 with a `spin_kernel` stencil (5), the masks then eroded as
+/// `NativeEngine(spin=2)`'s) and the factor `weight` on the terms of each
+/// field.  The `stlp_train_*` calls on field `0xFFFFFFFF` then train the
+/// pair.  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_train_set_joint(p: *mut UNetHandle, d: *const f64, scales: *const f64, f0: u32, f1: u32, front: *const c_char, weight: f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        assert_eq!(h.maps, 2, "the joint pair needs a network of 2 maps");
+        assert!(f0 != f1 && f0 != JOINT && f1 != JOINT, "two distinct fields");
+        assert!(weight > 0.0 && weight.is_finite(), "positive weight");
+        let n = h.npix;
+        let dv = std::slice::from_raw_parts(d, 2 * n);
+        assert!(dv.iter().all(|v| v.is_finite()), "non-finite input");
+        let fixed = h.config["scale"].as_f64();
+        let sc: Vec<f64> = if scales.is_null() { (0..2).map(|j| fixed.unwrap_or_else(|| map_std(dv, 2, n, j))).collect() } else { std::slice::from_raw_parts(scales, 2).to_vec() };
+        assert!(sc.iter().all(|s| *s > 0.0 && s.is_finite()), "scales must be positive");
+        let kind = if front.is_null() { "none".to_string() } else { CStr::from_ptr(front).to_str().expect("front: UTF-8").to_string() };
+        let nside = h.config["nside"].as_u64().unwrap() as i64;
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let spin = match kind.as_str() {
+            "none" => None,
+            "eth" => Some(SpinPyramid::new(nside, 1, integer(&h.config, "spin_kernel", 5), threads)),
+            other => panic!("front must be none or eth, not {other:?}"),
+        };
+        with!(h, t => {
+            t.joint = Some(Joint { d: t.back.upload(dv), scales: [sc[0], sc[1]], fields: [f0, f1], front: spin, weight });
+        });
+        install_masks(h);
+        0
+    })
+}
+
+/// The front end of the joint pair (or its transpose with `adjoint`) on
+/// `b` pairs `x` `[b, 2, 12 nside^2]` to `out` (same shape): to bring
+/// observations and noise pools to the domain of the fields.  0, or -1 on
+/// failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_train_front(p: *mut UNetHandle, x: *const f64, b: usize, adjoint: bool, out: *mut f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        let len = b * 2 * h.npix;
+        let x = std::slice::from_raw_parts(x, len);
+        let o = std::slice::from_raw_parts_mut(out, len);
+        with!(h, t => {
+            match t.joint.as_ref().and_then(|j| j.front.as_ref()) {
+                Some(s) => o.copy_from_slice(&if adjoint { s.eth[0].adjoint(x, s.threads) } else { s.eth[0].apply(x, s.threads) }),
+                None => o.copy_from_slice(x),
+            }
+        });
+        0
+    })
+}
+
+/// Frozen biases of `field` (`0xFFFFFFFF`: both fields of the joint pair,
+/// from the same draws) at the current network output, from the `m` draws
+/// `(sims[i], signs[i])` of its noise pools.  0, or -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_train_bias(p: *mut UNetHandle, field: u32, sims: *const u64, signs: *const f64, m: usize) -> i32 {
     guard(-1, || {
@@ -1143,7 +1386,8 @@ pub unsafe extern "C" fn stlp_train_bias(p: *mut UNetHandle, field: u32, sims: *
     })
 }
 
-/// Loss terms `[total, data, l1, l2, l3]` of `field` to `out`; with
+/// Loss terms `[total, data, l1, l2, l3]` of `field` (`0xFFFFFFFF`: the
+/// joint pair, the terms summed over its fields) to `out`; with
 /// `backward`, the parameter cotangents of the total are added.  0, or -1
 /// on failure.
 #[no_mangle]
@@ -1186,8 +1430,9 @@ pub unsafe extern "C" fn stlp_train_live(
         };
         let (dd, hd) = (draws(dsims, dsigns, kd), draws(hsims, hsigns, kh));
         let terms = with!(h, t => {
+            let sims = t.sims(field);
             for &(s, _) in dd.iter().chain(&hd) {
-                assert!(s < t.field(field).sims, "simulation {s} out of the pool");
+                assert!(s < sims, "simulation {s} out of the pool");
             }
             if lr > 0.0 {
                 t.back.zero_grad();

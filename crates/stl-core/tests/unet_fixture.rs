@@ -33,6 +33,7 @@ pub fn load(d: &PathBuf) -> (UNet, Vec<f32>, serde_json::Value) {
         gauge: Gauge::parse(cfg["gauge"].as_str().unwrap()).unwrap(),
         slope: 0.2,
         cond: cfg["cond"].as_u64().unwrap() as usize,
+        maps: cfg["maps"].as_u64().unwrap_or(1) as usize,
         scale: cfg["scale"].as_f64(),
     });
     let names: Vec<&str> = cfg["params"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();

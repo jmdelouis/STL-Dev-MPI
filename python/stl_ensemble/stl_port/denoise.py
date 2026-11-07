@@ -10,9 +10,14 @@ for every galactic mask `m` (`|b|` above a cut, apodised): pseudo-spectra of
 the masked maps divided by mean(m^2), binned in multipole, compared with
 the Gaussian variance of the target bins, `(C11 C22 + C12^2) / modes`, as a
 reduced chi^2 (mean over masks and bins). The half-mission noises are
-independent: no noise draw and no bias.
+independent: no noise draw and no bias. With `spin=2` the maps are (Q, U)
+pairs and the spectra EE and BB (`stlia.spectra.BinnedSpectra(spin=2)`).
 
-healpy is needed for the masks (pixel latitudes, apodisation).
+`eb_maps` and `qu_maps`: the E and B maps of (Q, U) and back (healpy,
+`lmax = 3 nside - 1`), for the joint network on E and B.
+
+healpy is needed for the masks (pixel latitudes, apodisation) and the
+E/B transforms.
 """
 import math
 
@@ -49,15 +54,51 @@ def bin_edges(lmin, lmax, width):
     return np.array(edges)
 
 
+def eb_maps(qu, iter=3):
+    """E and B maps `[..., 2, npix]` (NESTED) of NESTED (Q, U) pairs `[...,
+    2, npix]`: healpy `map2alm(pol=True, iter)` then `alm2map` of a_E and
+    a_B, `lmax = 3 nside - 1`."""
+    import healpy as hp
+    qu = np.asarray(qu, dtype=np.float64)
+    flat = qu.reshape(-1, 2, qu.shape[-1])
+    out = np.empty_like(flat)
+    nside = hp.npix2nside(qu.shape[-1])
+    for i, (q, u) in enumerate(flat):
+        q, u = hp.reorder(q, n2r=True), hp.reorder(u, n2r=True)
+        _, ae, ab = hp.map2alm([np.zeros_like(q), q, u], pol=True, iter=iter)
+        out[i] = [hp.reorder(hp.alm2map(x, nside), r2n=True) for x in (ae, ab)]
+    return out.reshape(qu.shape)
+
+
+def qu_maps(eb, iter=3):
+    """(Q, U) `[..., 2, npix]` (NESTED) of NESTED E and B maps: scalar
+    `map2alm(iter)` of each, then `alm2map` of (0, a_E, a_B) with
+    `pol=True` (the inverse of :func:`eb_maps` within the band limit)."""
+    import healpy as hp
+    eb = np.asarray(eb, dtype=np.float64)
+    flat = eb.reshape(-1, 2, eb.shape[-1])
+    out = np.empty_like(flat)
+    nside = hp.npix2nside(eb.shape[-1])
+    for i, (e, b) in enumerate(flat):
+        ae, ab = (hp.map2alm(hp.reorder(x, n2r=True), iter=iter) for x in (e, b))
+        _, q, u = hp.alm2map([np.zeros_like(ae), ae, ab], nside, pol=True)
+        out[i] = [hp.reorder(q, r2n=True), hp.reorder(u, r2n=True)]
+    return out.reshape(eb.shape)
+
+
 class BinnedSpectra:
     """Binned pseudo-spectra `[K, nb]` of NESTED maps under K apodised galactic
-    masks, by `SpectrumEngine` (one map, or a pair with `cross`)."""
+    masks, by `SpectrumEngine` (one map, or a pair with `cross`); `spin=2`:
+    `[K, 2, nb]` (EE, BB) of (Q, U) pairs `[2, npix]` (host transforms)."""
 
-    def __init__(self, nside, masks=(0.0, 30.0), lmin=10, lmax=None, width=30, apod=5.0, backend="cpu", device=0):
-        self.nside, self.lmax = nside, lmax or 2 * nside - 1
+    def __init__(self, nside, masks=(0.0, 30.0), lmin=10, lmax=None, width=30, apod=5.0, backend="cpu", device=0,
+                 spin=0):
+        self.nside, self.lmax, self.spin = nside, lmax or 2 * nside - 1, int(spin)
+        assert self.spin in (0, 2), "spin 0 or 2"
         self.cuts = list(masks)
         self.m = np.stack([galactic_mask(nside, b, apod) for b in self.cuts])
-        kw = dict(lmax=self.lmax, batch=1, backend=backend, device=device, masks=self.m)
+        kw = dict(lmax=self.lmax, batch=1, backend=backend, device=device, masks=self.m,
+                  **({"spin": 2} if self.spin else {}))
         self.auto = SpectrumEngine(nside, **kw)
         self.pair = SpectrumEngine(nside, cross=True, **kw)
         self.w2 = (self.m**2).mean(1)  # [K]
@@ -72,24 +113,32 @@ class BinnedSpectra:
         self.modes = fsky[:, None] * modes[None]  # [K, nb]
         self.generation = 0
 
+    def _w2(self):
+        return self.w2[:, None, None] if self.spin else self.w2[:, None]
+
     def __call__(self, a, b=None):
-        """Binned spectrum `[K, nb]` of `a` (cross spectrum with `b`); the
-        auto spectrum is kept for `grad`."""
+        """Binned spectrum `[K, nb]` (spin 2: `[K, 2, nb]`, EE and BB) of `a`
+        (cross spectrum with `b`); the auto spectrum is kept for `grad`."""
         if b is None:
             self.generation += 1
             cl = self.auto.forward(np.asarray(a, dtype=np.float64)[None], generation=self.generation)[0]
         else:
             cl = self.pair.forward_cross(np.asarray(a)[None], np.asarray(b)[None])[0]
-        return (cl / self.w2[:, None]) @ self.binning.T
+        if self.spin:
+            cl = cl[:, :2]  # EE, BB (E1E2, B1B2 of a pair)
+        return (cl / self._w2()) @ self.binning.T
 
     def grad(self, cot):
         """Map gradient of `sum(cot * C_b(a))` after the last auto `__call__`."""
-        c = (np.asarray(cot, dtype=np.float64) @ self.binning) / self.w2[:, None]
+        c = (np.asarray(cot, dtype=np.float64) @ self.binning) / self._w2()
+        if self.spin:  # no cotangent on EB
+            c = np.concatenate([c, np.zeros_like(c[:, :1])], 1)
         return self.auto.vjp(c[None], generation=self.generation)[0]
 
     def variance(self, c11, c22, c12):
         """Gaussian variance of a binned cross spectrum: (C11 C22 + C12^2) / modes."""
-        return (c11 * c22 + c12**2) / self.modes
+        modes = self.modes[:, None] if self.spin else self.modes
+        return (c11 * c22 + c12**2) / modes
 
 
 class SpectrumLoss:

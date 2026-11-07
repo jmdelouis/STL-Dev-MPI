@@ -54,8 +54,8 @@ fn device_run(gpu: &Arc<Gpu>, net: UNet, w: &[f32], d: &[f64], cond: &[f32], cot
     dev.zero_grad();
     let mut u = Vec::new();
     for (di, ci) in d.chunks(n).zip(cot.chunks(n)) {
-        let (ui, tape) = dev.forward(&gpu.upload(di), scale, &levels);
-        dev.backward(&tape, scale, &gpu.upload(ci));
+        let (ui, tape) = dev.forward(&gpu.upload(di), &[scale], &levels);
+        dev.backward(&tape, &[scale], &gpu.upload(ci));
         u.extend(gpu.download(&ui));
     }
     let g = dev.grads();
@@ -76,6 +76,7 @@ fn fixture_at(name: &str, d: PathBuf, tol: f64) {
         gauge: Gauge::parse(cfg["gauge"].as_str().unwrap()).unwrap(),
         slope: 0.2,
         cond: cfg["cond"].as_u64().unwrap() as usize,
+        maps: cfg["maps"].as_u64().unwrap_or(1) as usize,
         scale: None,
     });
     let mut w = vec![0f32; net.size];
@@ -140,7 +141,7 @@ fn device_unet_matches_torch_cosmo() {
 #[test]
 fn device_unet_matches_host_n64() {
     let Some(gpu) = gpu() else { return };
-    let cfg = UNetConfig { nside: 64, channels: vec![32, 64, 96, 128], ksz: 3, gauge: Gauge::Phi, slope: 0.2, cond: 1, scale: None };
+    let cfg = UNetConfig { nside: 64, channels: vec![32, 64, 96, 128], ksz: 3, gauge: Gauge::Phi, slope: 0.2, cond: 1, maps: 1, scale: None };
     let net = UNet::new(cfg.clone());
     let n = net.pixels(0);
     let mut w = net.init(7);
