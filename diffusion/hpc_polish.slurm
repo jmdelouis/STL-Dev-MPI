@@ -8,6 +8,9 @@
 # nside 2048, and the home (NFS) quota is too small for them.
 # G: the stl-synth build with MPI and GPU (stl-cli --features mpi,gpu) of a
 # commit with --ensemble, --scatter-weight and {m} in --init (c0ac285 or later).
+# Also runs on the A100 80 GB nodes (--gres=gpu:a100:1; NVRTC compiles the
+# kernels for the device): 4 members at nside 2048 take 125 s per evaluation
+# and 71 GB there, against 58 s on an H200.  Always name the GPU type.
 # 3 cores per rank: the GPU does the work, and the user CPU quota (192 cores,
 # GPU jobs included) is mostly held by the ensemble production chain.
 #SBATCH --job-name=stl-hybrid-polish
