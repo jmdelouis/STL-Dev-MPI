@@ -120,6 +120,7 @@ p.add_argument("--eval-seconds", type=float, default=None, help="also evaluate e
 p.add_argument("--eval-draws", type=int, default=0, help="draws of the fixed-bias common objective (0: not computed)")
 p.add_argument("--engine-cache-bytes", type=int, default=None, help="GPU geometry cache (0: from the free memory)")
 p.add_argument("--seed", type=int, default=0)
+p.add_argument("--init", default=None, help="model.pt of a network trained at a lower (or the same) nside: coarse-to-fine start")
 p.add_argument("--device", type=int, default=0)
 p.add_argument("--backend", default="gpu")
 a = p.parse_args()
@@ -147,6 +148,47 @@ engine = {} if a.engine_cache_bytes is None else {"cache_bytes": a.engine_cache_
 kinds = [] if a.cond == "none" else a.cond.split("+")
 net = NativeUNet(n, channels, ksz=a.ksz, gauge=a.gauge, cond=len(kinds), j=j, loss=weights, backend=a.backend,
                  device=a.device, seed=a.seed, engine=engine, bias_all=a.bias_all, maps=2 if joint else 1)
+
+
+def coarse_to_fine(path):
+    """The weights of the network of `path` (model.pt, from a lower nside) on the levels both share,
+    level k on level k (finest first): the encoder blocks enc.k, the decoder blocks of the same level,
+    the head. The extra coarse levels start as a fresh network; the reverse block of the coarsest
+    shared level that reads them is fresh too, with its last convolution at zero (it sends zero up
+    at the start, where the small network sent its coarsest encoder output)."""
+    import torch
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    small, ls = ck["state"], int(ck["levels"])
+    lb = len(channels)
+    assert ls <= lb, f"--init: {ls} levels for {lb}"
+    assert list(ck["channels"]) == channels[:ls], f"--init: channels {ck['channels']} against {channels[:ls]}"
+    assert int(ck.get("cond", 0)) == len(kinds) and int(ck.get("maps", 1)) == (2 if joint else 1), "--init: cond or maps"
+    state = net.state_dict()
+    copied = 0
+    for name, v in small.items():
+        part, idx, rest = (name.split(".", 2) + ["", ""])[:3]
+        if part == "enc":
+            target = name
+        elif part == "dec":
+            k = ls - 2 - int(idx)  # level of the small decoder block
+            target = f"dec.{lb - 2 - k}.{rest}"
+        else:
+            target = name
+        v = v.detach().cpu().numpy() if hasattr(v, "detach") else np.asarray(v)
+        assert state[target].shape == v.shape, f"--init: {name} -> {target}: {v.shape} vs {state[target].shape}"
+        state[target] = v
+        copied += v.size
+    if lb > ls:
+        top = f"dec.{lb - 1 - ls}"  # the block of level ls - 1, which reads the new coarse levels
+        for q in ("c2.weight", "c2.bias"):
+            state[f"{top}.{q}"] = np.zeros_like(state[f"{top}.{q}"])
+    net.load_state_dict(state)
+    print(f"--init {path}: {copied} of {net.size} parameters from nside {ck['nside']} ({ls} levels -> {lb})",
+          flush=True)
+
+
+if a.init:
+    coarse_to_fine(a.init)
 if a.stat_masks:
     net.set_masks(stat_masks(n, [float(b) for b in a.stat_masks.split(",")]))
 i857 = load("planck857_I")
