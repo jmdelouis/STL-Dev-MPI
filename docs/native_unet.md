@@ -279,3 +279,110 @@ The three optimisers:
   draws from only 6 simulations. The plateaus are not distinguishable at this noise.
 
 A sharper comparison needs the 40 training simulations of the paper and longer runs.
+
+## 7. Joint network on (Q, U): `maps=2`, `--pol eb` and `--pol spin`
+
+Steps 3 to 5 of the Rust-port plan of Healpix-STL-IA (`docs/rust_port.md` there): one network
+denoises the two maps of a polarisation pair together.
+
+- **Network.** `NativeUNet(maps=2)` (`stlia.unet.UNet(maps=2)`): two input and two output
+  channels, one input scale per map (`--input-scale map`, the default) or one scale for both
+  (`--input-scale shared`, torch's `d2.std()`). The `state_dict` is exchanged both ways with
+  torch.
+- **Joint step.** `set_joint(d2, fields, front, scales, weight)`, then the calls on the name
+  `"joint"`. One step runs the network once, sums the terms of both fields (times `weight`),
+  and sends the cotangent `[2, npix]` back through the network once.
+- **Front end.** Optional `front="eth"`: `chi_E + i chi_B = conj-eth^2 (Q + iU)` at level 0
+  (`NativeEngine(spin=2)`'s scalar pyramid), with the statistics masks eroded as there.
+  `front(x)` brings the observations and noise pools of (Q, U) to the chi domain once.
+- **Debiasing.** The frozen biases of both fields are estimated together from one set of draws.
+  `n`, `n1`, `n2` come from the same FFP10 simulation and sign, for every term and both fields.
+  `l2` compares `Phi(d, u)` with `<Phi(u + n, u)>`, with the gradient through both sides.
+- **`--pol eb`.** The network works on the E and B maps (healpy `map2alm(pol=True, iter=3)`,
+  `lmax = 3 nside - 1`, transformed once). The terms are those of E and B, summed, with `cl`
+  the scalar spectra of E and B. The output in (Q, U) is `u = d - QU(d_EB - u_EB)`, so the part
+  of `d` above the band limit stays in `u`.
+- **`--pol spin`.** The network works on (Q, U). The terms are those of chi_E and chi_B,
+  averaged as in `train_denoise.py --pol-stats chi`, and `cl` is the EE/BB spectra of (Q, U)
+  (`BinnedSpectra(spin=2)`).
+- **Caveat.** chi is the ell^2-weighted local E/B, not the harmonic E/B, so these statistics
+  differ from those of `r1k_eb`.
+- **Outputs.** `eval_{Q,U}.npz` is always in (Q, U), plus `eval_{E,B}.npz` with `eb`.
+  `model.pt` declares `maps`, `pol`, the layers and the input scales.
+
+### Validation (garoupe, T4 and CPU, nside 16, against torch)
+
+`tests/test_native_joint.py`; the log is in `docs/runs/native_joint/tests_t4.log`.
+
+| Check | Terms | Parameter gradients |
+|---|---|---|
+| `maps=2` network vs `UNet(maps=2)` (outputs) | 1.1e-6 | 1.8e-5 (norm 8e-7) |
+| eth front end vs `NativeEngine(spin=2)`; its transpose | 0; 7e-16 | |
+| `eb` joint step vs `train_denoise.py` per-field terms, frozen / live | 2.1e-7 / 1.4e-7 | 5.8e-6 / 4.9e-6 |
+| `spin` joint step vs `ChiTerms` + `BinnedSpectra(spin=2)`, frozen / live | 1.6e-7 / 1.2e-7 | 5.3e-6 / 3.6e-6 |
+
+The single-map tests (`test_native_unet`, `test_native_denoise`, the Rust U-Net fixtures) are
+unchanged.
+
+### Profile (one T4)
+
+One frozen-bias joint step with `data + l1 + l2 + l3 + cl` (`cl` under 4 masks), no
+statistics masks, cond log857; seconds (`tests/profile_native_joint.py`,
+`docs/runs/native_joint/prof_*.json`):
+
+| | eb n64 | spin n64 | eb n128 | spin n128 |
+|---|---|---|---|---|
+| whole step | 0.65 | 0.66 | 2.43 | 2.47 |
+| statistics forward | 0.12 | 0.12 | 0.53 | 0.53 |
+| statistics reverse | 0.28 | 0.29 | 1.13 | 1.16 |
+| network forward + reverse | 0.10 | 0.10 | 0.29 | 0.30 |
+| cl spectra and gradient (host transforms) | 0.03 | 0.02 | 0.09 | 0.09 |
+| eth front end + transpose | | 0.004 | | 0.013 |
+| bias estimate (8 draws, both fields) | 0.82 | 0.82 | 3.40 | 3.45 |
+
+- **Against PyTorch.** torch takes 2.15 s (t64_ebdom) and 2.25 s (t64_jchi) per step at
+  nside 64, and about 9.6 s (`r1k_eb`) at nside 128: the native step is 3.3 to 4 times faster.
+- **Remaining time.** The `cl` term costs, beyond its spectra, one more network forward and one
+  forward + reverse (0.1 s at nside 64, 0.4 s at nside 128). The host spin-2 SHT of the EE/BB
+  spectra is 4 % of the step, so a device spin-2 SHT is not needed at these sizes.
+
+### nside 64 comparison with the PyTorch runs
+
+All runs: 1000 Adam steps (lr 1e-3, cosine), frozen biases from 8 draws refreshed every 50
+steps, cond log857, `data + l1 + l2 + l3 + cl`, cl masks 0, 30, 45, 60°, simulations 10-15,
+seed 0. Torch references: `t64_jeb1k` (harmonic E/B statistics in the loop), `t64_ebdom` (E/B
+domain, brought back to (Q, U)) and `t64_jchi` (chi statistics, EE/BB cl). Each torch reference
+matches a native run with `--input-scale shared` (as torch); the `map` runs differ by the input
+scale only. Metrics by `/tmp/jmd_r.py`; full table in `docs/runs/native_joint/comparison_n64.txt`.
+
+| run | s/step | removed rms / noise rms (Q, U) |
+|---|---|---|
+| torch t64_jeb1k | 2.7 | 0.47, 0.27 |
+| torch t64_ebdom | 2.15 | 0.34, 0.31 |
+| torch t64_jchi | 2.25 | 0.39, 0.31 |
+| native eb, shared scale | 0.68 | 0.35, 0.31 |
+| native spin, shared scale | 0.70 | 0.39, 0.45 |
+| native eb, per-map scales | 1.31 (two runs on one T4) | 0.37, 0.30 |
+| native spin, per-map scales | 1.32 (two runs on one T4) | 0.51, 0.38 |
+
+The two per-map runs shared one T4, hence their doubled step time.
+
+`(d - u)` EE over the half-mission noise at |b| > 30°, l in (10, 30), (30, 60), (60, 100),
+(100, 128):
+
+| run | 10-30 | 30-60 | 60-100 | 100-128 |
+|---|---|---|---|---|
+| torch t64_jeb1k | 0.46 | 0.79 | 1.19 | 0.73 |
+| torch t64_ebdom | 0.66 | 0.87 | 0.61 | 0.39 |
+| torch t64_jchi | 1.65 | 0.46 | 0.49 | 0.28 |
+| native eb, shared | 0.26 | 0.43 | 0.55 | 0.37 |
+| native spin, shared | 0.67 | 0.61 | 1.00 | 0.65 |
+| native eb, per-map | 0.27 | 0.62 | 0.80 | 0.48 |
+| native spin, per-map | 0.55 | 0.60 | 0.89 | 0.57 |
+
+- **Spectra.** Every run keeps the half-mission cross spectrum to about 1 % over |b| > 30°
+  (`u/x` 0.99-1.01 in every bin).
+- **Large scales.** The native spin runs do not remove more than the noise at l 10-30 (0.67 and
+  0.55, 1.16 at |b| > 60°), where torch `t64_jchi` removes 1.65 (3.8 at |b| > 60°).
+- **Spread.** These are single trainings, and two trainings differ by a large fraction of the
+  noise (Healpix-STL-IA paper). Differences below about 0.2 are within the spread.

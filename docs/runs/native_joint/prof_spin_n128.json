@@ -1,0 +1,25 @@
+{
+ "nside": 128,
+ "pol": "spin",
+ "sims": 6,
+ "channels": [
+  32,
+  64,
+  96,
+  128,
+  128
+ ],
+ "setup_transform_s": 1.1214057672768831,
+ "setup_s": 19.275645636953413,
+ "bias_estimate_s": 3.449202324030921,
+ "step_s": 2.4689778068102894,
+ "loss_backward_s": 1.9964980194345117,
+ "loss_forward_s": 0.6277652737684548,
+ "network_forward_s": 0.09394830837845802,
+ "network_forward_backward_s": 0.2975213326513767,
+ "cl_spectra_and_gradient_s": 0.08693724442273379,
+ "front_s": 0.006343084573745728,
+ "front_adjoint_s": 0.006804919708520174,
+ "statistics_forward_s": 0.527473880816251,
+ "statistics_backward_s": 1.158354801684618
+}

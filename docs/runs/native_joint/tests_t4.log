@@ -1,0 +1,68 @@
+GPU 0
+0, 4 MiB, 0 %
+1, 4 MiB, 0 %
+2, 4 MiB, 0 %
+######## rust tests (stl-core unet, stl-gpu unet)
+   Compiling thiserror v2.0.21
+   Compiling thiserror-impl v2.0.21
+test unet_matches_torch_extra ... ok
+test unet_matches_torch_phi ... ok
+test unet_matches_torch_cosmo ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+test device_unet_matches_torch_extra ... ok
+test device_unet_matches_torch_cosmo ... ok
+test device_unet_matches_torch_phi ... ok
+test device_unet_matches_host_n64 ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.87s
+######## build cpu
+    Finished `release` profile [optimized + debuginfo] target(s) in 55.24s
+======== cpu test_native_joint
+network maps=2: output 1.10e-06, gradients 1.76e-05 (norm 6.98e-07)
+front eth: chi vs NativeEngine(spin=2) 0.00e+00, adjoint 7.28e-16
+eb frozen: terms 2.13e-07 (data 1.4e-08, l1 1.1e-08, l2 2.8e-08, l3 2.1e-07, cl 8.7e-08), gradients 3.29e-06 (norm 7.90e-07)
+eb live: terms 1.38e-07 (data 3.1e-08, l1 7.9e-09, l2 8.5e-08, l3 1.4e-07, cl 8.7e-08), gradients 4.92e-06 (norm 8.30e-07)
+native joint tests passed
+exit 0
+======== cpu test_native_unet
+network: correction 6.60e-07, gradients 1.33e-05
+training step: terms 3.62e-07 ({'total': 32.58724660551667, 'data': 12.665033265849384, 'l1': 10.73861311013688, 'l2': 5.314461887941117, 'l3': 3.8691383415892893}), gradients 3.68e-04
+Adam step: 7.45e-09
+training step, bias_all: terms 3.62e-07, gradients 3.67e-04
+live step: terms 3.41e-07, gradients 1.35e-05
+L-BFGS round: 20 -> 8.355 in 6 evaluations
+native U-Net tests passed
+exit 0
+======== cpu test_native_denoise
+frozen: terms 2.08e-07 (data 2.1e-07, l1 5.2e-08, l2 1.6e-08, l3 1.0e-07, cl 4.7e-08), gradients 3.40e-06 (norm 8.74e-07)
+live: terms 2.26e-07 (data 2.3e-07, l1 6.3e-08, l2 6.8e-08, l3 6.1e-08, cl 4.7e-08), gradients 3.96e-06 (norm 1.02e-06)
+conditioning maps: 0.00e+00; stat masks [3072, 1984, 1536, 840]
+native denoise tests passed
+exit 0
+######## build gpu
+    Finished `release` profile [optimized + debuginfo] target(s) in 36.02s
+======== gpu test_native_joint
+network maps=2: output 1.05e-06, gradients 1.78e-05 (norm 7.83e-07)
+front eth: chi vs NativeEngine(spin=2) 0.00e+00, adjoint 7.28e-16
+eb frozen: terms 1.24e-07 (data 4.3e-08, l1 4.3e-08, l2 1.8e-08, l3 1.2e-07, cl 9.3e-08), gradients 5.80e-06 (norm 5.99e-07)
+eb live: terms 9.33e-08 (data 1.9e-08, l1 2.3e-08, l2 6.7e-08, l3 6.9e-08, cl 9.3e-08), gradients 3.22e-06 (norm 6.01e-07)
+statistics of chi_E, chi_B (spin-2 engine): 6096 coefficients, cross 11968
+spin frozen: terms 1.59e-07 (data 1.3e-07, l1 1.3e-08, l2 1.6e-07, l3 1.4e-07, cl 7.7e-08), gradients 5.31e-06 (norm 5.83e-07)
+spin live: terms 1.22e-07 (data 1.2e-07, l1 5.2e-09, l2 8.0e-08, l3 2.0e-08, cl 7.7e-08), gradients 3.57e-06 (norm 6.04e-07)
+native joint tests passed
+exit 0
+======== gpu test_native_unet
+network: correction 8.09e-07, gradients 1.32e-05
+training step: terms 2.22e-07 ({'total': 32.587241972517056, 'data': 12.665030599668963, 'l1': 10.73861161140948, 'l2': 5.314461363669475, 'l3': 3.8691383977691416}), gradients 3.68e-04
+Adam step: 7.45e-09
+training step, bias_all: terms 2.22e-07, gradients 3.67e-04
+live step: terms 2.24e-07, gradients 6.58e-06
+L-BFGS round: 20 -> 8.355 in 6 evaluations
+native U-Net tests passed
+exit 0
+======== gpu test_native_denoise
+frozen: terms 1.58e-07 (data 1.6e-07, l1 3.8e-08, l2 1.3e-08, l3 2.2e-08, cl 6.2e-08), gradients 2.19e-06 (norm 7.10e-07)
+live: terms 1.84e-07 (data 1.8e-07, l1 3.6e-08, l2 6.7e-08, l3 1.2e-07, cl 6.2e-08), gradients 3.88e-06 (norm 7.13e-07)
+conditioning maps: 0.00e+00; stat masks [3072, 1984, 1536, 840]
+native denoise tests passed
+exit 0
+ALLDONE

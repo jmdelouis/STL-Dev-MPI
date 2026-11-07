@@ -89,6 +89,8 @@ p.add_argument("--pol", default="qu", choices=["qu", "eb", "spin"],
                help="qu: Q and U alternately (maps=1); eb: one network on the E and B maps; spin: one network on (Q, U), "
                     "statistics of chi_E, chi_B")
 p.add_argument("--pol-weight", type=float, default=None, help="factor on the terms of each field (eb 1: sum, spin 0.5: mean)")
+p.add_argument("--input-scale", default="map", choices=["map", "shared"],
+               help="joint network: the std of each input map, or one std of both (torch UNet(maps=2)'s d2.std())")
 p.add_argument("--eb-iter", type=int, default=3, help="--pol eb: healpy map2alm iterations of the E/B transforms")
 p.add_argument("--bias", default="frozen", choices=["frozen"])
 p.add_argument("--bias-warmup", type=int, default=0, help="first Adam steps with live biases")
@@ -170,7 +172,7 @@ for f in qu:
             cl_loss[f] = SpectrumLoss(spectra, *qu_hm[f])
     del pools
 pair = lambda m: np.stack([m[f] for f in qu])  # noqa: E731
-net_in, eb_in = None, None
+net_in, eb_in, in_scales = None, None, None
 if joint:
     d_qu = pair(obs)
     hm_qu = [np.stack([qu_hm[f][h] for f in qu]) for h in (0, 1)]
@@ -181,11 +183,13 @@ if joint:
         # the E and B maps, transformed once; the network works on them
         tf = lambda x: eb_maps(x, iter=a.eb_iter)  # noqa: E731
         net_in = eb_in = tf(d_qu)
-        net.set_joint(net_in, ("E", "B"), weight=pol_weight)
+        in_scales = np.full(2, net_in.std(ddof=1)) if a.input_scale == "shared" else None
+        net.set_joint(net_in, ("E", "B"), scales=in_scales, weight=pol_weight)
     else:
         # the network works on (Q, U); its terms on chi = conj-eth^2 of the output
         net_in = d_qu
-        net.set_joint(net_in, ("E", "B"), front="eth", weight=pol_weight)
+        in_scales = np.full(2, net_in.std(ddof=1)) if a.input_scale == "shared" else None
+        net.set_joint(net_in, ("E", "B"), front="eth", scales=in_scales, weight=pol_weight)
         tf = net.front
     fields = ("E", "B")
     d_f, hm_f, pools_f = tf(d_qu), [tf(h) for h in hm_qu], [tf(p) for p in pools_qu]
@@ -238,10 +242,11 @@ def add_cl(f, terms, backward):
     if not w_cl:
         return terms
     x = net_in if f == "joint" else obs[f]
-    u = net.apply(x)
+    sc = in_scales if f == "joint" else None
+    u = net.apply(x, scale=sc)
     if backward:
         v, g = cl_value(f, u, grad=True)
-        net.apply(x, cot=w_cl * g)
+        net.apply(x, scale=sc, cot=w_cl * g)
     else:
         v = cl_value(f, u)
     terms["cl"] = v
@@ -261,7 +266,7 @@ def outputs():
     if not joint:
         u = {f: net.apply(obs[f]) for f in fields}
         return u, u
-    u2 = net.apply(net_in)
+    u2 = net.apply(net_in, scale=in_scales)
     if a.pol == "eb":
         uq = d_qu - qu_maps(eb_in - u2, iter=a.eb_iter)  # u = d - QU(r), r = d_EB - u_EB
         return dict(zip(fields, u2)), dict(zip(qu, uq))
@@ -280,7 +285,7 @@ def evaluate(step, save=False):
     for f in names:
         out.setdefault(f, {})["loss_terms"] = {k: v for k, v in net.loss(f).items() if k != "total"}
         if w_cl:
-            out[f]["loss_terms"]["cl"] = cl_value(f, net.apply(net_in if f == "joint" else obs[f]))
+            out[f]["loss_terms"]["cl"] = cl_value(f, net.apply(net_in, scale=in_scales) if f == "joint" else net.apply(obs[f]))
         out[f]["data_loss"] = out[f]["loss_terms"].get("data", float("nan"))
     if save:
         for f in qu:
@@ -294,7 +299,7 @@ def evaluate(step, save=False):
         saved = {}
         for f in names:
             net.estimate_bias(f, *fixed_draws)
-            saved[f] = net.loss(f)["total"] + (w_cl * cl_value(f, net.apply(net_in if f == "joint" else obs[f]))
+            saved[f] = net.loss(f)["total"] + (w_cl * cl_value(f, net.apply(net_in, scale=in_scales) if f == "joint" else net.apply(obs[f]))
                                                if w_cl else 0.0)
         rec["fixed_draws"] = {**saved, "total": sum(saved.values())}
         for f in names:  # back to training biases at the next refresh
@@ -302,7 +307,7 @@ def evaluate(step, save=False):
     native["eval"].append(rec)
     evals[step] = out
     print(f"eval {step} t={clock['train']:.1f}s " + " ".join(
-        f"{f} err/noise {out[f]['pixel_rms_error_over_noise']:.3f}" for f in out)
+        f"{f} err/noise {out[f]['pixel_rms_error_over_noise']:.3f}" for f in out if "pixel_rms_error_over_noise" in out[f])
         + " " + " ".join(f"{f} loss {rec[f]:.5g}" for f in names)
         + (f" | fixed draws {rec['fixed_draws']['total']:.5g}" if a.eval_draws else ""), flush=True)
     np.save(os.path.join(a.out, "params.npy"), net.get_params())
@@ -401,7 +406,8 @@ try:
                        "statistics": "chi_E + i chi_B = conj-eth^2 (Q + iU), NativeEngine(spin=2)"}}[a.pol]
     torch.save({"state": state, "nside": n, "levels": levels, "channels": channels, "conv": "sphere", "gauge": a.gauge,
                 "ksz": a.ksz, "norm": "group", "scale": None, "cond": len(kinds), "maps": 2 if joint else 1,
-                "pol": a.pol, "layers": layers, "input_scales": "std of each input map", "j": j, "noise_rms": rms},
+                "pol": a.pol, "layers": layers,
+                "input_scales": "one std of both input maps" if a.input_scale == "shared" else "std of each input map", "j": j, "noise_rms": rms},
                os.path.join(a.out, "model.pt"))
 except ImportError:
     print("torch not importable: model.pt not written (params.npy and state names in train.json)", flush=True)

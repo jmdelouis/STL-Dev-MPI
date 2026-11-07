@@ -1,0 +1,28 @@
+SCRIPT VERSION: stl_port 2026-10-29-v2-variance-ratio
+SCRIPT VERSION: stl_port.native 2026-11-09-v12
+--pol eb: fields ('E', 'B') in 26.0 s, noise rms E 10.33, B 10.71, factor 1.0 on the terms of each
+nside 64 J 5 levels 4 channels [32, 64, 96, 128] params 908898 sims 6 pol eb loss {'data': 1.0, 'l1': 1.0, 'l2': 1.0, 'l3': 1.0, 'cl': 1.0} optimizer adam bias biased coefficients only warmup 0 cond log857 stat masks none cl masks 0,30,45,60, 4 bins
+eval 0 t=0.0s E err/noise 0.000 B err/noise 0.000 Q err/noise 0.000 U err/noise 0.000 joint loss 67.178
+step 1 joint loss 66.9884 data 0.1014 l1 0.142 l2 0.03081 l3 0.05158 cl 66.66 1.630 s/step
+step 50 joint loss 0.29651 data 0.04855 l1 0.09103 l2 0.02185 l3 0.04038 cl 0.09471 0.670 s/step
+step 100 joint loss 0.384922 data 0.09421 l1 0.1079 l2 0.0352 l3 0.06685 cl 0.08079 0.669 s/step
+step 150 joint loss 0.0906466 data 0.01075 l1 0.05682 l2 0.007537 l3 0.007952 cl 0.007595 0.671 s/step
+step 200 joint loss 0.192786 data 0.04831 l1 0.07661 l2 0.01912 l3 0.02942 cl 0.01932 0.673 s/step
+step 250 joint loss 0.0838432 data 0.01536 l1 0.04595 l2 0.007023 l3 0.008718 cl 0.006788 0.674 s/step
+step 300 joint loss 0.0880129 data 0.01856 l1 0.04783 l2 0.007627 l3 0.01109 cl 0.002904 0.676 s/step
+step 350 joint loss 0.088416 data 0.01596 l1 0.05131 l2 0.007292 l3 0.01074 cl 0.003116 0.677 s/step
+step 400 joint loss 0.0984095 data 0.02026 l1 0.05183 l2 0.007334 l3 0.01223 cl 0.00675 0.678 s/step
+step 450 joint loss 0.100364 data 0.02382 l1 0.04442 l2 0.01019 l3 0.01567 cl 0.006271 0.679 s/step
+step 500 joint loss 0.202801 data 0.04715 l1 0.08405 l2 0.02079 l3 0.03322 cl 0.01759 0.680 s/step
+eval 500 t=339.8s E err/noise 0.370 B err/noise 0.474 Q err/noise 0.400 U err/noise 0.384 joint loss 0.20171
+step 550 joint loss 0.134763 data 0.02881 l1 0.06858 l2 0.009147 l3 0.01562 cl 0.0126 0.680 s/step
+step 600 joint loss 0.180026 data 0.038 l1 0.0856 l2 0.01566 l3 0.02298 cl 0.01777 0.681 s/step
+step 650 joint loss 0.0848175 data 0.01317 l1 0.05395 l2 0.006429 l3 0.008405 cl 0.002863 0.681 s/step
+step 700 joint loss 0.0569053 data 0.006057 l1 0.04366 l2 0.003707 l3 0.002553 cl 0.0009283 0.681 s/step
+step 750 joint loss 0.089278 data 0.02356 l1 0.04035 l2 0.007337 l3 0.01297 cl 0.005064 0.682 s/step
+step 800 joint loss 0.10833 data 0.01965 l1 0.06104 l2 0.01116 l3 0.009154 cl 0.007321 0.682 s/step
+step 850 joint loss 0.0996953 data 0.0192 l1 0.05538 l2 0.009026 l3 0.01189 cl 0.0042 0.682 s/step
+step 900 joint loss 0.0876613 data 0.01203 l1 0.05626 l2 0.006923 l3 0.008148 cl 0.004307 0.682 s/step
+step 950 joint loss 0.0656059 data 0.01421 l1 0.0407 l2 0.004023 l3 0.004495 cl 0.002172 0.682 s/step
+step 1000 joint loss 0.0617683 data 0.01067 l1 0.0389 l2 0.005916 l3 0.00439 cl 0.001891 0.683 s/step
+eval 1000 t=682.6s E err/noise 0.325 B err/noise 0.394 Q err/noise 0.354 U err/noise 0.307 joint loss 0.061768
