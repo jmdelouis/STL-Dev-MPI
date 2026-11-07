@@ -28,8 +28,10 @@ bindings expose the same engines, with their VJPs, to NumPy and PyTorch.
 | `stl-ensemble` | ensembles whose mean and variance of statistics match a population (P. Campeti's method: ScatCov of `g` and `κ`, C_ℓ, PDF, Minkowski) | simulation-like ensembles of weak-lensing maps |
 | `stl-synth2d` | synthesis of periodic 2D images, ensemble loss, coarse-to-fine starts | images, turbulence, textures |
 | `NativeEngine` (Python) | full-sky statistics and their VJP; masks; cross statistics `S(a, b)` | losses in NumPy / PyTorch, masked skies |
+| `NativeEngine(spin=2)` (Python) | E/B statistics of polarisation `(Q, U)` from local eth-bar² fields, no SHT; masks; QU × QU and T × QU cross statistics | polarisation losses, dust, masked skies |
 | `PatchEngine` (Python) | statistics of disc patches and their VJP, batched, CPU or GPU | training networks on patches of the sky |
 | `SpectrumEngine` (Python) | differentiable anafast: auto, cross, spin `s` (`EE`, `BB`, `EB`), masks | holding the power spectrum in a loss |
+| `NativeUNet` (Python) | a spherical U-Net denoiser and its training by scattering losses (frozen or live noise biases), Adam or L-BFGS, on one device | denoising Planck-like maps at nside 256 on one GPU |
 
 ## Installation
 
@@ -123,7 +125,7 @@ numerics follow STL-Dev (block, halo, piece, sweep, native level, stored moduli,
 - Weak-lensing convergence and other cosmological fields: emulation of simulations, ensembles,
   non-Gaussian statistics on the full sky and on masked skies
 - Training neural networks with scattering-statistics losses (denoising, component separation)
-  on the sphere
+  on the sphere, for intensity and polarisation
 - Ocean and atmosphere fields on HEALPix grids, and 2D turbulence images
 - Large syntheses on HPC clusters and GPUs (nside 1024 to 2048 and beyond)
 

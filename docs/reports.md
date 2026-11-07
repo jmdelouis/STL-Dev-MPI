@@ -27,6 +27,8 @@ its setup (machine, commit, job) so that it can be reproduced.
 | [Disc patches and cross statistics](disc_cross_statistics.md) | statistics on disc patches (`PatchEngine`) and cross statistics `S(a, b)` (`cross=True`), exact VJPs, CPU and GPU, for networks trained with STL losses |
 | [Masked statistics](masked_statistics.md) | full-sky statistics averaged over `K` masks in one sweep (`NativeEngine(masks=...)`), validation and T4 timings |
 | [Differentiable pseudo-spectra](spectrum.md) | `SpectrumEngine`: anafast with its VJP, spin 0 and spin `s`, masks, against healpy |
+| [Spin-2 scattering statistics](spin_scattering.md) | `NativeEngine(spin=2)`: local E/B fields by eth-bar², transported and scalar pyramids, masks, QU × QU and T × QU cross statistics, validation against the SHT at nside 64 and on Planck 353 GHz, T4 timings |
+| [Native spherical U-Net](native_unet.md) | `NativeUNet`: the Healpix-STL-IA U-Net in Rust and its training by scattering losses on one device, validation against torch, T4 timings (nside 256 where torch runs out of memory), Adam against L-BFGS |
 
 ## Ensembles and productions
 
@@ -61,6 +63,8 @@ kappa_power_spectrum
 disc_cross_statistics
 masked_statistics
 spectrum
+spin_scattering
+native_unet
 lagrangian_synthesis
 amortized_synthesis
 diffusion_design

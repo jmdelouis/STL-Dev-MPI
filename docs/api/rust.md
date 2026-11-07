@@ -12,11 +12,11 @@ On the built site, the rustdoc is under <a href="../rust/stl_core/index.html"><c
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `stl-core` | HEALPix geometry, wavelet convolution and its adjoint on partial grids, decimation and pieces, the per-block forward and reverse sweeps (`LocalEngine`), coefficient plans, L-BFGS, disc and masked statistics, spherical transforms, the planar engine. Pure Rust, no MPI, `f64` | `cdshealpix`, `rustfft` |
+| `stl-core` | HEALPix geometry, wavelet convolution and its adjoint on partial grids, decimation and pieces, the per-block forward and reverse sweeps (`LocalEngine`), coefficient plans, L-BFGS, disc and masked statistics, spherical transforms, the spin-2 front end (`spin`), the spherical U-Net (`nn`), the planar engine. Pure Rust, no MPI, `f64` | `cdshealpix`, `rustfft` |
 | `stl-mpi` | decomposition into NESTED ranges, halo exchange and ghost accumulation, the distributed objective (`Objective`, `Ensemble`), npy / FITS I/O, the threads and MPI backends of `Comm` | `stl-core`, `rsmpi` (feature `mpi`) |
-| `stl-gpu` | the sweeps on a CUDA device per rank (`GpuEngine`), device geometry (DIA or bound stencils), disc engine, objective terms and harmonic transforms on the device, planar engine | `stl-core`, `cudarc` (driver and NVRTC loaded at run time) |
+| `stl-gpu` | the sweeps on a CUDA device per rank (`GpuEngine`), device geometry (DIA or bound stencils), disc engine, objective terms and harmonic transforms on the device, the U-Net on the device (`nn`), planar engine | `stl-core`, `cudarc` (driver and NVRTC loaded at run time) |
 | `stl-cli` | the command-line tools and their objectives | the three above |
-| `stl-bridge` | the C ABI behind `stl_port.native` (`stlp_*` functions) | `stl-core`, `stl-gpu` |
+| `stl-bridge` | the C ABI behind `stl_port.native` (`stlp_*` functions; `unet`: the U-Net handle and its trainer) | `stl-core`, `stl-gpu` |
 
 ## Main types
 
@@ -27,6 +27,8 @@ On the built site, the rustdoc is under <a href="../rust/stl_core/index.html"><c
 | `stl_core::plan::{build_plan, Coefficient, Family}` | the ordered list of coefficients and their native levels |
 | `stl_core::lbfgs::{minimize, LbfgsOptions}` | L-BFGS with strong Wolfe line search, transcribed from `torch.optim.LBFGS` |
 | `stl_core::planar` | the 2D engine |
+| `stl_core::spin::{eth_bar2, SpinPyramid}` | the local eth-bar² stencil of spin-2 fields and the spin pyramids |
+| `stl_core::nn::SphereStencil` | the convolution of the spherical U-Net (`stl_gpu::nn` on the device) |
 | `stl_mpi::{Comm, Decomposition, HaloExchange}` | communicator trait, NESTED ranges, halos and ghosts |
 | `stl_mpi::synthesis::{Objective, Ensemble}` | distributed loss and gradient |
 | `stl_mpi::io` | maps read and written by owned slices (npy, FITS) |

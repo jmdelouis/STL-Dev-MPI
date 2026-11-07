@@ -14,6 +14,7 @@ parameters, a minimal example, pitfalls and costs).
    2D images               stl-synth2d --target images.npy --out run2d
 4. check                   stl-stats --norm target.npy -- target.npy run_synthesis_nested.npy
 in Python                  NativeEngine / PatchEngine / SpectrumEngine: forward + exact VJP
+                           NativeEngine(spin=2): E/B statistics of (Q, U)   |   NativeUNet: a denoiser trained by them
 ```
 
 ## Key parameters (all HEALPix tools)
@@ -96,6 +97,18 @@ Statistics of disc patches with their VJP, batched, CPU or GPU.
 Differentiable pseudo-spectra (anafast), spin 0 and spin s, with masks.
 :::
 
+:::{grid-item-card} Spin-2 statistics
+:link: spin-statistics
+:link-type: doc
+E and B scattering statistics of polarisation maps `(Q, U)`, local, with masks and cross terms.
+:::
+
+:::{grid-item-card} NativeUNet
+:link: native-unet
+:link-type: doc
+A spherical U-Net denoiser trained by scattering losses on one device, Adam or L-BFGS.
+:::
+
 :::{grid-item-card} GPU
 :link: gpu
 :link-type: doc
@@ -130,6 +143,8 @@ differentiable
 native-engine
 patch-engine
 spectrum-engine
+spin-statistics
+native-unet
 gpu
 mpi
 ../USAGE

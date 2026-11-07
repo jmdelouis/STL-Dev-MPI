@@ -6,8 +6,8 @@
 :::{grid-item-card} Python
 :link: python
 :link-type: doc
-`stl_port.native`: `NativeEngine`, `PatchEngine`, `SpectrumEngine`, `native_lbfgs`, generated from
-the docstrings.
+`stl_port.native`: `NativeEngine`, `PatchEngine`, `SpectrumEngine`, `NativeUNet`, `native_lbfgs`,
+and the `stl_port.denoise` helpers, generated from the docstrings.
 :::
 
 :::{grid-item-card} Command line

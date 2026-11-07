@@ -100,3 +100,12 @@ a reduced χ², and a residual of 1 is the scatter expected between two realisat
 ranks into `G` groups that each hold `B / G` members. `stl-ensemble` implements P. Campeti's
 method, where both the mean and the variance over the members match those of a set of reference
 maps.
+
+## Spin-2 fields, local E and B
+
+A polarisation map is a spin-2 field `P = Q + iU`: its components rotate with the local frame.
+`NativeEngine(spin=2)` turns it into two frame-independent scalar fields, `chi_E + i chi_B =
+-(d_x - i d_y)^2 P` (**eth-bar squared**), computed by a local stencil on the pixels within a few
+rings, each rotated into the centre's frame by **parallel transport**. The **spin pyramid** is
+either `scalar` (`chi` at level 0, decimated as a scalar map) or `transported` (`P` averaged level
+by level with parallel transport, the stencil applied at every level).

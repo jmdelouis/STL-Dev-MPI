@@ -7,13 +7,15 @@ or a custom synthesis. There is no autograd graph: the gradient comes from the s
 reverse sweep as the command-line tools. The memory is that of the engine, and the results are
 those of the validated Rust code.
 
-Three engines in `stl_port.native` (`python/stl_ensemble/stl_port/native.py`):
+Three engines in `stl_port.native` (`python/stl_ensemble/stl_port/native.py`), and a network
+trained with them:
 
 | Engine | Statistics | Domain | Reports with the definitions and the measurements |
 |---|---|---|---|
-| `NativeEngine` | scattering covariance (`mean`, `var`, S1–S4), auto or cross `S(a, b)` | full sky, or averaged over `K` masks | [masked statistics](../masked_statistics.md), [cross statistics](../disc_cross_statistics.md) |
+| `NativeEngine` | scattering covariance (`mean`, `var`, S1–S4), auto or cross `S(a, b)`; E/B statistics of `(Q, U)` with `spin=2` | full sky, or averaged over `K` masks | [masked statistics](../masked_statistics.md), [cross statistics](../disc_cross_statistics.md), [spin 2](../spin_scattering.md) |
 | `PatchEngine` | the same plan, auto or cross | disc patches (support radius `R`, averaging core `r`) | [disc patches](../disc_cross_statistics.md) |
 | `SpectrumEngine` | pseudo-`C_ℓ` (anafast, `iter=0`): spin 0 (`TT`), spin `s` (`EE`, `BB`, `EB`), auto or cross | full sky, or `K` masks (weights) | [pseudo-spectra](../spectrum.md) |
+| `NativeUNet` | a spherical U-Net denoiser and its training by the losses of Delouis et al. (2022), on one device | full sky, or `K` masks | [native U-Net](../native_unet.md) |
 
 Worked examples: the three engines wrapped for torch on a laptop CPU
 ({doc}`../tutorials/differentiable`, example 06), and the GPU path with CUDA tensors
@@ -57,6 +59,8 @@ Conventions shared by the three engines:
 | `NativeEngine`: full sky, `K` masks, cross statistics | {doc}`native-engine` |
 | `PatchEngine`: disc patches, CPU threads or GPU, CUDA tensors | {doc}`patch-engine` |
 | `SpectrumEngine`: pseudo-`C_ℓ`, spin 0 and spin `s`, masks | {doc}`spectrum-engine` |
+| `NativeEngine(spin=2)`: E/B statistics of polarisation `(Q, U)`, auto and cross | {doc}`spin-statistics` |
+| `NativeUNet`: U-Net denoiser trained by scattering losses, Adam or L-BFGS | {doc}`native-unet` |
 
 The signatures are in {doc}`../api/python`.
 
@@ -65,6 +69,8 @@ The signatures are in {doc}`../api/python`.
 | Engine | Output | Gradient with respect to | Constant (no gradient) |
 |---|---|---|---|
 | `NativeEngine` | statistics `[B, (K,) ncoeff]` | the maps; both maps `a` and `b` with `cross=True` | masks, `var` (moments), the plan |
+| `NativeEngine(spin=2)` | E/B statistics `[B, 2, (K,) ncoeff]` | `(Q, U)` (and `a`, `Q`/`U` or `T`, with `cross=True`) | masks (eroded), `var`, the plan |
+| `NativeUNet` | `u = d − scale r(d / scale)`, loss terms | the network parameters (`apply(d, cot=...)`, `step`, `lbfgs`) | frozen biases, targets, conditioning maps |
 | `PatchEngine` | statistics `[B, ncoeff]` | the patch pixels (both maps with `cross=True`); to the full sky through `gather` | disc centres, radii, `var` |
 | `SpectrumEngine` | `C_ℓ` `[B, (K,) (C,) lmax + 1]` | the maps (`Q`, `U` for spin `s`; both fields with `cross=True`) | mask weights, `fsky` |
 | `delouis_transform` | `sign(Re)·sqrt|Re| + i·sign(Im)·sqrt|Im|` | its input (`delouis_transform_vjp`, unbounded at 0) | – |
@@ -76,6 +82,8 @@ The signatures are in {doc}`../api/python`.
 | `NativeEngine` | yes (one thread) | yes | nside 32, `J = 4`: 2.4 s on one laptop core; nside 64, `J = 5`: 7.5 s. T4, nside 256, `J = 4`: 1.78 s (auto), 2.06 s (cross); 5 masks +16 % (auto), +27 % (cross) |
 | `PatchEngine` | yes (`threads` host threads) | yes (`forward_device` for CUDA tensors) | 20 laptop threads, nside 256, 16 discs of 10° (5973 pixels), cached geometry: 0.18 s. T4, 240 cross patches on 16 discs: 1.33 s per step, including geometry rebuilds |
 | `SpectrumEngine` | yes (`STL_THREADS`) | spin 0 on the device, spin `s` on the host | nside 256, `lmax = 511`, one map: 0.064 s spin 0, 0.24 s spin 2 (20 threads); T4 with 5 masks: 0.19 s spin 0 |
+| `NativeEngine(spin=2)` | yes | yes (spin front end on the host) | T4, nside 256, one `(Q, U)` map: forward 0.87 s, VJP 1.24 s |
+| `NativeUNet` | yes | yes | T4, one frozen-bias training step: 0.30 s at nside 64 (4 levels), 4.2–6.4 s at nside 256 (6 levels) |
 
 The full measurements are in the reports linked at the top of this page. A VJP costs about the
 same as a forward for the spectra and about 1.2 to 1.5 forwards for the statistics.

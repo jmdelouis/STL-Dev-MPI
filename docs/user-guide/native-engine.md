@@ -11,7 +11,9 @@ It also computes:
 - **masked statistics**: every coefficient averaged over each of `K` masks at its native level,
   with the wavelets and moduli of the full sky (galactic cuts, survey footprints);
 - **cross statistics** `S(a, b)` of two maps (`cross=True`): the terms with `c1 ≠ c2`, S3 and S4
-  in both orders.
+  in both orders;
+- **spin-2 statistics** of polarisation maps `(Q, U)` (`spin=2`): the statistics of the local E
+  and B fields, auto or cross (QU × QU, T × QU); see {doc}`spin-statistics`.
 
 ```python
 from stl_port.native import NativeEngine
@@ -40,6 +42,7 @@ The gradient returned by `vjp` is that of `Re sum(conj(cotangent) * values)`: fo
 | `device` | 0 | CUDA device |
 | `cross` | `False` | cross statistics of map pairs `[batch, 2, npix]` |
 | `masks` | `None` | `K` masks: NESTED id arrays or `[K, npix]` indicators; values become `[batch, K, ncoeff]` |
+| `spin`, `spin_kernel`, `spin_pyramid`, `spin_a` | 0, 5, `"scalar"`, 2 | `spin=2`: `(Q, U)` maps `[batch, 2, npix]`, values `[batch, 2 (E, B), (K,) ncoeff]` ({doc}`spin-statistics`) |
 | `library` | `$STL_NATIVE_LIBRARY` | path of `libstl_bridge.so` |
 
 | Method | Returns |
@@ -48,6 +51,7 @@ The gradient returned by `vjp` is that of `Re sum(conj(cotangent) * values)`: fo
 | `vjp(cotangents, generation=0, ...)` | map gradient shaped like `maps` |
 | `forward_cross(a, b)`, `vjp_cross(cot)` | cross statistics of `a`, `b`; gradients `(grad_a, grad_b)` |
 | `set_masks(masks)`, `native_pixels()` | change the masks; pixels averaged by each coefficient `[K, ncoeff]` |
+| `spin_fields(qu, level=0)` | `spin=2`: `(Q, U)` and `(chi_E, chi_B)` of a level |
 | `checkpoint()`, `restore(snapshot)` | save and restore the forward state (several objectives on one engine) |
 | `plan`, `ncoeff`, `info()` | the plan (family, scales, orientations, native level) and the engine's description |
 
@@ -104,4 +108,4 @@ Walk-throughs: {doc}`../tutorials/map_statistics` and {doc}`../tutorials/torch_l
   the first engine.
 
 Definitions, validation and timings: {doc}`../masked_statistics`, {doc}`../disc_cross_statistics`
-(section 2.2).
+(section 2.2), {doc}`../spin_scattering`.

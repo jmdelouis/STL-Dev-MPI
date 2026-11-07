@@ -16,6 +16,8 @@ target map(s) ─► statistics S(target)                               stl-stat
 white noise x ─► S(x) and ∂loss/∂x, block by block over the pyramid ─► L-BFGS ─► synthesis
                  loss = Σ_i w_i |S_i(x) − S_i(target)|²                stl-synth   · stl-ensemble · stl-synth2d
 your network  ─► S(patches), C_ℓ and their exact VJP in PyTorch         PatchEngine · SpectrumEngine
+(Q, U)        ─► E/B statistics, local, no SHT                          NativeEngine(spin=2)
+noisy map d   ─► U-Net u = f(d) trained by scattering losses            NativeUNet
 ```
 
 ## Where to go next

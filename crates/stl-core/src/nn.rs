@@ -370,7 +370,7 @@ pub fn concat(parts: &[(&[f32], usize)]) -> Vec<f32> {
     y
 }
 
-/// Reverse of [`concat`]: the cotangent of every part.
+/// Reverse of [`concat()`]: the cotangent of every part.
 pub fn concat_backward(dy: &[f32], widths: &[usize]) -> Vec<Vec<f32>> {
     let ct: usize = widths.iter().sum();
     let n = dy.len() / ct;
