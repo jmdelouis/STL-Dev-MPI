@@ -78,7 +78,7 @@ net.estimate_bias("joint", *bias_draws)
 net.step("joint", 1e-6)
 net.live("joint", draws(a.realizations), draws(a.realizations), lr=1e-6)
 rep["setup_s"] = time.perf_counter() - t0
-net.profile()
+engine_before = {k: s for k, (s, c) in net.profile().items() if c < 0}  # the engines' timers are cumulative
 
 
 def section(name, f, k):
@@ -86,7 +86,12 @@ def section(name, f, k):
     for _ in range(k):
         f()
     wall = (time.perf_counter() - t) / k
-    prof = {key: (s / k, c / k) for key, (s, c) in net.profile().items()}
+    raw = net.profile()
+    prof = {key: (s / k, c / k) for key, (s, c) in raw.items() if c >= 0}
+    for key, (s, c) in raw.items():
+        if c < 0:
+            prof[key] = ((s - engine_before.get(key, 0.0)) / k, -1)
+            engine_before[key] = s
     rep[name] = {"wall_s": wall, "phases": prof}
     print(f"{name}: {wall:.3f} s", flush=True)
 

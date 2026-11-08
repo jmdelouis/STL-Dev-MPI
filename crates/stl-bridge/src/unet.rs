@@ -105,6 +105,8 @@ trait Backend {
     /// `dst += s src` over the whole buffer.
     /// Waits for the device (the phase timers, `stl_core::prof`).
     fn sync(&self);
+    /// Cumulative phase seconds of the GPU statistics engines (`engine.<kind>.<phase>`).
+    fn engine_timers(&self) -> Vec<(String, f64)>;
     fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64);
     /// Builds (`Some`) or drops the pseudo-spectra of the cl term: anafast
     /// (`iter = 0`) up to `lmax` of the maps times each of the weights
@@ -404,6 +406,10 @@ impl Backend for CpuBack {
         }
     }
 
+    fn engine_timers(&self) -> Vec<(String, f64)> {
+        Vec::new()
+    }
+
     fn sync(&self) {}
 
     fn axpy(&self, dst: &mut Vec<f64>, src: &Vec<f64>, s: f64) {
@@ -613,6 +619,17 @@ impl Backend for GpuBack {
         } else {
             t.apply(&self.gpu, x)
         }
+    }
+
+    fn engine_timers(&self) -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        for kind in [Kind::Auto, Kind::Cross] {
+            if let Some((_, ev)) = self.evals.iter().find(|((k, _), _)| *k == kind) {
+                let name = if kind == Kind::Auto { "auto" } else { "cross" };
+                out.extend(ev.engine().timers.iter().map(|(p, s)| (format!("engine.{name}.{p}"), *s)));
+            }
+        }
+        out
     }
 
     fn sync(&self) {
@@ -2060,7 +2077,13 @@ pub unsafe extern "C" fn stlp_train_profile(p: *mut UNetHandle) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let h = &mut *p;
         with!(h, t => t.back.sync());
-        let tab: serde_json::Map<String, Value> = stl_core::prof::take().into_iter().map(|(k, (s, c))| (k, json!([s, c]))).collect();
+        let mut tab: serde_json::Map<String, Value> = stl_core::prof::take().into_iter().map(|(k, (s, c))| (k, json!([s, c]))).collect();
+        // The engines' own phase timers: cumulative since their creation (count -1).
+        if stl_core::prof::enabled() {
+            for (k, s) in with!(h, t => t.back.engine_timers()) {
+                tab.insert(k, json!([s, -1]));
+            }
+        }
         CString::new(Value::Object(tab).to_string()).unwrap().into_raw()
     })
 }

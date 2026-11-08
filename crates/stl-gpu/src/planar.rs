@@ -467,7 +467,7 @@ impl GpuPlanar {
                 targets.push((target, Vec::new()));
                 targets.len() - 1
             });
-            targets[k].1.push(Contrib { kind, pad: 0, a, b, g_re: g.re, g_im: g.im, n_total: norm, mask: 0 });
+            targets[k].1.push(Contrib { kind, pad: 0, a, b, g_re: g.re, g_im: g.im, inv_n: 1.0 / norm, mask: 0 });
         };
         for b in 0..self.batch {
             for i in self.ranges[t.n].clone() {

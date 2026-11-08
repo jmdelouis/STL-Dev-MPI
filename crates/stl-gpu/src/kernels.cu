@@ -1338,7 +1338,7 @@ struct Contrib {
     int pad;
     Operand a;
     Operand b;
-    double g_re, g_im, n_total;
+    double g_re, g_im, inv_n;   // inv_n = 1 / N (divided once on the host)
     u64 mask;   // as in ForwardItem: no contribution where the mask is 0
 };
 
@@ -1372,17 +1372,18 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
     for (u32 q = t.start; q < t.end; q++) {
         Contrib c = contribs[q];
         if (c.mask && ((const double*)c.mask)[i] == 0.0) continue;
-        double are, aim, bre, bim, vr = 0.0, vi = 0.0;
-        load(c.a, i, &are, &aim);
+        double are = 0.0, aim = 0.0, bre, bim, vr = 0.0, vi = 0.0;
+        // Only the operands a contribution reads (R_MEAN none, R_GA b only).
+        if (c.kind != R_MEAN && c.kind != R_GA) load(c.a, i, &are, &aim);
         switch (c.kind) {
             case R_MEAN:
-                vr = c.g_re / c.n_total;
+                vr = c.g_re * c.inv_n;
                 break;
             case R_VAR:
-                vr = 2.0 * c.g_re * are / c.n_total;
+                vr = 2.0 * c.g_re * are * c.inv_n;
                 break;
             case R_S1SAME: {
-                double scale = c.g_re / c.n_total;
+                double scale = c.g_re * c.inv_n;
                 double mag = hypot(are, aim);
                 double dd = mag == 0.0 ? 1.0 : mag;
                 vr = (scale * are) / dd;
@@ -1391,8 +1392,8 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
             }
             case R_S2SAME: {
                 double s = 2.0 * c.g_re;
-                vr = (s * are) / c.n_total;
-                vi = (s * aim) / c.n_total;
+                vr = (s * are) * c.inv_n;
+                vi = (s * aim) * c.inv_n;
                 break;
             }
             case R_S1X_A: {
@@ -1402,7 +1403,7 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 // g * rn(b)
                 pr = c.g_re * yr - c.g_im * yi;
                 pi = c.g_re * yi + c.g_im * yr;
-                root_modulus_vjp(are, aim, pr / c.n_total, pi / c.n_total, &vr, &vi);
+                root_modulus_vjp(are, aim, pr * c.inv_n, pi * c.inv_n, &vr, &vi);
                 break;
             }
             case R_S1X_B: {
@@ -1413,23 +1414,23 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 double gr = c.g_re, gi = -c.g_im;
                 pr = gr * yr - gi * yi;
                 pi = gr * yi + gi * yr;
-                root_modulus_vjp(bre, bim, pr / c.n_total, pi / c.n_total, &vr, &vi);
+                root_modulus_vjp(bre, bim, pr * c.inv_n, pi * c.inv_n, &vr, &vi);
                 break;
             }
             case R_GA: {
                 load(c.b, i, &bre, &bim);
                 double pr = c.g_re * bre - c.g_im * bim;
                 double pi = c.g_re * bim + c.g_im * bre;
-                vr = pr / c.n_total;
-                vi = pi / c.n_total;
+                vr = pr * c.inv_n;
+                vi = pi * c.inv_n;
                 break;
             }
             default: {
                 double gr = c.g_re, gi = -c.g_im;
                 double pr = gr * are - gi * aim;
                 double pi = gr * aim + gi * are;
-                vr = pr / c.n_total;
-                vi = pi / c.n_total;
+                vr = pr * c.inv_n;
+                vi = pi * c.inv_n;
             }
         }
         dre += vr;

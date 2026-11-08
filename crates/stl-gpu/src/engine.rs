@@ -420,7 +420,8 @@ pub(crate) struct Contrib {
     pub(crate) b: Operand,
     pub(crate) g_re: f64,
     pub(crate) g_im: f64,
-    pub(crate) n_total: f64,
+    /// `1 / N`, the normalisation of the mean.
+    pub(crate) inv_n: f64,
     /// Mask indicator at the first pixel (0: every pixel).
     pub(crate) mask: u64,
 }
@@ -1626,7 +1627,7 @@ impl<'a> GpuEngine<'a> {
                             let p = lv.own_pos0 + (blk.start - lv.owned.0) as usize;
                             (self.gpu.ptr(&mg[level]) + (((bi * ch + cc) * self.held(level) + p) as u64) * f64s, -1)
                         };
-                        let contrib = |kind: i32| Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, n_total, mask };
+                        let contrib = |kind: i32| Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, inv_n: 1.0 / n_total, mask };
                         let mut push = |(ptr, im): (u64, i64), kind: i32| {
                             let at = *index.entry(ptr).or_insert_with(|| {
                                 targets.push((ptr, im, Vec::new()));
