@@ -221,6 +221,118 @@ def check_eb(nside, j, channels, o, report=None):
     return out
 
 
+def check_ebqu(nside, j, channels, o, report=None):
+    """--pol ebqu: the front end "eb" against healpy (stl_port.denoise.eb_maps) and its
+    transpose (dot-product test); the joint step on (Q, U) whose terms are those of the
+    E and B maps of the output, against train_denoise.py's per-field terms of eb_maps(u)
+    summed, the gradient chained through the front end's transpose (frozen and live
+    biases); a central finite difference of the whole loss in the output u (float64)."""
+    from stl_port.denoise import eb_maps
+    channels = list(channels)
+    qu, fields = ("Q", "U"), ("E", "B")
+    net = _torch_net(nside, channels, 7)
+    w = dict(data=1.0, l1=1.0, l2=1.0, l3=1.0, cl=1.0)
+    nat = NativeUNet(nside, channels, cond=2, maps=2, j=j, loss=w, backend=BACKEND)
+    nat.load_state_dict(net.state_dict())
+    nat.set_masks(stat_masks(nside, STAT_CUTS))
+    cond = _cond(o)
+    nat.set_cond(cond)
+    nat.set_common(o["t857"])
+    d2 = _pair(o, "d")
+    scales = d2.std(1, ddof=1)
+    nat.set_joint(d2, fields, front="eb", scales=scales)
+    out = {"pol": "ebqu", "nside": nside, "j": j, "channels": channels}
+    # the front end: healpy's E/B maps, and the transpose
+    rng = np.random.default_rng(4)
+    x, y = rng.normal(size=(2, 3, 2, d2.shape[-1]))
+    fx = nat.front(x)
+    ef = _rel(fx, eb_maps(x))
+    dot = abs(np.sum(fx * y) - np.sum(x * nat.front(y, adjoint=True))) / abs(np.sum(fx * y))
+    out["front"] = {"eb_maps_max_rel": ef, "adjoint_rel": dot}
+    print(f"front eb: vs healpy eb_maps {ef:.2e}, adjoint {dot:.2e}", flush=True)
+    assert ef < 1e-10 and dot < 1e-12, (ef, dot)
+    # the fields of the terms: the E and B maps of the observations and pools, once
+    obs = {k: nat.front(_pair(o, k)) for k in ("d", "d1", "d2")}
+    pools = [nat.front(np.stack([o["fields"][f]["pools"][h] for f in qu], 1)) for h in range(3)]  # [S, 2, npix]
+    refs, cls = {}, {}
+    spectra = BinnedSpectra(nside, masks=CL_CUTS, backend=BACKEND)
+    for i, f in enumerate(fields):
+        fp = [np.ascontiguousarray(p[:, i]) for p in pools]
+        nat.set_field(f, obs["d"][i], obs["d1"][i], obs["d2"][i], *fp)
+        refs[f] = Reference(nside, j, dict(d=obs["d"][i], d1=obs["d1"][i], d2=obs["d2"][i], t857=o["t857"],
+                                           pools={"Q": fp}), "torch")
+        cls[f] = SpectrumLoss(spectra, obs["d1"][i], obs["d2"][i])
+    td, ts, tc = torch.as_tensor(d2)[None], torch.as_tensor(scales)[None, :, None], torch.as_tensor(cond)[None]
+
+    def native_terms(terms, backward=True):
+        u = nat.apply(d2, scale=scales)
+        parts = [cls[f](v, grad=True) for f, v in zip(fields, nat.front(u))]
+        if backward:
+            nat.apply(d2, scale=scales, cot=nat.front(np.stack([g for _, g in parts]), adjoint=True))
+        terms["cl"] = sum(v for v, _ in parts)
+        return terms
+
+    def reference(name, terms_of, got):
+        """terms_of(i, y_i) the reference terms of field i at the E/B map y_i (torch)."""
+        u = net(td, ts, cond=tc)[0]
+        yv = torch.tensor(eb_maps(u.detach().numpy()), requires_grad=True)
+        per = [terms_of(i, yv[i]) for i in range(2)]
+        ref = {t: sum(p[t] for p in per) for t in TERMS}
+        sum(ref.values()).backward()
+        gu = torch.as_tensor(nat.front(yv.grad.numpy(), adjoint=True))
+        et = {t: abs(got[t] - float(ref[t])) / abs(float(ref[t])) for t in TERMS}
+        net.zero_grad()
+        (u * gu).sum().backward()
+        eg, en = _grad_errors(net, nat)
+        out[name] = {"terms_native": {t: got[t] for t in TERMS}, "terms_reference": {t: float(ref[t]) for t in TERMS},
+                     "terms_max_rel": max(et.values()), "terms_rel": et, "gradients_max_rel": eg,
+                     "gradients_norm_rel": en}
+        print(f"{name}: terms {max(et.values()):.2e} ({', '.join(f'{t} {v:.1e}' for t, v in et.items())}), "
+              f"gradients {eg:.2e} (norm {en:.2e})", flush=True)
+        assert max(et.values()) < 1e-4 and eg < (1e-3 if nside < 64 else 5e-3) and en < 1e-3, (name, et, eg, en)
+
+    draws = (np.array([1, 3, 2, 4, 0, 5]), np.array([1.0, -1.0, -1.0, 1.0, 1.0, -1.0]))
+    u0 = net(td, ts, cond=tc)[0].detach().numpy()
+    y0 = eb_maps(u0)
+    bias = {f: refs[f].bias(y0[i], draws) for i, f in enumerate(fields)}
+    nat.estimate_bias("joint", *draws)
+    nat.zero_grad()
+    got = native_terms(nat.loss("joint", backward=True))
+    reference("ebqu frozen", lambda i, y: refs[fields[i]].frozen(y, bias[fields[i]]), got)
+    # the loss (frozen biases) as a function of the output u in float64, L(EB(u)), along a
+    # direction v of u: central difference against <F^T grad_y L, v>. (The network parameters
+    # are float32: a difference over them is dominated by rounding.) Without l2, whose chi2
+    # weights, the variances of Phi(d, u), depend on u but are held fixed in the gradient
+    # (as in train_denoise.py); the weights of data, l1, l3 and cl do not depend on u.
+    def loss_u(uu, grad=False):
+        yv = torch.tensor(eb_maps(uu), requires_grad=grad)
+        per = [refs[f].frozen(yv[i], bias[f]) for i, f in enumerate(fields)]
+        tot = sum(sum(p[t] for p in per) for t in TERMS if t != "l2")
+        if grad:
+            tot.backward()
+            return float(tot), nat.front(yv.grad.numpy(), adjoint=True)
+        return float(tot)
+
+    _, gu = loss_u(u0, grad=True)
+    v = rng.normal(size=u0.shape) * u0.std()
+    dirn = float(np.sum(gu * v))
+    fds = [(loss_u(u0 + h * v) - loss_u(u0 - h * v)) / (2 * h) for h in (1e-3, 1e-4)]
+    efd = abs(fds[-1] - dirn) / abs(dirn)
+    out["finite_difference"] = {"steps": [1e-3, 1e-4], "fd": fds, "gradient": dirn, "rel": efd}
+    print(f"ebqu finite difference in u: {', '.join(f'{x:.8e}' for x in fds)} vs gradient {dirn:.8e}, rel {efd:.2e}",
+          flush=True)
+    assert efd < 1e-4, efd
+    ddraws = (np.array([2, 0, 4, 5]), np.array([-1.0, 1.0, 1.0, -1.0]))
+    hdraws = (np.array([1, 3, 5, 0]), np.array([1.0, -1.0, 1.0, 1.0]))
+    nat.zero_grad()
+    got = native_terms(nat.live("joint", ddraws, hdraws, backward=True))
+    reference("ebqu live", lambda i, y: refs[fields[i]].live(y, ddraws, hdraws), got)
+    if report:
+        with open(report, "w") as fh:
+            json.dump(out, fh, indent=1)
+    return out
+
+
 def check_spin(nside, j, channels, o, report=None):
     """--pol spin: the joint step on (Q, U) with the eth front end against ChiTerms (--pol-stats chi) and
     the EE/BB spectrum loss of train_denoise.py (--cl-spin 2), the same draws."""
@@ -340,6 +452,12 @@ def test_joint_eb_matches_torch():
     check_eb(16, 3, [8, 16, 24], _synthetic(16))
 
 
+def test_joint_ebqu_matches_torch():
+    if torch is None:
+        return
+    check_ebqu(16, 3, [8, 16, 24], _synthetic(16))
+
+
 def test_joint_spin_matches_chiterms():
     if torch is None or BACKEND != "gpu" or not torch.cuda.is_available():
         return
@@ -350,7 +468,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--data", default=None)
     p.add_argument("--nside", type=int, default=16)
-    p.add_argument("--pol", default="both", choices=["eb", "spin", "both"])
+    p.add_argument("--pol", default="both", choices=["eb", "ebqu", "spin", "both"])
     p.add_argument("--out", default=None, help="report prefix: OUT_eb.json, OUT_spin.json")
     a = p.parse_args()
     if torch is None:
@@ -365,6 +483,8 @@ if __name__ == "__main__":
         n, ch, j, o = 16, [8, 16, 24], 3, _synthetic(16)
     if a.pol in ("eb", "both"):
         check_eb(n, j, ch, o, report=a.out and f"{a.out}_eb.json")
+    if a.pol in ("ebqu", "both"):
+        check_ebqu(n, j, ch, o, report=a.out and f"{a.out}_ebqu.json")
     if a.pol in ("spin", "both") and BACKEND == "gpu":
         check_spin(n, j, ch, o, report=a.out and f"{a.out}_spin.json")
     print("native joint tests passed")

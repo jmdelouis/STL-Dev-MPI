@@ -280,7 +280,7 @@ The three optimisers:
 
 A sharper comparison needs the 40 training simulations of the paper and longer runs.
 
-## 7. Joint network on (Q, U): `maps=2`, `--pol eb` and `--pol spin`
+## 7. Joint network on (Q, U): `maps=2`, `--pol eb`, `ebqu` and `spin`
 
 Steps 3 to 5 of the Rust-port plan of Healpix-STL-IA (`docs/rust_port.md` there): one network
 denoises the two maps of a polarisation pair together.
@@ -306,8 +306,26 @@ denoises the two maps of a polarisation pair together.
   averaged as in `train_denoise.py --pol-stats chi`, and `cl` is the EE/BB spectra of (Q, U)
   (`BinnedSpectra(spin=2)`).
 - **Caveat.** chi is the ell^2-weighted local E/B, not the harmonic E/B, so these statistics
-  differ from those of `r1k_eb`.
-- **Outputs.** `eval_{Q,U}.npz` is always in (Q, U), plus `eval_{E,B}.npz` with `eb`.
+  differ from those of `r1k_eb`. Its spectrum carries `(l+2)!/(l-2)!`, about `l^4`, so at
+  nside 256 the statistics hardly see the largest scales and the network over-removes there
+  (`n256_spin`, Healpix-STL-IA): prefer `eb` or `ebqu` at high nside.
+- **`--pol ebqu`.** The network works on (Q, U) and its output is `u` in (Q, U). The terms are
+  those of the harmonic E and B maps of the output, `EB(u)`, summed, with `cl` the scalar
+  spectra of `EB(u)`, as `train_denoise.py --pol-stats eb`. `EB` is the front end
+  `front="eb"` (`"eb:K"` for `iter=K`): the operator of `eb_maps` (spin-2 `map2alm` with
+  `iter=3`, `lmax = 3 nside - 1`, then the scalar `alm2map` of `a_E` and `a_B`), with its
+  exact transpose for the reverse pass. With the GPU backend it runs on the device
+  (`stl_gpu::GpuEb`, batched over pairs): the spin-2 synthesis comes from the covariant
+  Hessians of the scalar fields `Y(N_l a_E)`, `Y(N_l a_B)`, `N_l = sqrt((l-2)!/(l+2)!)`
+  (`Q = -(H_tt - H_pp)[psi_E] + 2 H_tp[psi_B]`, `U = -2 H_tp[psi_E] - (H_tt - H_pp)[psi_B]`),
+  through the device derivative transforms, and the analysis is its exact transpose; the CPU
+  backend uses the host `stl_core::sht::EbTransform` (spin-weighted recursions), the test
+  reference. The front end is linear, so the observations and noise pools are transformed
+  once at set-up (`front(x)` on all the draws in one call) and a bias estimate applies it
+  once, to `u`. Unlike `eb`, the part of `d` outside the E/B round trip
+  (`P(d) = d - QU(EB(d))`, about half of an FFP10 noise map's rms) is not passed through: the
+  network output replaces it.
+- **Outputs.** `eval_{Q,U}.npz` is always in (Q, U), plus `eval_{E,B}.npz` with `eb` and `ebqu`.
   `model.pt` declares `maps`, `pol`, the layers and the input scales.
 
 ### Validation (garoupe, T4 and CPU, nside 16, against torch)
@@ -320,6 +338,14 @@ denoises the two maps of a polarisation pair together.
 | eth front end vs `NativeEngine(spin=2)`; its transpose | 0; 7e-16 | |
 | `eb` joint step vs `train_denoise.py` per-field terms, frozen / live | 2.1e-7 / 1.4e-7 | 5.8e-6 / 4.9e-6 |
 | `spin` joint step vs `ChiTerms` + `BinnedSpectra(spin=2)`, frozen / live | 1.6e-7 / 1.2e-7 | 5.3e-6 / 3.6e-6 |
+| eb front end vs healpy `eb_maps` (host / device); its transpose | 2.5e-14 / 2.3e-14; 1.7e-13 / 8e-13 | |
+| device `GpuEb` vs host `EbTransform`, nside 8-32, forward / transpose / dot test | 8e-14 / 1.3e-13 / 3e-14 | |
+| `ebqu` joint step vs `train_denoise.py` per-field terms of `eb_maps(u)`, frozen / live | 1.3e-7 / 1.3e-7 | 2.7e-6 / 3.1e-6 |
+| `ebqu` loss of `eb_maps(u)` (float64) vs central difference in `u` (without `l2`) | | 6.5e-8 |
+
+The finite difference leaves out `l2`: its chi2 weights, the variances of `Phi(d, u)`, depend
+on `u` but are held fixed in the gradient, as in `train_denoise.py`. A difference over the
+float32 network parameters is dominated by rounding, hence the difference in `u`.
 
 The single-map tests (`test_native_unet`, `test_native_denoise`, the Rust U-Net fixtures) are
 unchanged.

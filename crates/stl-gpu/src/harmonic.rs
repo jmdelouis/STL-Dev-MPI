@@ -777,6 +777,179 @@ impl GpuSht {
     }
 }
 
+/// `(a_E, a_B)` pairs of packed coefficients, or `(Q, U)` pairs of maps, on the device.
+type Pair = (CudaSlice<f64>, CudaSlice<f64>);
+
+/// The harmonic E and B maps of `(Q, U)` pairs on the device, with the exact
+/// transpose: `stl_core::sht::EbTransform` (healpy `map2alm(pol=True,
+/// iter)` with `I = 0`, then `alm2map` of `a_E` and of `a_B`), batched over
+/// the pairs of `[b, 2, npix]` (in chunks that bound the derivative maps
+/// to `STL_EB_MB`, 512 by default).
+///
+/// The spin-2 synthesis is computed from the covariant Hessians of the
+/// scalar fields `psi_X = Y(N_l a_X)`, `N_l = sqrt((l - 2)! / (l + 2)!)`
+/// (`harmonic.cu`, `eb_from_hessians`), through the derivative transforms
+/// of [`GpuSht`]; the analysis is `A = Omega S^T / mult` (`S^T` the exact
+/// transpose of that synthesis), the adjoint of the synthesis as the
+/// host's `Sht::analysis_spin`; the iteration and the transpose are those
+/// of `EbTransform`.
+pub struct GpuEb {
+    /// The scalar transforms.
+    pub sht: GpuSht,
+    /// Iterations of the analysis (healpy's `iter`).
+    pub iter: usize,
+    chunk: usize,
+}
+
+impl GpuEb {
+    /// E/B maps of `nside` up to `lmax` with `iter` analysis iterations.
+    pub fn new(gpu: &Gpu, nside: usize, lmax: usize, iter: usize) -> Result<Self, String> {
+        let sht = GpuSht::new(gpu, &Sht::new(nside, lmax))?;
+        let budget = std::env::var("STL_EB_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(512) << 20;
+        let chunk = (budget / (10 * sht.npix * 8)).max(1);
+        Ok(GpuEb { sht, iter, chunk })
+    }
+
+    fn grid(&self) -> (u32, u32) {
+        ((self.sht.lmax + 1).div_ceil(256) as u32, (self.sht.lmax + 1) as u32)
+    }
+
+    /// A copy of `a` times `(m == 0 ? f0 : f1)`, and times `N_l` with `spin2`.
+    fn scaled(&self, gpu: &Gpu, a: &CudaSlice<f64>, f0: f64, f1: f64, spin2: bool) -> CudaSlice<f64> {
+        let c = gpu.copy(a);
+        let k = if spin2 { "sht_scale_spin2" } else { "sht_scale_m" };
+        gpu.launch(k, self.grid(), 256, &[gpu.a(&c), self.sht.lmax.into(), f0.into(), f1.into()]);
+        c
+    }
+
+    /// `S`: healpy's `alm2map_spin` (spin 2) of the pairs, `(Q, U)` maps.
+    fn synth(&self, gpu: &Gpu, alms: &[Pair]) -> Vec<Pair> {
+        let n = self.sht.npix;
+        let psi: Vec<CudaSlice<f64>> = alms.iter().flat_map(|(e, b)| [self.scaled(gpu, e, 1.0, 1.0, true), self.scaled(gpu, b, 1.0, 1.0, true)]).collect();
+        let d = self.sht.derivatives_many(gpu, &psi.iter().collect::<Vec<_>>());
+        (0..alms.len())
+            .map(|k| {
+                let (q, u) = (gpu.zeros::<f64>(n), gpu.zeros::<f64>(n));
+                gpu.launch1("eb_from_hessians", n, &[gpu.a(&d[2 * k]), gpu.a(&d[2 * k + 1]), n.into(), gpu.a(&q), gpu.a(&u)]);
+                (q, u)
+            })
+            .collect()
+    }
+
+    /// `S^T`: coefficient cotangents `(E, B)` from map cotangents `(Q, U)`.
+    fn synth_t(&self, gpu: &Gpu, maps: &[Pair]) -> Vec<Pair> {
+        let n = self.sht.npix;
+        let cots: Vec<CudaSlice<f64>> = maps
+            .iter()
+            .flat_map(|(q, u)| {
+                let (ce, cb) = (gpu.zeros::<f64>(5 * n), gpu.zeros::<f64>(5 * n));
+                gpu.launch1("eb_to_hessians", n, &[gpu.a(q), gpu.a(u), n.into(), gpu.a(&ce), gpu.a(&cb)]);
+                [ce, cb]
+            })
+            .collect();
+        let mut g = self.sht.derivatives_vjp_many(gpu, &cots.iter().collect::<Vec<_>>());
+        for a in &mut g {
+            gpu.launch("sht_scale_spin2", self.grid(), 256, &[gpu.a(a), self.sht.lmax.into(), 1.0.into(), 1.0.into()]);
+        }
+        let mut it = g.into_iter();
+        (0..maps.len()).map(|_| (it.next().unwrap(), it.next().unwrap())).collect()
+    }
+
+    /// `A = Omega S^T / mult`.
+    fn analysis(&self, gpu: &Gpu, maps: &[Pair]) -> Vec<Pair> {
+        let a = self.sht.area;
+        self.synth_t(gpu, maps).into_iter().map(|(e, b)| (self.scaled(gpu, &e, a, a / 2.0, false), self.scaled(gpu, &b, a, a / 2.0, false))).collect()
+    }
+
+    /// `A^T c = Omega S(c / mult)`.
+    fn analysis_t(&self, gpu: &Gpu, c: &[Pair]) -> Vec<Pair> {
+        let a = self.sht.area;
+        let s: Vec<Pair> = c.iter().map(|(e, b)| (self.scaled(gpu, e, a, a / 2.0, false), self.scaled(gpu, b, a, a / 2.0, false))).collect();
+        self.synth(gpu, &s)
+    }
+
+    /// `x + q y`, pair by pair.
+    fn axpy(&self, gpu: &Gpu, x: &[Pair], y: &[Pair], q: f64) -> Vec<Pair> {
+        x.iter().zip(y).map(|((a, b), (c, d))| (self.sht.combine(gpu, a, 1.0, c, q), self.sht.combine(gpu, b, 1.0, d, q))).collect()
+    }
+
+    /// The pairs `lo..hi` of `x` `[b, 2, npix]`.
+    fn pairs(&self, gpu: &Gpu, x: &CudaSlice<f64>, lo: usize, hi: usize) -> Vec<Pair> {
+        let n = self.sht.npix;
+        (lo..hi)
+            .map(|p| {
+                let (mut q, mut u) = (gpu.zeros::<f64>(n), gpu.zeros::<f64>(n));
+                copy_rows(gpu, x, 0, 2 * p * n, &mut q, 0, 0, n, 1);
+                copy_rows(gpu, x, 0, (2 * p + 1) * n, &mut u, 0, 0, n, 1);
+                (q, u)
+            })
+            .collect()
+    }
+
+    fn put(&self, gpu: &Gpu, out: &mut CudaSlice<f64>, lo: usize, maps: &[Pair]) {
+        let n = self.sht.npix;
+        for (k, (q, u)) in maps.iter().enumerate() {
+            copy_rows(gpu, q, 0, 0, out, 0, 2 * (lo + k) * n, n, 1);
+            copy_rows(gpu, u, 0, 0, out, 0, (2 * (lo + k) + 1) * n, n, 1);
+        }
+    }
+
+    /// `(a_E, a_B)` of the `(Q, U)` pairs: `a_0 = A x`, `a += A (x - S a)`.
+    pub fn alms(&self, gpu: &Gpu, maps: &[Pair]) -> Vec<Pair> {
+        let mut a = self.analysis(gpu, maps);
+        for _ in 0..self.iter {
+            let r = self.axpy(gpu, maps, &self.synth(gpu, &a), -1.0);
+            a = self.axpy(gpu, &a, &self.analysis(gpu, &r), 1.0);
+        }
+        a
+    }
+
+    /// The E and B maps `[b, 2, npix]` of the pairs `x` `[b, 2, npix]`.
+    pub fn apply(&self, gpu: &Gpu, x: &CudaSlice<f64>) -> CudaSlice<f64> {
+        let n = self.sht.npix;
+        assert_eq!(x.len() % (2 * n), 0, "pairs [b, 2, npix]");
+        let b = x.len() / (2 * n);
+        let mut out = gpu.zeros::<f64>(x.len());
+        let mut lo = 0;
+        while lo < b {
+            let hi = (lo + self.chunk).min(b);
+            let a = self.alms(gpu, &self.pairs(gpu, x, lo, hi));
+            let flat: Vec<&CudaSlice<f64>> = a.iter().flat_map(|(e, b)| [e, b]).collect();
+            let mut y = self.sht.synthesis_many(gpu, &flat).into_iter();
+            let maps: Vec<Pair> = (lo..hi).map(|_| (y.next().unwrap(), y.next().unwrap())).collect();
+            self.put(gpu, &mut out, lo, &maps);
+            lo = hi;
+        }
+        out
+    }
+
+    /// The transpose of [`apply`](Self::apply): `A^T sum_j (I - S^T A^T)^j Y^T g`.
+    pub fn adjoint(&self, gpu: &Gpu, g: &CudaSlice<f64>) -> CudaSlice<f64> {
+        let n = self.sht.npix;
+        assert_eq!(g.len() % (2 * n), 0, "pairs [b, 2, npix]");
+        let b = g.len() / (2 * n);
+        let mut out = gpu.zeros::<f64>(g.len());
+        let mut lo = 0;
+        while lo < b {
+            let hi = (lo + self.chunk).min(b);
+            let gm = self.pairs(gpu, g, lo, hi);
+            // Y^T = mult Y*
+            let flat: Vec<&CudaSlice<f64>> = gm.iter().flat_map(|(e, b)| [e, b]).collect();
+            let mut ys = self.sht.adjoint_synthesis_many(gpu, &flat).into_iter().map(|a| self.scaled(gpu, &a, 1.0, 2.0, false));
+            let c: Vec<Pair> = (lo..hi).map(|_| (ys.next().unwrap(), ys.next().unwrap())).collect();
+            let mut v: Vec<Pair> = c.iter().map(|(e, b)| (gpu.copy(e), gpu.copy(b))).collect();
+            let mut acc = c;
+            for _ in 0..self.iter {
+                v = self.axpy(gpu, &v, &self.synth_t(gpu, &self.analysis_t(gpu, &v)), -1.0);
+                acc = self.axpy(gpu, &acc, &v, 1.0);
+            }
+            self.put(gpu, &mut out, lo, &self.analysis_t(gpu, &acc));
+            lo = hi;
+        }
+        out
+    }
+}
+
 /// Sum over the `n` pixels at `a` (and `b`; device addresses, see
 /// [`Gpu::at`]), chunks of [`CHUNK`] in a fixed tree, then the chunks in
 /// order: mode 0 `sum a`, 1 `sum (a - shift)^2`, 2 `sum a^2 + b^2`, 3 `sum a b`.

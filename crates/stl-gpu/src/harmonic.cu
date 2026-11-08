@@ -783,3 +783,37 @@ extern "C" __global__ void leg_unpack_adj(const double* Y, int G, int kinds, i64
         alm[g * nalm + i] = v;
     }
 }
+
+// Spin-2 transforms through the covariant Hessians of scalar fields (GpuEb):
+// healpy's alm2map_spin(spin 2) of (a_E, a_B) is
+//   Q = -(H_tt - H_pp)[psi_E] + 2 H_tp[psi_B],  U = -2 H_tp[psi_E] - (H_tt - H_pp)[psi_B],
+// psi_X = Y(N_l a_X), N_l = sqrt((l - 2)! / (l + 2)!) (0 for l < 2), the
+// Hessians the derivative maps 2, 3, 4 of Sht::derivatives.
+
+// alm[(l, m)] *= N_l (m == 0 ? f0 : f1).  Grid as sht_scale_m.
+extern "C" __global__ void sht_scale_spin2(double2* alm, i64 lmax, double f0, double f1) {
+    i64 m = blockIdx.y;
+    i64 l = m + (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (l > lmax) return;
+    i64 i = alm_index(lmax, l, m);
+    double nl = l < 2 ? 0.0 : 1.0 / sqrt((double)(l - 1) * (double)l * (double)(l + 1) * (double)(l + 2));
+    alm[i] = c_scale(alm[i], nl * (m == 0 ? f0 : f1));
+}
+
+// (Q, U) of the derivative maps de, db [5, n] of psi_E and psi_B.
+extern "C" __global__ void eb_from_hessians(const double* de, const double* db, i64 n, double* q, double* u) {
+    i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= n) return;
+    q[p] = -(de[2 * n + p] - de[3 * n + p]) + 2.0 * db[4 * n + p];
+    u[p] = -2.0 * de[4 * n + p] - (db[2 * n + p] - db[3 * n + p]);
+}
+
+// Transpose of eb_from_hessians: the cotangents ce, cb [5, n] of the
+// derivative maps from those of (Q, U).
+extern "C" __global__ void eb_to_hessians(const double* gq, const double* gu, i64 n, double* ce, double* cb) {
+    i64 p = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= n) return;
+    double a = gq[p], b = gu[p];
+    ce[p] = 0.0; ce[n + p] = 0.0; ce[2 * n + p] = -a; ce[3 * n + p] = a; ce[4 * n + p] = -2.0 * b;
+    cb[p] = 0.0; cb[n + p] = 0.0; cb[2 * n + p] = -b; cb[3 * n + p] = b; cb[4 * n + p] = 2.0 * a;
+}

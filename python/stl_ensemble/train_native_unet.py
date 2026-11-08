@@ -40,7 +40,12 @@ whose terms are those of chi_E + i chi_B = conj-eth^2 (Q + iU) of the
 output (NativeEngine(spin=2)'s local E/B, ell^2-weighted, not the
 harmonic E and B; the masks eroded as there), averaged over the two
 (--pol-weight 0.5, as train_denoise.py --pol-stats chi), cl the EE/BB
-spectra of (Q, U). With eb and spin every step trains both fields: one
+spectra of (Q, U); ebqu, one network for (Q, U) whose terms are those
+of the harmonic E and B maps of its output, EB(u) (the transform of eb,
+applied in the trainer with its exact transpose; the inputs of the terms
+transformed once as in eb), summed over the two (--pol-weight 1), cl the
+scalar spectra of EB(u), the output u in (Q, U) directly (torch
+train_denoise.py --pol-stats eb). With eb, ebqu and spin every step trains both fields: one
 network pass, one set of draws for every term and both fields, the frozen
 biases of both refreshed together every --bias-every steps.
 
@@ -52,7 +57,7 @@ of N draws.
 
 Writes, as train_denoise.py: RUN/train.json (args, j, coefficients,
 parameters, noise_rms, loss_weights, seconds, loss_history, evals),
-RUN/eval_{Q,U}.npz (sky = d, d, u; also eval_{E,B}.npz with --pol eb) and
+RUN/eval_{Q,U}.npz (sky = d, d, u; also eval_{E,B}.npz with --pol eb and ebqu) and
 RUN/model.pt (when torch is importable; stlia.unet.load reads it, with
 "pol" and the transforms of its input and output declared), plus
 RUN/params.npy and RUN/history.json (the native records, with the
@@ -85,13 +90,13 @@ p.add_argument("--ksz", type=int, default=3)
 p.add_argument("--cond", default="none", choices=["none", "log857", "sigma", "log857+sigma"])
 p.add_argument("--loss", default="data=1,l1=1,l2=1,l3=1")
 p.add_argument("--real", action="store_true", help="accepted for train_denoise.py compatibility (always the PR3 maps)")
-p.add_argument("--pol", default="qu", choices=["qu", "eb", "spin"],
-               help="qu: Q and U alternately (maps=1); eb: one network on the E and B maps; spin: one network on (Q, U), "
-                    "statistics of chi_E, chi_B")
+p.add_argument("--pol", default="qu", choices=["qu", "eb", "ebqu", "spin"],
+               help="qu: Q and U alternately (maps=1); eb: one network on the E and B maps; ebqu: one network on (Q, U), "
+                    "statistics of its harmonic E and B maps; spin: one network on (Q, U), statistics of chi_E, chi_B")
 p.add_argument("--pol-weight", type=float, default=None, help="factor on the terms of each field (eb 1: sum, spin 0.5: mean)")
 p.add_argument("--input-scale", default="map", choices=["map", "shared"],
                help="joint network: the std of each input map, or one std of both (torch UNet(maps=2)'s d2.std())")
-p.add_argument("--eb-iter", type=int, default=3, help="--pol eb: healpy map2alm iterations of the E/B transforms")
+p.add_argument("--eb-iter", type=int, default=3, help="--pol eb, ebqu: healpy map2alm iterations of the E/B transforms")
 p.add_argument("--bias", default="frozen", choices=["frozen"])
 p.add_argument("--bias-warmup", type=int, default=0, help="first Adam steps with live biases")
 p.add_argument("--realizations", type=int, default=4, help="live biases: noise draws per step (B)")
@@ -228,10 +233,12 @@ if joint:
         in_scales = np.full(2, net_in.std(ddof=1)) if a.input_scale == "shared" else None
         net.set_joint(net_in, ("E", "B"), scales=in_scales, weight=pol_weight)
     else:
-        # the network works on (Q, U); its terms on chi = conj-eth^2 of the output
+        # the network works on (Q, U); its terms on chi = conj-eth^2 (spin) or
+        # on the harmonic E and B maps (ebqu) of the output
         net_in = d_qu
         in_scales = np.full(2, net_in.std(ddof=1)) if a.input_scale == "shared" else None
-        net.set_joint(net_in, ("E", "B"), front="eth", scales=in_scales, weight=pol_weight)
+        front = "eth" if a.pol == "spin" else f"eb:{a.eb_iter}"
+        net.set_joint(net_in, ("E", "B"), front=front, scales=in_scales, weight=pol_weight)
         tf = net.front
     fields = ("E", "B")
     d_f, hm_f, pools_f = tf(d_qu), [tf(h) for h in hm_qu], [tf(p) for p in pools_qu]
@@ -240,7 +247,7 @@ if joint:
         obs[f] = d_f[i]
         rms[f] = float(np.sqrt(np.mean(pools_f[0][:, i] ** 2)))
         net.set_field(f, d_f[i], hm_f[0][i], hm_f[1][i], *[np.ascontiguousarray(p[:, i]) for p in pools_f])
-        if w_cl and a.pol == "eb":
+        if w_cl and a.pol in ("eb", "ebqu"):
             cl_loss[f] = SpectrumLoss(spectra, hm_f[0][i], hm_f[1][i])
     if w_cl and a.pol == "spin":
         cl_loss["pair"] = SpectrumLoss(spectra, *hm_qu)  # EE, BB of (Q, U)
@@ -273,10 +280,12 @@ def cl_value(f, u, grad=False):
         return cl_loss[f](u, grad=grad)
     if a.pol == "spin":
         return cl_loss["pair"](u, grad=grad)
-    parts = [cl_loss[g](u[i], grad=grad) for i, g in enumerate(fields)]  # scalar spectra of E and B, summed
+    y = net.front(u) if a.pol == "ebqu" else u  # the E and B maps of the output
+    parts = [cl_loss[g](y[i], grad=grad) for i, g in enumerate(fields)]  # scalar spectra of E and B, summed
     if not grad:
         return sum(parts)
-    return sum(v for v, _ in parts), np.stack([g for _, g in parts])
+    g = np.stack([g for _, g in parts])
+    return sum(v for v, _ in parts), net.front(g, adjoint=True) if a.pol == "ebqu" else g
 
 
 def add_cl(f, terms, backward):
@@ -332,7 +341,7 @@ def evaluate(step, save=False):
     if save:
         for f in qu:
             np.savez(os.path.join(a.out, f"eval_{f}.npz"), sky=obs[f], d=obs[f], u=uq[f])
-        if a.pol == "eb":
+        if a.pol in ("eb", "ebqu"):
             for f in fields:
                 np.savez(os.path.join(a.out, f"eval_{f}.npz"), sky=obs[f], d=obs[f], u=uf[f])
     rec = {"step": step, "train_seconds": clock["train"],
@@ -444,6 +453,8 @@ try:
     state = {k: torch.as_tensor(v) for k, v in net.state_dict().items()}
     layers = {"qu": {}, "eb": {"input": f"E, B maps of (Q, U): healpy map2alm(pol=True, iter={a.eb_iter}), lmax 3 nside - 1",
                                "output": "u_QU = d_QU - QU(d_EB - u_EB), QU: map2alm of E, B then alm2map(pol=True)"},
+              "ebqu": {"input": "(Q, U)", "output": "(Q, U)",
+                       "statistics": f"E, B maps of the output: healpy map2alm(pol=True, iter={a.eb_iter}), lmax 3 nside - 1"},
               "spin": {"input": "(Q, U)", "output": "(Q, U)",
                        "statistics": "chi_E + i chi_B = conj-eth^2 (Q + iU), NativeEngine(spin=2)"}}[a.pol]
     torch.save({"state": state, "nside": n, "levels": levels, "channels": channels, "conv": "sphere", "gauge": a.gauge,

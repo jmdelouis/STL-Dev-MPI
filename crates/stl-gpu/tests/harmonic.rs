@@ -114,3 +114,33 @@ fn batched_transforms_match_the_host() {
         check("derivatives vjp", dev.derivatives_vjp_many(&gpu, &rc), want);
     }
 }
+
+/// The device E/B maps (`GpuEb`, spin 2 from the Hessians of scalar
+/// fields) against the host `EbTransform` (spin-weighted recursions, healpy
+/// to 1e-13) on a batch of pairs, iter 0 and 3, and their transposes; the
+/// dot-product test on the device.
+#[test]
+fn eb_transform_matches_host() {
+    let Some(g) = gpu() else { return };
+    for (nside, iter) in [(8usize, 0usize), (16, 3), (32, 3)] {
+        let lmax = 3 * nside - 1;
+        let host = stl_core::sht::EbTransform::new(nside, lmax, iter);
+        let dev = stl_gpu::GpuEb::new(&g, nside, lmax, iter).unwrap();
+        let n = 12 * nside * nside;
+        let x = noise(3 * 2 * n, 71 + nside as u64);
+        let y = noise(3 * 2 * n, 73 + nside as u64);
+        let (fh, th) = (host.apply(&x), host.adjoint(&y));
+        let fd = g.download(&dev.apply(&g, &g.upload(&x)));
+        let td = g.download(&dev.adjoint(&g, &g.upload(&y)));
+        let rel = |a: &[f64], b: &[f64]| {
+            let s = b.iter().fold(0f64, |m, v| m.max(v.abs()));
+            a.iter().zip(b).fold(0f64, |m, (p, q)| m.max((p - q).abs())) / s
+        };
+        let (ef, et) = (rel(&fd, &fh), rel(&td, &th));
+        let lhs: f64 = fd.iter().zip(&y).map(|(a, b)| a * b).sum();
+        let rhs: f64 = x.iter().zip(&td).map(|(a, b)| a * b).sum();
+        let dot = (lhs - rhs).abs() / lhs.abs();
+        println!("nside {nside} iter {iter}: forward {ef:.2e}, transpose {et:.2e}, dot {dot:.2e}");
+        assert!(ef < 1e-10 && et < 1e-10 && dot < 1e-12, "nside {nside}: {ef} {et} {dot}");
+    }
+}

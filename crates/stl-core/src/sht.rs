@@ -1075,6 +1075,129 @@ fn derivative_coefficients(ring: &Ring, m: usize) -> [[C64; 5]; 3] {
     [ka, kb, kc]
 }
 
+/// Harmonic E and B maps of `(Q, U)` pairs (NESTED), the linear map of
+/// `stl_port.denoise.eb_maps`: healpy `map2alm([0, Q, U], pol=True, iter)`
+/// then `alm2map` of `a_E` and of `a_B` (scalar maps), up to `lmax`; with
+/// its exact transpose.
+///
+/// The iterated analysis is `a_0 = A x`, `a_{k+1} = a_k + A (x - S a_k)`,
+/// i.e. `a = sum_{j <= iter} (I - A S)^j A x`, with `A` the spin-2
+/// analysis ([`Sht::analysis_spin`], `Omega S^dagger`) and `S` healpy's
+/// `alm2map_spin` synthesis, obtained from the transpose of `A` as `S a =
+/// A^T (mult a) / Omega` (`mult` = 1 for `m = 0`, 2 otherwise, under the
+/// convention of a coefficient counted once).  The transpose is `A^T sum_j
+/// (I - S^T A^T)^j Y^T`, `S^T = mult A / Omega`, `Y^T = mult Y*`.
+pub struct EbTransform {
+    /// The transforms (`nside`, `lmax`).
+    pub sht: Sht,
+    /// Iterations of the analysis (healpy's `iter`).
+    pub iter: usize,
+    mult: Vec<f64>,
+}
+
+impl EbTransform {
+    /// E/B maps of `nside` up to `lmax` (`3 nside - 1` as `eb_maps`) with
+    /// `iter` analysis iterations (3 as `eb_maps`).
+    pub fn new(nside: usize, lmax: usize, iter: usize) -> Self {
+        let sht = Sht::new(nside, lmax);
+        let mult = sht.lm().iter().map(|&(_, m)| if m == 0 { 1.0 } else { 2.0 }).collect();
+        EbTransform { sht, iter, mult }
+    }
+
+    fn scaled(&self, a: &[C64], s: f64) -> Vec<C64> {
+        a.iter().zip(&self.mult).map(|(v, w)| v * (w * s)).collect()
+    }
+
+    /// healpy's `alm2map_spin` (spin 2) of the `(a_E, a_B)` pairs.
+    pub fn synthesis_spin2(&self, alms: &[(Vec<C64>, Vec<C64>)]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let inv = 1.0 / self.sht.area();
+        let scaled: Vec<(Vec<C64>, Vec<C64>)> = alms.iter().map(|(e, b)| (self.scaled(e, inv), self.scaled(b, inv))).collect();
+        let refs: Vec<(&[C64], &[C64])> = scaled.iter().map(|(e, b)| (e.as_slice(), b.as_slice())).collect();
+        self.sht.analysis_spin_vjp(2, &refs)
+    }
+
+    /// Transpose of [`synthesis_spin2`](Self::synthesis_spin2): `mult A y / Omega`.
+    fn synthesis_spin2_t(&self, maps: &[(Vec<f64>, Vec<f64>)]) -> Vec<(Vec<C64>, Vec<C64>)> {
+        let inv = 1.0 / self.sht.area();
+        let refs: Vec<(&[f64], &[f64])> = maps.iter().map(|(q, u)| (q.as_slice(), u.as_slice())).collect();
+        self.sht.analysis_spin(2, &refs).into_iter().map(|(e, b)| (self.scaled(&e, inv), self.scaled(&b, inv))).collect()
+    }
+
+    fn analysis(&self, maps: &[(Vec<f64>, Vec<f64>)]) -> Vec<(Vec<C64>, Vec<C64>)> {
+        let refs: Vec<(&[f64], &[f64])> = maps.iter().map(|(q, u)| (q.as_slice(), u.as_slice())).collect();
+        self.sht.analysis_spin(2, &refs)
+    }
+
+    fn analysis_t(&self, cots: &[(Vec<C64>, Vec<C64>)]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let refs: Vec<(&[C64], &[C64])> = cots.iter().map(|(e, b)| (e.as_slice(), b.as_slice())).collect();
+        self.sht.analysis_spin_vjp(2, &refs)
+    }
+
+    fn pairs(&self, x: &[f64]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let n = self.sht.npix;
+        assert_eq!(x.len() % (2 * n), 0, "pairs [b, 2, npix]");
+        x.chunks(2 * n).map(|p| (p[..n].to_vec(), p[n..].to_vec())).collect()
+    }
+
+    /// `(a_E, a_B)` of every pair: healpy's iterated `map2alm(pol=True)`.
+    pub fn alms(&self, x: &[f64]) -> Vec<(Vec<C64>, Vec<C64>)> {
+        let maps = self.pairs(x);
+        let mut a = self.analysis(&maps);
+        for _ in 0..self.iter {
+            let back = self.synthesis_spin2(&a);
+            let res: Vec<(Vec<f64>, Vec<f64>)> = maps
+                .iter()
+                .zip(&back)
+                .map(|((q, u), (bq, bu))| (q.iter().zip(bq).map(|(x, y)| x - y).collect(), u.iter().zip(bu).map(|(x, y)| x - y).collect()))
+                .collect();
+            for ((e, b), (de, db)) in a.iter_mut().zip(self.analysis(&res)) {
+                e.iter_mut().zip(&de).for_each(|(v, d)| *v += d);
+                b.iter_mut().zip(&db).for_each(|(v, d)| *v += d);
+            }
+        }
+        a
+    }
+
+    /// The E and B maps `[b, 2, npix]` of the pairs `x` `[b, 2, npix]`.
+    pub fn apply(&self, x: &[f64]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(x.len());
+        for (e, b) in self.alms(x) {
+            out.extend(self.sht.synthesis(&e));
+            out.extend(self.sht.synthesis(&b));
+        }
+        out
+    }
+
+    /// The transpose of [`apply`](Self::apply): map cotangents of `(Q, U)`
+    /// `[b, 2, npix]` from those of `(E, B)` `[b, 2, npix]`.
+    pub fn adjoint(&self, g: &[f64]) -> Vec<f64> {
+        // Y^T: alm cotangents of the scalar syntheses.
+        let c: Vec<(Vec<C64>, Vec<C64>)> = self
+            .pairs(g)
+            .iter()
+            .map(|(ge, gb)| (self.scaled(&self.sht.adjoint_synthesis(ge), 1.0), self.scaled(&self.sht.adjoint_synthesis(gb), 1.0)))
+            .collect();
+        // sum_j (I - S^T A^T)^j c, then A^T.
+        let mut v = c.clone();
+        let mut acc = c;
+        for _ in 0..self.iter {
+            let st = self.synthesis_spin2_t(&self.analysis_t(&v));
+            for (((ve, vb), (se, sb)), (ae, ab)) in v.iter_mut().zip(&st).zip(acc.iter_mut()) {
+                ve.iter_mut().zip(se).for_each(|(x, y)| *x -= y);
+                vb.iter_mut().zip(sb).for_each(|(x, y)| *x -= y);
+                ae.iter_mut().zip(ve.iter()).for_each(|(x, y)| *x += y);
+                ab.iter_mut().zip(vb.iter()).for_each(|(x, y)| *x += y);
+            }
+        }
+        let mut out = Vec::with_capacity(g.len());
+        for (q, u) in self.analysis_t(&acc) {
+            out.extend(q);
+            out.extend(u);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1310,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// E/B maps: the transpose (`<F x, y> = <x, F^T y>`, iter 0 and 3), the
+    /// spin-2 synthesis as healpy's (`A S a = a` on a band-limited pure E
+    /// and pure B, to the quadrature error, which the iterations reduce).
+    #[test]
+    fn eb_transform_adjoint_and_iterations() {
+        for iter in [0usize, 3] {
+            let f = EbTransform::new(8, 23, iter);
+            let n = f.sht.npix;
+            let x: Vec<f64> = noise(4 * n, 31 + iter as u64);
+            let y: Vec<f64> = noise(4 * n, 41 + iter as u64);
+            let fx = f.apply(&x);
+            let fty = f.adjoint(&y);
+            let lhs: f64 = fx.iter().zip(&y).map(|(a, b)| a * b).sum();
+            let rhs: f64 = x.iter().zip(&fty).map(|(a, b)| a * b).sum();
+            assert!((lhs - rhs).abs() <= 1e-12 * lhs.abs().max(1.0), "iter {iter}: {lhs} {rhs}");
+        }
+        let f0 = EbTransform::new(16, 20, 0);
+        let f3 = EbTransform::new(16, 20, 3);
+        let mut e = random_alm(&f0.sht, 51);
+        let mut b = random_alm(&f0.sht, 53);
+        for (i, (l, _)) in f0.sht.lm().into_iter().enumerate() {
+            if l < 2 {
+                e[i] = C64::default();
+                b[i] = C64::default();
+            }
+        }
+        let (q, u) = f0.synthesis_spin2(&[(e.clone(), b.clone())]).pop().unwrap();
+        let x: Vec<f64> = q.into_iter().chain(u).collect();
+        let err = |f: &EbTransform| {
+            let (ae, ab) = f.alms(&x).pop().unwrap();
+            ae.iter().zip(&e).chain(ab.iter().zip(&b)).fold(0f64, |m, (p, q)| m.max((p - q).norm()))
+        };
+        let (e0, e3) = (err(&f0), err(&f3));
+        assert!(e0 < 1e-2 && e3 < 1e-2 * e0, "read back: iter 0 {e0}, iter 3 {e3}");
+    }
+
+    /// healpy's spin-2 synthesis (`EbTransform::synthesis_spin2`) from the
+    /// covariant Hessians of `psi_X = Y(N_l a_X)`, the formula of the device
+    /// transforms (`stl-gpu` `harmonic.cu`, `eb_from_hessians`): `Q = -(H_tt
+    /// - H_pp)[psi_E] + 2 H_tp[psi_B]`, `U = -2 H_tp[psi_E] - (H_tt -
+    /// H_pp)[psi_B]`.
+    #[test]
+    fn spin2_synthesis_from_hessians() {
+        let f = EbTransform::new(16, 40, 0);
+        let sht = &f.sht;
+        let mut e = random_alm(sht, 61);
+        let mut b = random_alm(sht, 63);
+        let mut ne = e.clone();
+        let mut nb = b.clone();
+        for (i, (l, _)) in sht.lm().into_iter().enumerate() {
+            if l < 2 {
+                e[i] = C64::default();
+                b[i] = C64::default();
+            }
+            let n = if l < 2 { 0.0 } else { 1.0 / (((l - 1) * l * (l + 1) * (l + 2)) as f64).sqrt() };
+            ne[i] = e[i] * n;
+            nb[i] = b[i] * n;
+        }
+        let (q, u) = f.synthesis_spin2(&[(e, b)]).pop().unwrap();
+        let de = sht.derivatives(&ne);
+        let db = sht.derivatives(&nb);
+        let mut err = 0f64;
+        for p in 0..sht.npix {
+            let qq = -(de[2][p] - de[3][p]) + 2.0 * db[4][p];
+            let uu = -2.0 * de[4][p] - (db[2][p] - db[3][p]);
+            err = err.max((qq - q[p]).abs()).max((uu - u[p]).abs());
+        }
+        let scale = q.iter().chain(&u).fold(0f64, |m, v| m.max(v.abs()));
+        assert!(err < 1e-12 * scale, "{}", err / scale);
     }
 
     /// Derivative maps of `Y_20 + Y_21` against finite differences of the

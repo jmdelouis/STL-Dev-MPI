@@ -24,7 +24,7 @@ from stl_port.denoise import BinnedSpectra, SpectrumLoss, conditioning, eb_maps
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
 p.add_argument("--nside", type=int, default=64)
-p.add_argument("--pol", choices=["eb", "spin"], default="spin")
+p.add_argument("--pol", choices=["eb", "ebqu", "spin"], default="spin")
 p.add_argument("--sims", default="10-15")
 p.add_argument("--repeat", type=int, default=5)
 p.add_argument("--bias-realizations", type=int, default=8)
@@ -63,6 +63,10 @@ if a.pol == "eb":
     tf = eb_maps
     x = eb_maps(qu)
     net.set_joint(x, ("E", "B"))
+elif a.pol == "ebqu":
+    x = qu
+    net.set_joint(x, ("E", "B"), front="eb")
+    tf = net.front
 else:
     x = qu
     net.set_joint(x, ("E", "B"), front="eth", weight=0.5)
@@ -81,8 +85,10 @@ else:
     cls = [SpectrumLoss(spectra, fh[0][i], fh[1][i]) for i in range(2)]
 
     def cl_grad(u):
-        parts = [c(u[i], grad=True) for i, c in enumerate(cls)]
-        return sum(v for v, _ in parts), np.stack([g for _, g in parts])
+        y = net.front(u) if a.pol == "ebqu" else u
+        parts = [c(y[i], grad=True) for i, c in enumerate(cls)]
+        g = np.stack([g for _, g in parts])
+        return sum(v for v, _ in parts), net.front(g, adjoint=True) if a.pol == "ebqu" else g
 rng = np.random.default_rng(0)
 draws = (rng.integers(0, len(sims), a.bias_realizations), rng.choice([-1.0, 1.0], a.bias_realizations))
 rep["setup_s"] = time.perf_counter() - t0
@@ -107,7 +113,7 @@ cot = rng.normal(size=x.shape)
 rep["network_forward_backward_s"], _ = timed(lambda: net.apply(x, cot=cot))
 u = net.apply(x)
 rep["cl_spectra_and_gradient_s"], _ = timed(lambda: cl_grad(u))
-if a.pol == "spin":
+if a.pol in ("spin", "ebqu"):
     rep["front_s"], _ = timed(lambda: net.front(x))
     rep["front_adjoint_s"], _ = timed(lambda: net.front(x, adjoint=True))
 # statistics forward and reverse: the loss without the network passes and the front end

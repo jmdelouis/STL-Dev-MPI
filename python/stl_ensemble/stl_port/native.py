@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-09-v12"
+SCRIPT_VERSION = "2026-11-10-v13"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -902,7 +902,9 @@ class NativeUNet:
         the terms of its two outputs (set_field), the front end from the
         output to those fields (None: identity; "eth": chi_E + i chi_B =
         conj-eth^2 (Q + iU) at level 0, as NativeEngine(spin=2), the masks
-        then eroded as there), the input scales (default: the std of each
+        then eroded as there; "eb" or "eb:K": the harmonic E and B maps of
+        (Q, U), stl_port.denoise.eb_maps with iter=K (3), masks unchanged),
+        the input scales (default: the std of each
         map) and the factor on the terms of each field."""
         with self._lock:
             self._open()

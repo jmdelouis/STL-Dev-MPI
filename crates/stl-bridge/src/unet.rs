@@ -28,7 +28,8 @@
 //!
 //! Joint pair (`maps` = 2, `stlp_train_set_joint`): one network maps an
 //! input pair (E, B; or Q, U) to an output pair `u`; a linear front end `F`
-//! (identity, or `conj-eth^2` from (Q, U) to `(chi_E, chi_B)`) gives the two
+//! (identity, `conj-eth^2` from (Q, U) to `(chi_E, chi_B)`, or the harmonic
+//! E and B maps of (Q, U)) gives the two
 //! fields of the terms, `F u`, whose observations and noise pools are set
 //! as two fields (already in the domain of `F`).  A joint step runs the
 //! network once, sums the terms of both fields (times a factor), and sends
@@ -90,6 +91,12 @@ trait Backend {
     fn exact(&self, term: &str) -> Vec<bool>;
     /// Geometry of the statistics engines.
     fn geometry(&self) -> &LocalGeometry;
+    /// Builds (`Some(iter)`) or drops the harmonic E/B transform of [`eb`](Self::eb).
+    fn set_eb(&mut self, iter: Option<usize>);
+    /// The harmonic E and B maps of the `(Q, U)` pairs `x` `[b, 2, npix]`, or
+    /// with `adjoint` its transpose (`stl_core::sht::EbTransform`; on the
+    /// device, `stl_gpu::GpuEb`).
+    fn eb(&self, x: &Self::Map, adjoint: bool) -> Self::Map;
 }
 
 /// Engine geometry shared by the backends (boxed: the engines borrow it).
@@ -162,6 +169,12 @@ struct CpuBack {
     adam: Adam,
     cond: Vec<Vec<f32>>,
     stats: Stats,
+    eb: Option<stl_core::sht::EbTransform>,
+}
+
+/// `nside` of `npix = 12 nside^2`.
+fn nside_of(npix: usize) -> usize {
+    ((npix / 12) as f64).sqrt().round() as usize
 }
 
 impl Backend for CpuBack {
@@ -287,6 +300,20 @@ impl Backend for CpuBack {
     fn geometry(&self) -> &LocalGeometry {
         &self.stats.geo
     }
+
+    fn set_eb(&mut self, iter: Option<usize>) {
+        let ns = nside_of(self.npix());
+        self.eb = iter.map(|k| stl_core::sht::EbTransform::new(ns, 3 * ns - 1, k));
+    }
+
+    fn eb(&self, x: &Vec<f64>, adjoint: bool) -> Vec<f64> {
+        let t = self.eb.as_ref().expect("no E/B transform (front eb)");
+        if adjoint {
+            t.adjoint(x)
+        } else {
+            t.apply(x)
+        }
+    }
 }
 
 // -- device backend --------------------------------------------------------------
@@ -300,6 +327,7 @@ struct GpuBack {
     /// Options of the statistics engines (`stlp_new`'s defaults).
     opts: GpuOptions,
     stats: Stats,
+    eb: Option<stl_gpu::GpuEb>,
 }
 
 #[cfg(feature = "gpu")]
@@ -437,6 +465,20 @@ impl Backend for GpuBack {
     fn geometry(&self) -> &LocalGeometry {
         &self.stats.geo
     }
+
+    fn set_eb(&mut self, iter: Option<usize>) {
+        let ns = nside_of(self.npix());
+        self.eb = iter.map(|k| stl_gpu::GpuEb::new(&self.gpu, ns, 3 * ns - 1, k).expect("device E/B transform"));
+    }
+
+    fn eb(&self, x: &Self::Map, adjoint: bool) -> Self::Map {
+        let t = self.eb.as_ref().expect("no E/B transform (front eb)");
+        if adjoint {
+            t.adjoint(&self.gpu, x)
+        } else {
+            t.apply(&self.gpu, x)
+        }
+    }
 }
 
 // -- trainer ---------------------------------------------------------------------
@@ -493,16 +535,27 @@ struct Field<M> {
 
 /// The joint network (`maps` = 2): its input `[2, npix]` and scales, the
 /// fields of the terms of its two outputs, and the linear front end from
-/// the output to those fields (`None`: the outputs are the fields; spin 2:
-/// `chi_E + i chi_B = conj-eth^2 (Q + iU)` at level 0, the scalar pyramid
-/// of `NativeEngine(spin=2)`).
+/// the output to those fields (`None`: the outputs are the fields).
 struct Joint<M> {
     d: M,
     scales: [f64; 2],
     fields: [u32; 2],
-    front: Option<SpinPyramid>,
+    front: Option<Front>,
     /// Factor on the terms of every field (0.5: their mean over the pair).
     weight: f64,
+}
+
+/// Linear front end of the joint pair, from the network output `[2, npix]`
+/// to the fields of its terms (on `[b, 2, npix]` maps).
+enum Front {
+    /// `chi_E + i chi_B = conj-eth^2 (Q + iU)` at level 0, the scalar
+    /// pyramid of `NativeEngine(spin=2)` (masks eroded as there; host).
+    Eth(SpinPyramid),
+    /// The harmonic E and B maps of `(Q, U)`, `stl_port.denoise.eb_maps`
+    /// (healpy `map2alm(pol=True, iter)` then `alm2map`, `lmax = 3 nside -
+    /// 1`), by the backend ([`Backend::eb`]: on the device with the GPU
+    /// backend); full sky, the masks are not eroded.
+    Eb,
 }
 
 struct Trainer<B: Backend> {
@@ -606,13 +659,24 @@ impl<B: Backend> Trainer<B> {
     /// The front end of `f` applied to the output `u` (`None`: identity).
     fn front(&self, f: u32, u: &B::Map) -> Option<B::Map> {
         let s = (f == JOINT).then(|| self.joint().front.as_ref()).flatten()?;
-        Some(self.back.upload(&s.eth[0].apply(&self.back.download(u), s.threads)))
+        Some(self.apply_front(s, u, false))
+    }
+
+    /// The front end `s` (or its transpose) on `[b, 2, npix]` maps.
+    fn apply_front(&self, s: &Front, x: &B::Map, adjoint: bool) -> B::Map {
+        match s {
+            Front::Eth(p) => {
+                let h = self.back.download(x);
+                self.back.upload(&if adjoint { p.eth[0].adjoint(&h, p.threads) } else { p.eth[0].apply(&h, p.threads) })
+            }
+            Front::Eb => self.back.eb(x, adjoint),
+        }
     }
 
     /// Transpose of [`front`](Self::front).
     fn front_adjoint(&self, f: u32, g: B::Map) -> B::Map {
         match (f == JOINT).then(|| self.joint().front.as_ref()).flatten() {
-            Some(s) => self.back.upload(&s.eth[0].adjoint(&self.back.download(&g), s.threads)),
+            Some(s) => self.apply_front(s, &g, true),
             None => g,
         }
     }
@@ -996,8 +1060,8 @@ fn install_masks(h: &mut UNetHandle) {
     let w = h.mask_weights.clone();
     with!(h, t => {
         let masks = (!w.is_empty()).then(|| match t.joint.as_ref().and_then(|j| j.front.as_ref()) {
-            Some(s) => Masks::from_levels(w.iter().map(|m| keep_nonempty(scalar_pyramid_valid(t.back.geometry(), levels, s.valid_rows(m).swap_remove(0)))).collect()),
-            None => Masks::from_weights(nside, levels, w),
+            Some(Front::Eth(s)) => Masks::from_levels(w.iter().map(|m| keep_nonempty(scalar_pyramid_valid(t.back.geometry(), levels, s.valid_rows(m).swap_remove(0)))).collect()),
+            _ => Masks::from_weights(nside, levels, w),
         });
         t.back.set_masks(masks);
         t.fields.values_mut().for_each(|f| {
@@ -1053,7 +1117,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
         let backend = v["backend"].as_str().unwrap_or("cpu");
         let inner = match backend {
             "cpu" => AnyTrainer::Cpu(Trainer {
-                back: CpuBack { engines: HashMap::new(), adam: Adam::new(size), g: vec![0.0; size], w, cond: vec![Vec::new(); net.stencils.len()], net, stats },
+                back: CpuBack { engines: HashMap::new(), adam: Adam::new(size), g: vec![0.0; size], w, cond: vec![Vec::new(); net.stencils.len()], net, stats, eb: None },
                 weights,
                 t857: None,
                 fields: HashMap::new(),
@@ -1078,7 +1142,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all })
+                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats, eb: None }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
@@ -1318,7 +1382,10 @@ pub unsafe extern "C" fn stlp_train_set_field(
 /// simulations of the noise pools in the same rows), the front end `front`
 /// (`"none"` or null: identity; `"eth"`: `conj-eth^2` of `(Q, U)` at level
 /// 0 with a `spin_kernel` stencil (5), the masks then eroded as
-/// `NativeEngine(spin=2)`'s) and the factor `weight` on the terms of each
+/// `NativeEngine(spin=2)`'s; `"eb"` or `"eb:K"`: the harmonic E and B maps
+/// of `(Q, U)`, healpy `map2alm(pol=True, iter=K)` (K = 3) then `alm2map`,
+/// `lmax = 3 nside - 1`, as `stl_port.denoise.eb_maps`, masks unchanged)
+/// and the factor `weight` on the terms of each
 /// field.  The `stlp_train_*` calls on field `0xFFFFFFFF` then train the
 /// pair.  0, or -1 on failure.
 #[no_mangle]
@@ -1337,12 +1404,17 @@ pub unsafe extern "C" fn stlp_train_set_joint(p: *mut UNetHandle, d: *const f64,
         let kind = if front.is_null() { "none".to_string() } else { CStr::from_ptr(front).to_str().expect("front: UTF-8").to_string() };
         let nside = h.config["nside"].as_u64().unwrap() as i64;
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let spin = match kind.as_str() {
-            "none" => None,
-            "eth" => Some(SpinPyramid::new(nside, 1, integer(&h.config, "spin_kernel", 5), threads)),
-            other => panic!("front must be none or eth, not {other:?}"),
+        let (spin, eb) = match kind.as_str() {
+            "none" => (None, None),
+            "eth" => (Some(Front::Eth(SpinPyramid::new(nside, 1, integer(&h.config, "spin_kernel", 5), threads))), None),
+            k if k == "eb" || k.starts_with("eb:") => {
+                let iter: usize = k.strip_prefix("eb:").map_or(3, |v| v.parse().expect("front eb:K, K the iterations"));
+                (Some(Front::Eb), Some(iter))
+            }
+            other => panic!("front must be none, eth, eb or eb:K, not {other:?}"),
         };
         with!(h, t => {
+            t.back.set_eb(eb);
             t.joint = Some(Joint { d: t.back.upload(dv), scales: [sc[0], sc[1]], fields: [f0, f1], front: spin, weight });
         });
         install_masks(h);
@@ -1363,7 +1435,7 @@ pub unsafe extern "C" fn stlp_train_front(p: *mut UNetHandle, x: *const f64, b: 
         let o = std::slice::from_raw_parts_mut(out, len);
         with!(h, t => {
             match t.joint.as_ref().and_then(|j| j.front.as_ref()) {
-                Some(s) => o.copy_from_slice(&if adjoint { s.eth[0].adjoint(x, s.threads) } else { s.eth[0].apply(x, s.threads) }),
+                Some(s) => o.copy_from_slice(&t.back.download(&t.apply_front(s, &t.back.upload(x), adjoint))),
                 None => o.copy_from_slice(x),
             }
         });
