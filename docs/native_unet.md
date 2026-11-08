@@ -412,3 +412,37 @@ The two per-map runs shared one T4, hence their doubled step time.
   0.55, 1.16 at |b| > 60°), where torch `t64_jchi` removes 1.65 (3.8 at |b| > 60°).
 - **Spread.** These are single trainings, and two trainings differ by a large fraction of the
   noise (Healpix-STL-IA paper). Differences below about 0.2 are within the spread.
+
+### `--pol ebqu` against `--pol eb`
+
+Logs, profiles and `train.json` in `docs/runs/native_ebqu/`.
+
+**Cost per step** (one T4, `tests/profile_native_joint.py`: frozen biases, `data + l1 + l2 + l3
++ cl`, channels 32-128, no statistics masks), seconds:
+
+| | eb n128 | ebqu n128 | eb n256 | ebqu n256 |
+|---|---|---|---|---|
+| whole step | 2.42 | 3.22 | 13.4 | 16.4 |
+| E/B front end + transpose (device) | | 0.20 + 0.19 | | 0.71 + 0.67 |
+| cl spectra and gradient | 0.10 | 0.49 | 0.32 | 1.71 |
+| bias estimate (8 draws, both fields) | 3.40 | 3.60 | 19.6 | 20.6 |
+| set-up transforms of the data and pools | 19.3 (healpy) | 3.3 (device) | 46.7 | 11.2 |
+
+The `cl` term of the driver applies the front end and its transpose once more (from Python):
+moving `cl` into the trainer would save one front pass per step. The T4 runs float64 at 1/32
+of its float32 rate, so the transforms weigh less on an A100.
+
+**nside 64** (1000 Adam steps, the options of `n256_eb_c16`: warmup 200 steps of live biases,
+40 draws every 50 steps, stat masks 0, 20, 30, 45°, cl masks 0, 30, 45, 60°, cond
+log857+sigma, simulations 10-49, channels 16-64, per-map input scales, seed 0). `d - u` over
+the noise rms, split into the E/B round trip `QU(EB(d - u))` and `P(d - u)`, `P(x) = x -
+QU(EB(x))` (`P` holds 0.43 and 0.39 of the rms of an FFP10 noise map in Q and U):
+
+| run | d - u (Q, U) | inside E/B | P part | eval err/noise E, B |
+|---|---|---|---|---|
+| eb | 0.494, 0.424 | 0.494, 0.423 | 0.010, 0.011 | 0.545, 0.438 |
+| ebqu | 0.484, 0.421 | 0.472, 0.416 | 0.106, 0.067 | 0.489, 0.446 |
+
+With `ebqu` the network is free to change `P(u)`, which `eb` passes through; the loss does not
+constrain `P(u)` (its terms read `EB(u)`), so how much of `P(d)` the output removes depends on
+the network, and at nside 64 it removes a small part of it (0.11 and 0.07 of the noise rms).

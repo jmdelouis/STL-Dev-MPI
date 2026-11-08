@@ -1,0 +1,29 @@
+######## stl-core sht
+test sht::tests::rings_match_pixel_centres ... ok
+test sht::tests::synthesis_of_low_multipoles ... ok
+test sht::tests::derivatives_match_finite_differences ... ok
+test sht::tests::scaled_recursion ... ok
+test sht::tests::spin2_synthesis_from_hessians ... ok
+test sht::tests::spin_adjoint ... ok
+test sht::tests::adjoints_and_inverse ... ok
+test sht::tests::eb_transform_adjoint_and_iterations ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.06s
+######## stl-gpu harmonic
+test batched_transforms_match_the_host ... ok
+nside 8 iter 0: forward 7.88e-15, transpose 6.44e-15, dot 8.67e-15
+nside 16 iter 3: forward 1.59e-14, transpose 1.71e-14, dot 3.19e-15
+nside 32 iter 3: forward 8.21e-14, transpose 1.32e-13, dot 2.70e-14
+test eb_transform_matches_host ... ok
+test device_transforms_match_the_host ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.69s
+######## build gpu2
+    Finished `release` profile [optimized + debuginfo] target(s) in 51.15s
+======== gpu test_native_joint --pol ebqu
+network maps=2: output 1.05e-06, gradients 1.78e-05 (norm 7.83e-07)
+front eth: chi vs NativeEngine(spin=2) 0.00e+00, adjoint 7.28e-16
+front eb: vs healpy eb_maps 2.27e-14, adjoint 8.26e-13
+ebqu frozen: terms 1.28e-07 (data 5.5e-08, l1 4.0e-08, l2 1.0e-08, l3 2.6e-08, cl 1.3e-07), gradients 2.66e-06 (norm 5.49e-07)
+ebqu finite difference in u: -2.54900694e+01, -2.54899063e+01 vs gradient -2.54899046e+01, rel 6.46e-08
+ebqu live: terms 1.28e-07 (data 4.7e-08, l1 3.3e-08, l2 2.0e-08, l3 2.2e-08, cl 1.3e-07), gradients 3.06e-06 (norm 4.72e-07)
+native joint tests passed
+ALLDONE
