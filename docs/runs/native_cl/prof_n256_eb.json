@@ -1,0 +1,27 @@
+{
+ "nside": 256,
+ "pol": "eb",
+ "sims": 6,
+ "channels": [
+  32,
+  64,
+  96,
+  128,
+  128,
+  128
+ ],
+ "setup_transform_s": 17.367624647915363,
+ "setup_s": 69.02853686688468,
+ "bias_estimate_s": 19.753509119153023,
+ "step_s": 13.55493649840355,
+ "loss_backward_s": 11.794972093931088,
+ "loss_forward_s": 4.459613770712167,
+ "network_forward_s": 0.37885680903370184,
+ "network_forward_backward_s": 1.1270257582267125,
+ "cl_spectra_and_gradient_s": 0.32384490640833974,
+ "statistics_forward_s": 4.080756961678465,
+ "statistics_backward_s": 6.587189374025911,
+ "step_native_cl_s": 11.998819317979118,
+ "loss_backward_native_cl_s": 12.015704144258052,
+ "cl_native_s": 0.22073205032696386
+}

@@ -118,8 +118,12 @@ Driver: `python/stl_ensemble/train_native_unet.py`, the `--real --bias frozen` r
     `C_b(m d1, m d2)` against `C_b(m u, m u)` under the apodised galactic masks `--cl-masks`
     (`--cl-lmin 10`, `--cl-width 30`, `--cl-lmax 2 nside - 1`, `--cl-apod 5`): pseudo-spectra
     divided by `mean(m^2)`, a reduced chi^2 with the Gaussian variance of the target bins, no
-    noise bias (`stl_port.denoise`, over `SpectrumEngine`). The driver adds its cotangent
-    through `apply(d, cot=...)` before the Adam update (one more network forward per step).
+    noise bias (the normalisation of `stl_port.denoise.SpectrumLoss`). By default the trainer
+    computes it (`set_cl`, `stlp_train_set_cl`) on the output it already has, with the other
+    terms, and adds its cotangent to the same backward pass: one network forward and one
+    backward per step, the masked anafast, `C_l` and their VJP on the device (`GpuSht`, `GpuEb`
+    for spin 2). `--cl-engine python` keeps the former driver path (`SpectrumLoss` from Python,
+    its cotangent through `apply(d, cot=...)`: one more network forward and backward per step).
   - `--stat-masks 0,20,30,45`: the statistics averaged under `|b| > b0` (`set_masks`), every
     coefficient once per mask with its ergodic weight and its own frozen bias.
   - `--cond none|log857|sigma|log857+sigma`: `sigma` is `0.5 log` of the mean over the fields
@@ -144,8 +148,9 @@ Other calls:
 C ABI (`crates/stl-bridge/src/unet.rs`):
 - `stlp_unet_new` / `_free` / `_info` / `_get_params` / `_set_params` / `_get_grads` /
   `_zero_grad` / `_adam` / `_set_cond` / `_apply`;
-- `stlp_train_set_masks` / `_set_common` / `_set_field` / `_bias` / `_loss` / `_step` /
-  `_lbfgs`.
+- `stlp_train_set_masks` / `_set_common` / `_set_field` / `_set_joint` / `_front` / `_set_cl` /
+  `_bias` / `_loss` / `_live` / `_step` / `_lbfgs`; the terms are `[total, data, l1, l2, l3, cl]`
+  (`cl` is 0 without `_set_cl`).
 
 ## 4. Validation
 
@@ -446,3 +451,61 @@ QU(EB(x))` (`P` holds 0.43 and 0.39 of the rms of an FFP10 noise map in Q and U)
 With `ebqu` the network is free to change `P(u)`, which `eb` passes through; the loss does not
 constrain `P(u)` (its terms read `EB(u)`), so how much of `P(d)` the output removes depends on
 the network, and at nside 64 it removes a small part of it (0.11 and 0.07 of the noise rms).
+
+### The cl term in the trainer (`set_cl`)
+
+The trainer computes `cl` with the other terms (`stlp_train_set_cl`): the masked anafast of the
+output after the front end (spin 0: the E and B maps of `eb` and `ebqu`, the field of `qu`,
+both maps in one batch of transforms; spin 2: the EE and BB of the `(Q, U)` output of `spin`),
+`C_l`, binning, chi^2 and the VJP on the device, the map cotangent added before the front end's
+transpose (spin 0) or after it (spin 2). A step runs one network forward and one backward
+instead of two; the live warm-up and the frozen steps alike. Logs and profiles in
+`docs/runs/native_cl/`.
+
+**Against the Python path** (`tests/test_native_cl.py`, nside 16, both backends; same
+parameters, biases and draws; the Python path is `SpectrumLoss` with an extra network pass):
+
+| | cl value (rel) | total (rel) | parameter gradients, max rel (T4 / CPU) |
+|---|---|---|---|
+| qu, frozen and live | 2e-15 | 2e-16 | 1.1e-7 / 2.1e-6 |
+| eb | 2e-15 | 3e-16 | 8.9e-8 / 4.9e-6 |
+| ebqu | 2e-15 | 1e-16 | 9.9e-8 / 3.0e-6 |
+| spin | 3e-15 | 2e-16 | 3.5e-8 / 3.0e-6 |
+
+The gradients differ by float32 accumulation only (two network backward passes against one;
+the host network sums in another order). The device spin-2 analysis without iteration and the
+spin-2 synthesis match the host to 1e-13 (`spin2_analysis_matches_host`, lmax below `3
+nside - 1`). `test_native_joint`, `test_native_unet` and `test_native_denoise` are unchanged.
+
+**Cost per step** (one T4, frozen biases, `data + l1 + l2 + l3 + cl`, cl masks 0, 30, 45,
+60°), seconds:
+
+| | eb n128 | ebqu n128 | eb n256 | ebqu n256 |
+|---|---|---|---|---|
+| step, cl from Python | 2.41 | 3.22 | 13.55 | 16.45 |
+| step, cl in the trainer | 2.01 | 2.40 | 12.00 | 13.36 |
+| cl in the trainer (spectra and VJP) | 0.06 | 0.06 | 0.22 | 0.14 |
+
+`ebqu` costs 2.40 s against 2.01 s for `eb` at nside 128 and 13.4 s against 12.0 s at nside 256:
+the E/B front end and its transpose only.
+
+**nside 64 trajectories** (300 Adam steps, warm-up 100, otherwise the options of
+`n256_eb_c16`; seed 0). Both paths are deterministic (two runs of each are identical step by
+step). The loss is the same to 6 digits for the first 3 steps; from step 4 the float32
+differences of the gradient are amplified by the early Adam steps (`m / sqrt(v)` close to
+`sign(g)`), and the trajectories part by a few percent. The same happens to either path when
+its cl cotangent is multiplied by `1 + 1e-7` (`pert`, `natpert`), which gives the spread of the
+trajectories at step 300:
+
+| pol | run | total (step 300) | cl | eval err/noise E, B, Q, U |
+|---|---|---|---|---|
+| eb | Python | 0.5244 | 0.0012 | 0.526, 0.415, 0.469, 0.385 |
+| eb | Python, `1 + 1e-7` | 0.5242 | 0.0020 | 0.511, 0.412, 0.460, 0.375 |
+| eb | trainer | 0.5419 | 0.0033 | 0.524, 0.410, 0.473, 0.370 |
+| eb | trainer, `1 + 1e-7` | 0.5201 | 0.0025 | 0.513, 0.402, 0.461, 0.368 |
+| ebqu | Python | 0.5146 | 0.0013 | 0.461, 0.434, 0.435, 0.402 |
+| ebqu | Python, `1 + 1e-7` | 0.5232 | 0.0020 | 0.464, 0.424, 0.435, 0.395 |
+| ebqu | trainer | 0.5326 | 0.0021 | 0.453, 0.414, 0.412, 0.400 |
+| ebqu | trainer, `1 + 1e-7` | 0.5255 | 0.0018 | 0.460, 0.442, 0.431, 0.411 |
+
+The two paths lie within the spread that a relative 1e-7 perturbation produces.
