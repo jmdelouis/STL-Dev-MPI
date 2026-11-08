@@ -1324,6 +1324,92 @@ extern "C" __global__ void coef_partial(const ForwardItem* items, i64 n, i64 chu
     }
 }
 
+
+// coef_partial for groups of k <= 8 consecutive items that differ only by
+// their mask (same kind and operands): the operands are read and the value
+// computed once per pixel, then added to the sums of the masks that keep
+// the pixel.  Per item, the same sums in the same order as coef_partial
+// (same out layout, item = group * k + mask).  Grid (n_chunks, groups).
+extern "C" __global__ void coef_partial_k(const ForwardItem* items, int k, i64 n, i64 chunk, int moments, double* out) {
+    __shared__ double sre[256], sim[256], ssq[256];
+    int g = blockIdx.y;
+    i64 c = blockIdx.x;
+    i64 n_chunks = gridDim.x;
+    const ForwardItem* its = items + (i64)g * k;
+    ForwardItem it = its[0];
+    i64 lo = c * chunk, hi = lo + chunk < n ? lo + chunk : n;
+    double tre[8], tim[8], tsq[8];
+    for (int m = 0; m < 8; m++) { tre[m] = 0.0; tim[m] = 0.0; tsq[m] = 0.0; }
+    for (i64 i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+        bool any = false;
+        bool keep[8];
+        _Pragma("unroll") for (int m = 0; m < 8; m++) if (m < k) {
+            keep[m] = !(its[m].mask && ((const double*)its[m].mask)[i] == 0.0);
+            any = any || keep[m];
+        }
+        if (!any) continue;
+        double are, aim, bre, bim;
+        load(it.a, i, &are, &aim);
+        double vre = 0.0, vim = 0.0, sq = 0.0;
+        switch (it.kind) {
+            case F_MEAN:
+                vre = are;
+                sq = are * are + aim * aim;
+                break;
+            case F_SQ: {
+                double r = hypot(are, aim);
+                vre = r * r;
+                sq = vre * vre;
+                break;
+            }
+            case F_ABS:
+                vre = hypot(are, aim);
+                sq = are * are + aim * aim;
+                break;
+            case F_S1X: {
+                load(it.b, i, &bre, &bim);
+                double xr, xi, yr, yi;
+                root_normalise(are, aim, &xr, &xi);
+                root_normalise(bre, bim, &yr, &yi);
+                mul_conj(xr, xi, yr, yi, &vre, &vim);
+                sq = vre * vre + vim * vim;
+                break;
+            }
+            default:
+                load(it.b, i, &bre, &bim);
+                mul_conj(are, aim, bre, bim, &vre, &vim);
+                sq = vre * vre + vim * vim;
+        }
+        _Pragma("unroll") for (int m = 0; m < 8; m++) if (m < k) {
+            if (!keep[m]) continue;
+            tre[m] += vre;
+            tim[m] += vim;
+            if (moments) tsq[m] += sq;
+        }
+    }
+    _Pragma("unroll") for (int m = 0; m < 8; m++) if (m < k) {
+        sre[threadIdx.x] = tre[m];
+        sim[threadIdx.x] = tim[m];
+        ssq[threadIdx.x] = tsq[m];
+        __syncthreads();
+        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (threadIdx.x < s) {
+                sre[threadIdx.x] += sre[threadIdx.x + s];
+                sim[threadIdx.x] += sim[threadIdx.x + s];
+                ssq[threadIdx.x] += ssq[threadIdx.x + s];
+            }
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+            double* o = out + (((i64)g * k + m) * n_chunks + c) * 3;
+            o[0] = sre[0];
+            o[1] = sim[0];
+            o[2] = ssq[0];
+        }
+        __syncthreads();
+    }
+}
+
 #define R_MEAN 0     // g.re / N                      (real)
 #define R_VAR 1      // 2 g.re a.re / N               (real)
 #define R_S1SAME 2   // modulus_vjp(a, g.re / N)
@@ -1369,12 +1455,20 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
     double* d = (double*)t.ptr;
     double dre = d[i];
     double dim = t.im_off >= 0 ? d[t.im_off + i] : 0.0;
+    // The last operands loaded (consecutive contributions often read the same
+    // row under another mask): reloaded only when the row changes.
+    u64 pa = 0, pb = 0;
+    double ca_re = 0.0, ca_im = 0.0, cb_re = 0.0, cb_im = 0.0;
     for (u32 q = t.start; q < t.end; q++) {
         Contrib c = contribs[q];
         if (c.mask && ((const double*)c.mask)[i] == 0.0) continue;
         double are = 0.0, aim = 0.0, bre, bim, vr = 0.0, vi = 0.0;
         // Only the operands a contribution reads (R_MEAN none, R_GA b only).
-        if (c.kind != R_MEAN && c.kind != R_GA) load(c.a, i, &are, &aim);
+        if (c.kind != R_MEAN && c.kind != R_GA) {
+            if (c.a.ptr != pa) { load(c.a, i, &ca_re, &ca_im); pa = c.a.ptr; }
+            are = ca_re;
+            aim = ca_im;
+        }
         switch (c.kind) {
             case R_MEAN:
                 vr = c.g_re * c.inv_n;
@@ -1397,7 +1491,7 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 break;
             }
             case R_S1X_A: {
-                load(c.b, i, &bre, &bim);
+                if (c.b.ptr != pb) { load(c.b, i, &cb_re, &cb_im); pb = c.b.ptr; } bre = cb_re; bim = cb_im;
                 double yr, yi, pr, pi;
                 root_normalise(bre, bim, &yr, &yi);
                 // g * rn(b)
@@ -1407,7 +1501,7 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 break;
             }
             case R_S1X_B: {
-                load(c.b, i, &bre, &bim);
+                if (c.b.ptr != pb) { load(c.b, i, &cb_re, &cb_im); pb = c.b.ptr; } bre = cb_re; bim = cb_im;
                 double yr, yi, pr, pi;
                 root_normalise(are, aim, &yr, &yi);
                 // conj(g) * rn(a)
@@ -1418,7 +1512,7 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 break;
             }
             case R_GA: {
-                load(c.b, i, &bre, &bim);
+                if (c.b.ptr != pb) { load(c.b, i, &cb_re, &cb_im); pb = c.b.ptr; } bre = cb_re; bim = cb_im;
                 double pr = c.g_re * bre - c.g_im * bim;
                 double pi = c.g_re * bim + c.g_im * bre;
                 vr = pr * c.inv_n;

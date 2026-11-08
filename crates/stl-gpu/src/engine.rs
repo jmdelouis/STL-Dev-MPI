@@ -1390,7 +1390,8 @@ impl<'a> GpuEngine<'a> {
                 self.tick("gpu_forward_conv", t);
                 let t = Instant::now();
                 if !idx.is_empty() && nf > 0 {
-                    // Items in (coefficient, mask, batch) order.
+                    // Items in (coefficient, batch, mask) order: the masks of one
+                    // (coefficient, member) are consecutive, summed in one pass.
                     let masks: Vec<(u64, f64)> = (0..k_count).map(|k| self.mask_at(k, n, start)).collect();
                     let mut items = Vec::with_capacity(idx.len() * k_count * self.batch);
                     for &i in &idx {
@@ -1403,19 +1404,19 @@ impl<'a> GpuEngine<'a> {
                             Family::S1 => F_S1X,
                             _ => F_PROD,
                         };
-                        for &(mask, _) in &masks {
-                            for bi in 0..self.batch {
-                                let (a, bo) = self.operands(n, b, c, bi, &branch, zf, af);
+                        for bi in 0..self.batch {
+                            let (a, bo) = self.operands(n, b, c, bi, &branch, zf, af);
+                            for &(mask, _) in &masks {
                                 items.push(ForwardItem { kind, pad: 0, a, b: bo, mask });
                             }
                         }
                     }
                     *self.timers.entry("gpu_host_lists").or_default() += t.elapsed().as_secs_f64();
-                    let sums = self.partial_sums(&items, nf, moments);
+                    let sums = self.partial_sums(&items, k_count, nf, moments);
                     for (q, &i) in idx.iter().enumerate() {
-                        for (k, &(_, n_total)) in masks.iter().enumerate() {
-                            for bi in 0..self.batch {
-                                let (re, im, sq) = sums[(q * k_count + k) * self.batch + bi];
+                        for bi in 0..self.batch {
+                            for (k, &(_, n_total)) in masks.iter().enumerate() {
+                                let (re, im, sq) = sums[(q * self.batch + bi) * k_count + k];
                                 values[(bi * k_count + k) * np + i] += Complex64::new(re, im) / n_total;
                                 if moments {
                                     second[(bi * k_count + k) * np + i] += sq / n_total;
@@ -1474,19 +1475,31 @@ impl<'a> GpuEngine<'a> {
         (values, second)
     }
 
-    /// `(sum re, sum im, sum |f|^2)` per item over `n` pixels.
-    fn partial_sums(&self, items: &[ForwardItem], n: usize, moments: bool) -> Vec<(f64, f64, f64)> {
+    /// `(sum re, sum im, sum |f|^2)` per item over `n` pixels; the items come
+    /// in groups of `k` that differ only by their mask (`k <= 8`: one pass
+    /// per group, `coef_partial_k`; the same sums as item by item).
+    fn partial_sums(&self, items: &[ForwardItem], k: usize, n: usize, moments: bool) -> Vec<(f64, f64, f64)> {
         let n_chunks = n.div_ceil(CHUNK);
+        let k = if (2..=8).contains(&k) && items.len() % k == 0 { k } else { 1 };
         let mut out = Vec::with_capacity(items.len());
-        for part in items.chunks(65535) {
+        for part in items.chunks(65535 / k * k) {
             let dev_items = self.gpu.upload(part);
             let buf = self.gpu.zeros::<f64>(part.len() * n_chunks * 3);
-            self.gpu.launch(
-                "coef_partial",
-                (n_chunks as u32, part.len() as u32),
-                256,
-                &[self.gpu.a(&dev_items), n.into(), CHUNK.into(), (moments as i32).into(), self.gpu.a(&buf)],
-            );
+            if k > 1 {
+                self.gpu.launch(
+                    "coef_partial_k",
+                    (n_chunks as u32, (part.len() / k) as u32),
+                    256,
+                    &[self.gpu.a(&dev_items), (k as i32).into(), n.into(), CHUNK.into(), (moments as i32).into(), self.gpu.a(&buf)],
+                );
+            } else {
+                self.gpu.launch(
+                    "coef_partial",
+                    (n_chunks as u32, part.len() as u32),
+                    256,
+                    &[self.gpu.a(&dev_items), n.into(), CHUNK.into(), (moments as i32).into(), self.gpu.a(&buf)],
+                );
+            }
             let h = self.gpu.download(&buf);
             for k in 0..part.len() {
                 let (mut re, mut im, mut sq) = (0.0, 0.0, 0.0);
@@ -1609,12 +1622,10 @@ impl<'a> GpuEngine<'a> {
                     if c.family == Family::S4 && self.cfg.fewer {
                         gmod.entry(dg[c.j1.unwrap()]).or_insert_with(|| self.gpu.zeros::<f64>(rows * na1));
                     }
-                    for (bi, k) in (0..self.batch).flat_map(|bi| (0..k_count).map(move |k| (bi, k))) {
-                        let g = gradient[(bi * k_count + k) * np + i];
-                        if k_count > 1 && g == zero {
-                            continue;
-                        }
-                        let (mask, n_total) = masks[k];
+                    for bi in 0..self.batch {
+                        // The operands and the targets of this (coefficient, member),
+                        // once for all the masks; contributions pushed in (mask, target)
+                        // order as before.
                         let (a, bo) = self.operands(n, b, &c, bi, &branch, zf, af);
                         let tz = |cc: usize, li: usize| -> (u64, i64) {
                             (self.gpu.ptr(&gz) + ((((bi * ch + cc) * l + li) * 2 * na1 + blk.f0) as u64) * f64s, na1 as i64)
@@ -1627,48 +1638,59 @@ impl<'a> GpuEngine<'a> {
                             let p = lv.own_pos0 + (blk.start - lv.owned.0) as usize;
                             (self.gpu.ptr(&mg[level]) + (((bi * ch + cc) * self.held(level) + p) as u64) * f64s, -1)
                         };
-                        let contrib = |kind: i32| Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, inv_n: 1.0 / n_total, mask };
-                        let mut push = |(ptr, im): (u64, i64), kind: i32| {
-                            let at = *index.entry(ptr).or_insert_with(|| {
-                                targets.push((ptr, im, Vec::new()));
-                                targets.len() - 1
-                            });
-                            targets[at].2.push(contrib(kind));
-                        };
+                        let mut slots: Vec<((u64, i64), i32)> = Vec::with_capacity(2);
                         match c.family {
-                            Family::Mean => push(tmap(0, c.c1), R_MEAN),
-                            Family::Var => push(tmap(0, c.c1), R_VAR),
+                            Family::Mean => slots.push((tmap(0, c.c1), R_MEAN)),
+                            Family::Var => slots.push((tmap(0, c.c1), R_VAR)),
                             Family::S1 | Family::S2 => {
                                 let l1 = c.l1.unwrap();
                                 if c.c1 == c.c2 {
-                                    push(tz(c.c1, l1), if c.family == Family::S1 { R_S1SAME } else { R_S2SAME });
+                                    slots.push((tz(c.c1, l1), if c.family == Family::S1 { R_S1SAME } else { R_S2SAME }));
                                 } else if c.family == Family::S1 {
-                                    push(tz(c.c1, l1), R_S1X_A);
-                                    push(tz(c.c2, l1), R_S1X_B);
+                                    slots.push((tz(c.c1, l1), R_S1X_A));
+                                    slots.push((tz(c.c2, l1), R_S1X_B));
                                 } else {
-                                    push(tz(c.c1, l1), R_GA);
-                                    push(tz(c.c2, l1), R_GB);
+                                    slots.push((tz(c.c1, l1), R_GA));
+                                    slots.push((tz(c.c2, l1), R_GB));
                                 }
                             }
                             Family::S3 => {
                                 let (d1, l1, l3) = (dg[c.j1.unwrap()], c.l1.unwrap(), c.l3.unwrap());
                                 if self.cfg.fewer {
-                                    push(tmap(n, c.c1), R_GA);
-                                    push(tb(d1, c.c2, l1, l3), R_GB);
+                                    slots.push((tmap(n, c.c1), R_GA));
+                                    slots.push((tb(d1, c.c2, l1, l3), R_GB));
                                 } else {
-                                    push(tb(d1, c.c1, l1, l3), R_GA);
-                                    push(tz(c.c2, l3), R_GB);
+                                    slots.push((tb(d1, c.c1, l1, l3), R_GA));
+                                    slots.push((tz(c.c2, l3), R_GB));
                                 }
                             }
                             Family::S4 => {
                                 let (d1, l1, l3) = (dg[c.j1.unwrap()], c.l1.unwrap(), c.l3.unwrap());
                                 if self.cfg.fewer {
                                     let p = self.gpu.ptr(&gmod[&d1]) + ((((bi * ch + c.c1) * l + l1) * na1 + blk.f0) as u64) * f64s;
-                                    push((p, -1), R_GA);
+                                    slots.push(((p, -1), R_GA));
                                 } else {
-                                    push(tb(d1, c.c1, l1, l3), R_GA);
+                                    slots.push((tb(d1, c.c1, l1, l3), R_GA));
                                 }
-                                push(tb(dg[c.j2.unwrap()], c.c2, c.l2.unwrap(), l3), R_GB);
+                                slots.push((tb(dg[c.j2.unwrap()], c.c2, c.l2.unwrap(), l3), R_GB));
+                            }
+                        }
+                        let mut at: [Option<usize>; 2] = [None, None];
+                        for k in 0..k_count {
+                            let g = gradient[(bi * k_count + k) * np + i];
+                            if k_count > 1 && g == zero {
+                                continue;
+                            }
+                            let (mask, n_total) = masks[k];
+                            let inv_n = 1.0 / n_total;
+                            for (s, &((ptr, im), kind)) in slots.iter().enumerate() {
+                                let t = *at[s].get_or_insert_with(|| {
+                                    *index.entry(ptr).or_insert_with(|| {
+                                        targets.push((ptr, im, Vec::new()));
+                                        targets.len() - 1
+                                    })
+                                });
+                                targets[t].2.push(Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, inv_n, mask });
                             }
                         }
                     }
@@ -1684,6 +1706,10 @@ impl<'a> GpuEngine<'a> {
                     // Host time building the contribution lists (no sync).
                     let lists = t.elapsed().as_secs_f64();
                     *self.timers.entry("gpu_host_lists").or_default() += lists;
+                    *self.timers.entry("count_reverse_contribs").or_default() += flat_c.len() as f64;
+                    *self.timers.entry("count_reverse_targets").or_default() += flat_t.len() as f64;
+                    *self.timers.entry("count_reverse_pixels_x_contribs").or_default() += (flat_c.len() * nf) as f64;
+                    *self.timers.entry("gpu_host_lists_reverse").or_default() += lists;
                     let dc = self.gpu.upload(&flat_c);
                     for part in flat_t.chunks(65535) {
                         let dt = self.gpu.upload(part);
