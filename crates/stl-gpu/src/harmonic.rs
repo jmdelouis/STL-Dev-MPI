@@ -778,7 +778,7 @@ impl GpuSht {
 }
 
 /// `(a_E, a_B)` pairs of packed coefficients, or `(Q, U)` pairs of maps, on the device.
-type Pair = (CudaSlice<f64>, CudaSlice<f64>);
+pub type Pair =(CudaSlice<f64>, CudaSlice<f64>);
 
 /// The harmonic E and B maps of `(Q, U)` pairs on the device, with the exact
 /// transpose: `stl_core::sht::EbTransform` (healpy `map2alm(pol=True,
@@ -947,6 +947,18 @@ impl GpuEb {
             lo = hi;
         }
         out
+    }
+
+    /// `(a_E, a_B)` of the `(Q, U)` pairs without iteration, `A x`: healpy's
+    /// `map2alm_spin` (spin 2, `iter = 0`; the host's `Sht::analysis_spin`),
+    /// in chunks.
+    pub fn analysis_pairs(&self, gpu: &Gpu, maps: &[Pair]) -> Vec<Pair> {
+        maps.chunks(self.chunk).flat_map(|c| self.analysis(gpu, c)).collect()
+    }
+
+    /// `S a`: healpy's `alm2map_spin` (spin 2) of the `(a_E, a_B)` pairs, in chunks.
+    pub fn synthesis_pairs(&self, gpu: &Gpu, alms: &[Pair]) -> Vec<Pair> {
+        alms.chunks(self.chunk).flat_map(|c| self.synth(gpu, c)).collect()
     }
 }
 

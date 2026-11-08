@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Profile of one joint step of NativeUNet (--pol eb | spin) on the PR3 maps:
+"""Profile of one joint step of NativeUNet (--pol eb | ebqu | spin) on the PR3 maps:
 the whole frozen-bias step (network, front end, statistics forward and
 reverse), and its parts timed apart: the network alone (forward; forward
 and reverse), the eth front end and its transpose (spin), the cl term
 (spectra and their gradient, scalar E and B or EE/BB of (Q, U) on the
-host), the bias estimate, the one-time setup.
+host), the bias estimate, the one-time setup; then the step with the cl
+term in the trainer (set_cl, on the device: step_native_cl_s).
 
     python tests/profile_native_joint.py --data DIR --nside 64 --pol spin --out prof.json
 """
@@ -38,7 +39,7 @@ sims = [k for k in range(int(lo), int(hi or lo) + 1)
                for kd in ("noise", "noisehm1", "noisehm2") for f in ("Q", "U"))]
 levels = int(math.log2(n // 8)) + 1
 channels = [32, 64, 96, 128, 128, 128, 128][:levels]
-w = dict(data=1.0, l1=1.0, l2=1.0, l3=1.0)
+w = dict(data=1.0, l1=1.0, l2=1.0, l3=1.0, cl=1.0)  # cl: from the driver until set_cl
 rep = {"nside": n, "pol": a.pol, "sims": len(sims), "channels": channels}
 
 
@@ -123,6 +124,25 @@ rep["statistics_backward_s"] = (rep["loss_backward_s"] - rep["loss_forward_s"]
                                 - (rep["network_forward_backward_s"] - rep["network_forward_s"])
                                 - rep.get("front_adjoint_s", 0.0))
 print(json.dumps(rep, indent=1), flush=True)
+if a.out:
+    with open(a.out, "w") as fh_:
+        json.dump(rep, fh_, indent=1)
+# the cl term in the trainer (NativeUNet.set_cl): one network pass per step
+net.set_cl(spectra.m, spectra.edges, lmax=spectra.lmax, spin=2 if a.pol == "spin" else 0,
+           **(dict(d1=hm[0], d2=hm[1]) if a.pol == "spin" else {}))
+
+
+def step_native():
+    net.zero_grad()
+    terms = net.loss("joint", backward=True)
+    net.adam_step(0.0)
+    return terms
+
+
+rep["step_native_cl_s"], _ = timed(step_native)
+rep["loss_backward_native_cl_s"], _ = timed(lambda: net.loss("joint", backward=True))
+rep["cl_native_s"] = rep["loss_backward_native_cl_s"] - rep["loss_backward_s"]
+print(json.dumps({k: rep[k] for k in ("step_s", "step_native_cl_s", "cl_native_s")}, indent=1), flush=True)
 if a.out:
     with open(a.out, "w") as fh_:
         json.dump(rep, fh_, indent=1)

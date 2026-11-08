@@ -144,3 +144,38 @@ fn eb_transform_matches_host() {
         assert!(ef < 1e-10 && et < 1e-10 && dot < 1e-12, "nside {nside}: {ef} {et} {dot}");
     }
 }
+
+/// The spin-2 analysis without iteration (`GpuEb::analysis_pairs`, the
+/// anafast of the cl term) against `Sht::analysis_spin(2)`, with an lmax
+/// below `3 nside - 1`; the synthesis against `EbTransform::synthesis_spin2`.
+#[test]
+fn spin2_analysis_matches_host() {
+    let Some(g) = gpu() else { return };
+    for (nside, lmax) in [(8usize, 15usize), (16, 31), (32, 95)] {
+        let n = 12 * nside * nside;
+        let host = stl_core::sht::EbTransform::new(nside, lmax, 0);
+        let dev = stl_gpu::GpuEb::new(&g, nside, lmax, 0).unwrap();
+        let x = noise(2 * 2 * n, 91 + nside as u64);
+        let pairs: Vec<(&[f64], &[f64])> = x.chunks(2 * n).map(|p| (&p[..n], &p[n..])).collect();
+        let ah = host.sht.analysis_spin(2, &pairs);
+        let dp: Vec<stl_gpu::harmonic::Pair> = x.chunks(2 * n).map(|p| (g.upload(&p[..n]), g.upload(&p[n..]))).collect();
+        let ad = dev.analysis_pairs(&g, &dp);
+        let flat = |v: &[Complex64]| -> Vec<f64> { v.iter().flat_map(|z| [z.re, z.im]).collect() };
+        let rel = |a: &[f64], b: &[f64]| {
+            let s = b.iter().fold(0f64, |m, v| m.max(v.abs()));
+            a.iter().zip(b).fold(0f64, |m, (p, q)| m.max((p - q).abs())) / s
+        };
+        let mut ea = 0f64;
+        for ((e, b), (de, db)) in ah.iter().zip(&ad) {
+            ea = ea.max(rel(&g.download(de), &flat(e))).max(rel(&g.download(db), &flat(b)));
+        }
+        let sh = host.synthesis_spin2(&ah);
+        let sd = dev.synthesis_pairs(&g, &ad);
+        let mut es = 0f64;
+        for ((q, u), (dq, du)) in sh.iter().zip(&sd) {
+            es = es.max(rel(&g.download(dq), q)).max(rel(&g.download(du), u));
+        }
+        println!("nside {nside} lmax {lmax}: analysis {ea:.2e}, synthesis {es:.2e}");
+        assert!(ea < 1e-10 && es < 1e-10, "nside {nside}: {ea} {es}");
+    }
+}

@@ -23,7 +23,9 @@ warmup). --seconds stops the training at that wall time.
 Options with the names and meaning of train_denoise.py: --loss terms data,
 l1, l2, l3 and cl (the binned half-mission cross spectrum C_b(m d1, m d2)
 against C_b(m u, m u) under the apodised galactic masks --cl-masks, without
-noise bias; stl_port.denoise over SpectrumEngine); --stat-masks (the
+noise bias; the normalisation of stl_port.denoise.SpectrumLoss, computed
+in the trainer with the other terms, on the device, by default; --cl-engine
+python: SpectrumLoss from the driver, one more network pass per step); --stat-masks (the
 scattering statistics averaged under the galactic cuts |b| > b0, each
 coefficient once per mask with its ergodic weight and its own frozen bias,
 zero on the unbiased coefficients); --cond none, log857, sigma (the log of
@@ -75,7 +77,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stl_port.native import NativeUNet  # noqa: E402
-from stl_port.denoise import BinnedSpectra, SpectrumLoss, conditioning, eb_maps, qu_maps, stat_masks  # noqa: E402
+from stl_port.denoise import (BinnedSpectra, SpectrumLoss, bin_edges, conditioning, eb_maps, galactic_mask,  # noqa: E402
+                              qu_maps, stat_masks)
 
 TERMS = ("data", "res", "cross", "l1", "l2", "l3", "cl")
 p = argparse.ArgumentParser()
@@ -106,6 +109,9 @@ p.add_argument("--cl-lmin", type=int, default=10)
 p.add_argument("--cl-lmax", type=int, default=None, help="default 2 nside - 1")
 p.add_argument("--cl-width", type=int, default=30)
 p.add_argument("--cl-apod", type=float, default=5.0, help="FWHM (deg) of the mask apodisation")
+p.add_argument("--cl-engine", default="native", choices=["native", "python"],
+               help="native: the cl term in the trainer (spectra on the device, one network pass per step); "
+                    "python: SpectrumLoss from the driver (an extra network forward and backward per step)")
 p.add_argument("--optimizer", choices=["adam", "lbfgs"], default="adam")
 p.add_argument("--steps", type=int, default=3000, help="Adam steps (cosine schedule length)")
 p.add_argument("--lr", type=float, default=1e-3)
@@ -146,7 +152,9 @@ for item in a.loss.split(","):
     assert k in ("data", "l1", "l2", "l3", "cl"), f"loss term {k}: data, l1, l2, l3 or cl in the native trainer"
     weights[k] = float(v or 1)
 w_cl = weights.get("cl", 0.0)
-assert a.optimizer == "adam" or (not w_cl and not a.bias_warmup), "L-BFGS: no cl term, no bias warmup"
+assert a.optimizer == "adam" or ((not w_cl or a.cl_engine == "native") and not a.bias_warmup), \
+    "L-BFGS: no bias warmup, cl only in the trainer (--cl-engine native)"
+py_cl = bool(w_cl) and a.cl_engine == "python"
 joint = a.pol != "qu"
 pol_weight = a.pol_weight if a.pol_weight is not None else (0.5 if a.pol == "spin" else 1.0)
 engine = {} if a.engine_cache_bytes is None else {"cache_bytes": a.engine_cache_bytes}
@@ -202,7 +210,7 @@ qu = ("Q", "U")
 obs, rms, noise_var, cl_loss = {}, {}, [], {}
 cl_masks = [float(b) for b in a.cl_masks.split(",")]
 spectra = BinnedSpectra(n, masks=cl_masks, lmin=a.cl_lmin, lmax=a.cl_lmax, width=a.cl_width, apod=a.cl_apod,
-                        backend=a.backend, device=a.device, spin=2 if a.pol == "spin" else 0) if w_cl else None
+                        backend=a.backend, device=a.device, spin=2 if a.pol == "spin" else 0) if py_cl else None
 qu_pools, qu_hm = {}, {}
 for f in qu:
     pools = [np.stack([np.load(os.path.join(a.data, f"planck353_{kd}_{f}_n{n}_mc{k}.npy")) for k in sims])
@@ -215,7 +223,7 @@ for f in qu:
         qu_pools[f] = pools
     else:
         net.set_field(f, obs[f], *qu_hm[f], *pools)
-        if w_cl:
+        if py_cl:
             cl_loss[f] = SpectrumLoss(spectra, *qu_hm[f])
     del pools
 pair = lambda m: np.stack([m[f] for f in qu])  # noqa: E731
@@ -247,15 +255,20 @@ if joint:
         obs[f] = d_f[i]
         rms[f] = float(np.sqrt(np.mean(pools_f[0][:, i] ** 2)))
         net.set_field(f, d_f[i], hm_f[0][i], hm_f[1][i], *[np.ascontiguousarray(p[:, i]) for p in pools_f])
-        if w_cl and a.pol in ("eb", "ebqu"):
+        if py_cl and a.pol in ("eb", "ebqu"):
             cl_loss[f] = SpectrumLoss(spectra, hm_f[0][i], hm_f[1][i])
-    if w_cl and a.pol == "spin":
+    if py_cl and a.pol == "spin":
         cl_loss["pair"] = SpectrumLoss(spectra, *hm_qu)  # EE, BB of (Q, U)
     del pools_f
     print(f"--pol {a.pol}: fields {fields} in {time.perf_counter() - t0:.1f} s, noise rms "
           + ", ".join(f"{f} {rms[f]:.4g}" for f in fields) + f", factor {pol_weight} on the terms of each", flush=True)
 else:
     fields = qu
+cl_edges = bin_edges(a.cl_lmin, a.cl_lmax or 2 * n - 1, a.cl_width)
+if w_cl and not py_cl:
+    # the cl term in the trainer: the masks, bins and normalisation of BinnedSpectra, on the device
+    net.set_cl(np.stack([galactic_mask(n, b, a.cl_apod) for b in cl_masks]), cl_edges, lmax=a.cl_lmax or 2 * n - 1,
+               spin=2 if a.pol == "spin" else 0, **(dict(d1=hm_qu[0], d2=hm_qu[1]) if a.pol == "spin" else {}))
 if kinds:
     net.set_cond(conditioning(kinds, i857, noise_var))
 rng = np.random.default_rng(a.seed + 777)
@@ -263,7 +276,7 @@ fixed_draws = (np.arange(a.eval_draws) % len(sims), np.where(np.arange(a.eval_dr
 print(f"nside {n} J {j} levels {levels} channels {channels} params {net.size} sims {len(sims)} pol {a.pol} loss {weights} "
       f"optimizer {a.optimizer} bias {'all' if a.bias_all else 'biased coefficients only'} warmup {a.bias_warmup} "
       f"cond {a.cond} stat masks {a.stat_masks or 'none'}"
-      + (f" cl masks {a.cl_masks}, {len(spectra.edges) - 1} bins" if w_cl else ""), flush=True)
+      + (f" cl masks {a.cl_masks}, {len(cl_edges) - 1} bins ({a.cl_engine})" if w_cl else ""), flush=True)
 
 
 def draws(k=None):
@@ -290,7 +303,7 @@ def cl_value(f, u, grad=False):
 
 def add_cl(f, terms, backward):
     """Adds the cl term of f (a field, or "joint") to `terms`; with backward, its parameter cotangents."""
-    if not w_cl:
+    if not py_cl:
         return terms
     x = net_in if f == "joint" else obs[f]
     sc = in_scales if f == "joint" else None
@@ -335,7 +348,7 @@ def evaluate(step, save=False):
         out[f] = {"pixel_rms_error_over_noise": float(np.sqrt(np.mean((uq[f] - obs[f]) ** 2))) / rms[f]}
     for f in names:
         out.setdefault(f, {})["loss_terms"] = {k: v for k, v in net.loss(f).items() if k != "total"}
-        if w_cl:
+        if py_cl:
             out[f]["loss_terms"]["cl"] = cl_value(f, net.apply(net_in, scale=in_scales) if f == "joint" else net.apply(obs[f]))
         out[f]["data_loss"] = out[f]["loss_terms"].get("data", float("nan"))
     if save:
@@ -351,7 +364,7 @@ def evaluate(step, save=False):
         for f in names:
             net.estimate_bias(f, *fixed_draws)
             saved[f] = net.loss(f)["total"] + (w_cl * cl_value(f, net.apply(net_in, scale=in_scales) if f == "joint" else net.apply(obs[f]))
-                                               if w_cl else 0.0)
+                                               if py_cl else 0.0)
         rec["fixed_draws"] = {**saved, "total": sum(saved.values())}
         for f in names:  # back to training biases at the next refresh
             net.estimate_bias(f, *draws())
@@ -394,7 +407,7 @@ if a.optimizer == "adam":
         if not live and (step - 1 - a.bias_warmup) % a.bias_every < (1 if joint else len(fields)):
             net.estimate_bias(f, *draws())
         lr = a.lr * 0.5 * (1 + math.cos(math.pi * (step - 1) / a.steps))
-        if live or w_cl:
+        if live or py_cl:
             net.zero_grad()
             if live:
                 terms = net.live(f, draws(a.realizations), draws(a.realizations), backward=True)

@@ -817,3 +817,17 @@ extern "C" __global__ void eb_to_hessians(const double* gq, const double* gu, i6
     ce[p] = 0.0; ce[n + p] = 0.0; ce[2 * n + p] = -a; ce[3 * n + p] = a; ce[4 * n + p] = -2.0 * b;
     cb[p] = 0.0; cb[n + p] = 0.0; cb[2 * n + p] = -b; cb[3 * n + p] = b; cb[4 * n + p] = 2.0 * a;
 }
+
+// out = a w over n doubles (a map times a mask).
+extern "C" __global__ void px_mul(const double* a, const double* w, i64 n, double* out) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = a[i] * w[i];
+}
+
+// dst += a w over n doubles.
+extern "C" __global__ void px_mul_add(double* dst, const double* a, const double* w, i64 n) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] += a[i] * w[i];
+}

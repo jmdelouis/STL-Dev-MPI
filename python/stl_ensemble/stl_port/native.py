@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-10-v13"
+SCRIPT_VERSION = "2026-11-10-v14"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -107,6 +107,7 @@ def _library(path=None):
         "stlp_train_lbfgs": ([_VOID, _UINT32, C.c_size_t, C.c_char_p], _VOID),
         "stlp_train_set_joint": ([_VOID, _DOUBLE, _DOUBLE, C.c_uint32, C.c_uint32, C.c_char_p, C.c_double], C.c_int),
         "stlp_train_front": ([_VOID, _DOUBLE, C.c_size_t, C.c_bool, _DOUBLE], C.c_int),
+        "stlp_train_set_cl": ([_VOID, C.c_char_p, _DOUBLE, C.c_size_t, _DOUBLE, _DOUBLE], C.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -695,7 +696,8 @@ class NativeUNet:
     step(name, lr) is one Adam step (torch's Adam); lbfgs(names, options)
     the native strong-Wolfe L-BFGS on the parameters for the frozen-bias
     loss of the fields; loss(name) the terms without update. Terms: total,
-    data, l1, l2, l3 (stlia train_denoise.py frozen_losses).
+    data, l1, l2, l3 (stlia train_denoise.py frozen_losses) and cl (set_cl; 0
+    without it).
 
     Joint pair (maps=2): set_joint(d2, fields, front, scales, weight) sets
     the network input [2, npix] and the two fields of the terms of its
@@ -704,7 +706,7 @@ class NativeUNet:
     loss, step, live, lbfgs) then train the pair, one network pass per step
     and the terms of both fields summed.
     """
-    TERMS = ("total", "data", "l1", "l2", "l3")
+    TERMS = ("total", "data", "l1", "l2", "l3", "cl")
     JOINT = 0xFFFFFFFF
 
     def __init__(self, nside, channels, ksz=3, gauge="phi", slope=0.2, cond=0, scale=None, seed=0,
@@ -926,6 +928,30 @@ class NativeUNet:
                                                    _pointer(out)))
             return out.reshape(a.shape)
 
+    def set_cl(self, masks, edges, lmax=None, spin=0, d1=None, d2=None):
+        """The cl term in the trainer (weight loss["cl"]), stl_port.denoise.SpectrumLoss
+        over BinnedSpectra: the binned pseudo-spectra (anafast, iter 0, divided by
+        mean(m^2)) under the apodised masks [K, npix] in the bins `edges`
+        ([lmin, ..., lmax + 1]), reduced chi^2 against the half-mission cross
+        spectrum. spin 0: the scalar spectra of each field of the terms (after
+        the front end; targets from their half missions, set_field), summed
+        over the fields; spin 2: the EE and BB spectra of the joint output (Q, U),
+        targets from the half-mission pairs d1, d2 [2, npix]. Computed on the
+        device with the statistics, in the same forward and backward pass;
+        masks=None drops it."""
+        with self._lock:
+            self._open()
+            if masks is None:
+                self._check(self._lib.stlp_train_set_cl(self._handle, b"{}", None, 0, None, None))
+                return
+            w = np.ascontiguousarray(np.atleast_2d(masks), dtype=np.float64)
+            cfg = {"edges": [int(e) for e in edges], "spin": int(spin)}
+            if lmax is not None:
+                cfg["lmax"] = int(lmax)
+            hm = [None if x is None else np.ascontiguousarray(x, dtype=np.float64).reshape(2 * self.npix) for x in (d1, d2)]
+            self._check(self._lib.stlp_train_set_cl(self._handle, json.dumps(cfg).encode(), _pointer(w), w.shape[0],
+                                                    *[None if x is None else _pointer(x) for x in hm]))
+
     def estimate_bias(self, name, sims, signs):
         """Frozen noise biases of field `name` at the current network output,
         from the draws (simulation index, sign) of its pools."""
@@ -946,7 +972,7 @@ class NativeUNet:
         parameter cotangents are added to grads()."""
         with self._lock:
             self._open()
-            out = np.empty(5)
+            out = np.empty(6)
             self._check(self._lib.stlp_train_loss(self._handle, self._field_id(name), bool(backward), _pointer(out)))
             return self._terms(out)
 
@@ -954,7 +980,7 @@ class NativeUNet:
         """One Adam step on field `name`; returns the terms before the update."""
         with self._lock:
             self._open()
-            out = np.empty(5)
+            out = np.empty(6)
             self._check(self._lib.stlp_train_step(self._handle, self._field_id(name), float(lr), _pointer(out)))
             return self._terms(out)
 
@@ -968,7 +994,7 @@ class NativeUNet:
             self._open()
             (ds, dg), (hs, hg) = [(np.ascontiguousarray(s, dtype=np.uint64), np.ascontiguousarray(g, dtype=np.float64))
                                   for s, g in (data_draws, hm_draws)]
-            out = np.empty(5)
+            out = np.empty(6)
             self._check(self._lib.stlp_train_live(self._handle, self._field_id(name), ds.ctypes.data_as(_UINT64),
                                                   _pointer(dg), ds.size, hs.ctypes.data_as(_UINT64), _pointer(hg),
                                                   hs.size, bool(backward), float(lr), _pointer(out)))

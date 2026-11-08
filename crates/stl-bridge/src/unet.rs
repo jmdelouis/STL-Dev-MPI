@@ -19,6 +19,11 @@
 //! - `l2`: `Phi(u, u) + B_l2` vs `Phi(d, u)` (the target moves with `u`:
 //!   gradient through both, weights from the variances of `(d, u)`);
 //! - `l3`: `Phi(T, u) + B_l3` vs `Phi(T, d)`;
+//! - `cl` (with `stlp_train_set_cl`): the binned pseudo-spectra of `u`
+//!   under apodised masks against the half-mission cross spectrum
+//!   (`stl_port.denoise.SpectrumLoss`, see `ClTerm`), no noise bias; on the
+//!   device with the GPU backend, in the same network forward and backward
+//!   as the other terms;
 //!
 //! `B_data = <Phi(u + n)> - Phi(u)`, `B_l1 = <Phi(u + n1, u + n2)> - Phi(u,
 //! u)`, `B_l2 = <Phi(u + n, u)> - Phi(u, u)`, `B_l3 = <Phi(T, u + n)> -
@@ -97,7 +102,88 @@ trait Backend {
     /// with `adjoint` its transpose (`stl_core::sht::EbTransform`; on the
     /// device, `stl_gpu::GpuEb`).
     fn eb(&self, x: &Self::Map, adjoint: bool) -> Self::Map;
+    /// `dst += s src` over the whole buffer.
+    fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64);
+    /// Builds (`Some`) or drops the pseudo-spectra of the cl term: anafast
+    /// (`iter = 0`) up to `lmax` of the maps times each of the weights
+    /// `masks` `[K][npix]`, spin 0 or (`spin2`) the `(E, B)` of `(Q, U)` pairs.
+    fn set_cl(&mut self, cfg: Option<(usize, &[Vec<f64>], bool)>);
+    /// The `a_lm` (on the host) of the rows of `x` starting at `offs` (spin
+    /// 2: the pairs `(Q, U)` at `off`, `off + npix`) times each mask: `[row][K]`
+    /// (spin 2: `[row][K][E, B]`).
+    fn cl_alms(&mut self, x: &Self::Map, offs: &[usize]) -> Vec<Vec<C64>>;
+    /// `C_l` `[row][K][comp][lmax + 1]` (comp: TT, or EE and BB) of the rows
+    /// as [`cl_alms`](Self::cl_alms), kept for [`cl_backward`](Self::cl_backward).
+    fn cl_forward(&mut self, x: &Self::Map, offs: &[usize]) -> Vec<f64>;
+    /// Map cotangent `[rows (spin 2: x 2), npix]` of `sum(cot C_l)` after the
+    /// last [`cl_forward`](Self::cl_forward).
+    fn cl_backward(&mut self, cot: &[f64]) -> Self::Map;
 }
+
+/// Host pseudo-spectra of the cl term ([`Backend::set_cl`]).
+struct ClHost {
+    sht: Sht,
+    masks: Vec<Vec<f64>>,
+    spin2: bool,
+    rows: usize,
+    alms: Vec<Vec<C64>>,
+}
+
+impl ClHost {
+    fn alms(&self, x: &[f64], offs: &[usize]) -> Vec<Vec<C64>> {
+        let n = self.sht.npix;
+        let masked = |o: usize, w: &[f64]| -> Vec<f64> { x[o..o + n].iter().zip(w).map(|(a, b)| a * b).collect() };
+        let mut out = Vec::new();
+        for &o in offs {
+            for w in &self.masks {
+                if self.spin2 {
+                    let (q, u) = (masked(o, w), masked(o + n, w));
+                    let (e, b) = self.sht.analysis_spin(2, &[(&q, &u)]).pop().unwrap();
+                    out.push(e);
+                    out.push(b);
+                } else {
+                    out.push(self.sht.analysis(&masked(o, w)));
+                }
+            }
+        }
+        out
+    }
+
+    fn backward(&self, cot: &[f64]) -> Vec<f64> {
+        let (n, nl, k) = (self.sht.npix, self.sht.lmax + 1, self.masks.len());
+        let ca: Vec<Vec<C64>> = self.alms.iter().zip(cot.chunks(nl)).map(|(a, d)| self.sht.power_vjp(a, d)).collect();
+        let parts = if self.spin2 { 2 } else { 1 };
+        let mut out = vec![0.0; self.rows * parts * n];
+        for (i, w) in (0..self.rows * k).map(|i| (i, &self.masks[i % k])) {
+            let r = i / k;
+            let maps = if self.spin2 {
+                let (q, u) = self.sht.analysis_spin_vjp(2, &[(&ca[2 * i], &ca[2 * i + 1])]).pop().unwrap();
+                vec![q, u]
+            } else {
+                vec![self.sht.analysis_vjp(&ca[i])]
+            };
+            for (c, g) in maps.iter().enumerate() {
+                let o = &mut out[(r * parts + c) * n..][..n];
+                o.iter_mut().zip(g.iter().zip(w)).for_each(|(o, (v, m))| *o += v * m);
+            }
+        }
+        out
+    }
+}
+
+/// Device pseudo-spectra of the cl term (spin 0 through `eb.sht`).
+#[cfg(feature = "gpu")]
+struct ClDev {
+    eb: stl_gpu::GpuEb,
+    masks: Vec<stl_gpu::CudaSlice<f64>>,
+    spin2: bool,
+    rows: usize,
+    alms: Vec<stl_gpu::CudaSlice<f64>>,
+}
+
+/// Spin-0 maps per device transform batch (bounds its Legendre sums).
+#[cfg(feature = "gpu")]
+const CL_CHUNK: usize = 16;
 
 /// Engine geometry shared by the backends (boxed: the engines borrow it).
 struct Stats {
@@ -170,6 +256,7 @@ struct CpuBack {
     cond: Vec<Vec<f32>>,
     stats: Stats,
     eb: Option<stl_core::sht::EbTransform>,
+    cl: Option<ClHost>,
 }
 
 /// `nside` of `npix = 12 nside^2`.
@@ -314,6 +401,31 @@ impl Backend for CpuBack {
             t.apply(x)
         }
     }
+
+    fn axpy(&self, dst: &mut Vec<f64>, src: &Vec<f64>, s: f64) {
+        assert_eq!(dst.len(), src.len());
+        dst.iter_mut().zip(src).for_each(|(a, b)| *a += s * b);
+    }
+
+    fn set_cl(&mut self, cfg: Option<(usize, &[Vec<f64>], bool)>) {
+        let ns = nside_of(self.npix());
+        self.cl = cfg.map(|(lmax, masks, spin2)| ClHost { sht: Sht::new(ns, lmax), masks: masks.to_vec(), spin2, rows: 0, alms: Vec::new() });
+    }
+
+    fn cl_alms(&mut self, x: &Vec<f64>, offs: &[usize]) -> Vec<Vec<C64>> {
+        self.cl.as_ref().expect("no cl spectra (stlp_train_set_cl)").alms(x, offs)
+    }
+
+    fn cl_forward(&mut self, x: &Vec<f64>, offs: &[usize]) -> Vec<f64> {
+        let c = self.cl.as_mut().expect("no cl spectra (stlp_train_set_cl)");
+        c.alms = c.alms(x, offs);
+        c.rows = offs.len();
+        c.alms.iter().flat_map(|a| c.sht.power(a)).collect()
+    }
+
+    fn cl_backward(&mut self, cot: &[f64]) -> Vec<f64> {
+        self.cl.as_ref().expect("cl forward before its gradient").backward(cot)
+    }
 }
 
 // -- device backend --------------------------------------------------------------
@@ -328,6 +440,7 @@ struct GpuBack {
     opts: GpuOptions,
     stats: Stats,
     eb: Option<stl_gpu::GpuEb>,
+    cl: Option<ClDev>,
 }
 
 #[cfg(feature = "gpu")]
@@ -346,6 +459,24 @@ impl GpuBack {
             self.evals.insert((kind, batch), ev);
         }
         self.evals.get_mut(&(kind, batch)).unwrap()
+    }
+
+    /// The device `a_lm` of the rows of `x` at `offs` times each mask (see
+    /// [`Backend::cl_alms`]), packed.
+    fn cl_dev_alms(&self, x: &stl_gpu::CudaSlice<f64>, offs: &[usize]) -> Vec<stl_gpu::CudaSlice<f64>> {
+        let c = self.cl.as_ref().expect("no cl spectra (stlp_train_set_cl)");
+        let (g, n) = (&self.gpu, self.npix());
+        let masked = |o: usize, w: &stl_gpu::CudaSlice<f64>| {
+            let out = g.zeros::<f64>(n);
+            g.launch1("px_mul", n, &[g.at(x, o), g.a(w), n.into(), g.a(&out)]);
+            out
+        };
+        if c.spin2 {
+            let pairs: Vec<stl_gpu::harmonic::Pair> = offs.iter().flat_map(|&o| c.masks.iter().map(move |w| (masked(o, w), masked(o + n, w)))).collect();
+            return c.eb.analysis_pairs(g, &pairs).into_iter().flat_map(|(e, b)| [e, b]).collect();
+        }
+        let maps: Vec<_> = offs.iter().flat_map(|&o| c.masks.iter().map(move |w| masked(o, w))).collect();
+        maps.chunks(CL_CHUNK).flat_map(|p| c.eb.sht.analysis_many(g, &p.iter().collect::<Vec<_>>())).collect()
     }
 }
 
@@ -479,6 +610,61 @@ impl Backend for GpuBack {
             t.apply(&self.gpu, x)
         }
     }
+
+    fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64) {
+        assert_eq!(dst.len(), src.len());
+        let g = &self.gpu;
+        g.launch1("nn_axpy", dst.len(), &[g.a(dst), g.a(dst), g.a(src), s.into(), dst.len().into()]);
+    }
+
+    fn set_cl(&mut self, cfg: Option<(usize, &[Vec<f64>], bool)>) {
+        let ns = nside_of(self.npix());
+        self.cl = cfg.map(|(lmax, masks, spin2)| ClDev {
+            eb: stl_gpu::GpuEb::new(&self.gpu, ns, lmax, 0).expect("device cl transforms"),
+            masks: masks.iter().map(|w| self.gpu.upload(w)).collect(),
+            spin2,
+            rows: 0,
+            alms: Vec::new(),
+        });
+    }
+
+    fn cl_alms(&mut self, x: &Self::Map, offs: &[usize]) -> Vec<Vec<C64>> {
+        self.cl_dev_alms(x, offs).iter().map(|a| self.gpu.download(a).chunks(2).map(|v| C64::new(v[0], v[1])).collect()).collect()
+    }
+
+    fn cl_forward(&mut self, x: &Self::Map, offs: &[usize]) -> Vec<f64> {
+        let alms = self.cl_dev_alms(x, offs);
+        let c = self.cl.as_mut().unwrap();
+        let cl: Vec<f64> = alms.iter().flat_map(|a| c.eb.sht.power(&self.gpu, a)).collect();
+        c.alms = alms;
+        c.rows = offs.len();
+        cl
+    }
+
+    fn cl_backward(&mut self, cot: &[f64]) -> Self::Map {
+        let c = self.cl.as_ref().expect("cl forward before its gradient");
+        let (g, n) = (&self.gpu, self.npix());
+        let (nl, k) = (c.eb.sht.lmax + 1, c.masks.len());
+        assert_eq!(cot.len(), c.alms.len() * nl, "cl cotangent");
+        // Omega power_vjp / mult: the map cotangent is its (spin-2) synthesis.
+        let coef: Vec<_> = c.alms.iter().zip(cot.chunks(nl)).map(|(a, d)| c.eb.sht.power_vjp_coefficients(g, a, d)).collect();
+        let maps: Vec<stl_gpu::CudaSlice<f64>> = if c.spin2 {
+            let mut it = coef.into_iter();
+            let pairs: Vec<stl_gpu::harmonic::Pair> = (0..c.alms.len() / 2).map(|_| (it.next().unwrap(), it.next().unwrap())).collect();
+            c.eb.synthesis_pairs(g, &pairs).into_iter().flat_map(|(q, u)| [q, u]).collect()
+        } else {
+            coef.chunks(CL_CHUNK).flat_map(|p| c.eb.sht.synthesis_many(g, &p.iter().collect::<Vec<_>>())).collect()
+        };
+        let parts = if c.spin2 { 2 } else { 1 };
+        let out = g.zeros::<f64>(c.rows * parts * n);
+        // The masks are summed in mask order.
+        for (i, m) in maps.iter().enumerate() {
+            let (rk, part) = (i / parts, i % parts);
+            let (r, kk) = (rk / k, rk % k);
+            g.launch1("px_mul_add", n, &[g.at(&out, (r * parts + part) * n), g.a(m), g.a(&c.masks[kk]), n.into()]);
+        }
+        out
+    }
 }
 
 // -- trainer ---------------------------------------------------------------------
@@ -493,6 +679,8 @@ struct Weights {
     l1: f64,
     l2: f64,
     l3: f64,
+    /// The cl term (with [`ClTerm`] set; else the driver computes it).
+    cl: f64,
 }
 
 impl Weights {
@@ -501,7 +689,7 @@ impl Weights {
     }
 
     fn scaled(&self, s: f64) -> Self {
-        Weights { data: s * self.data, l1: s * self.l1, l2: s * self.l2, l3: s * self.l3 }
+        Weights { data: s * self.data, l1: s * self.l1, l2: s * self.l2, l3: s * self.l3, cl: s * self.cl }
     }
 }
 
@@ -558,6 +746,102 @@ enum Front {
     Eb,
 }
 
+/// The cl term (`stlp_train_set_cl`): `stl_port.denoise.SpectrumLoss` over
+/// `BinnedSpectra`, the binned pseudo-spectra `C_b(m x) = sum_l B_bl C_l(m
+/// x) / mean(m^2)` (anafast, `iter = 0`, under each apodised mask `m`; `B`
+/// the mean over the multipoles of each bin) and the reduced chi^2 `mean
+/// (C_b(m u) - C_b(m d1, m d2))^2 / V_b` against the half-mission cross
+/// spectrum, `V_b = (C_b(d1) C_b(d2) + C_b(d1, d2)^2) / modes_b` (`modes_b =
+/// f_sky sum (2l + 1)`, `f_sky = mean(m^2)^2 / mean(m^4)`).  Spin 0: one
+/// unit per field of the terms (the fields after the front end), the
+/// values summed over the fields of `f`; spin 2: one unit for the joint
+/// pair, the EE and BB spectra of the network output `(Q, U)` (before the
+/// front end).  Not scaled by the joint factor (the driver's sum).
+struct ClTerm {
+    /// Host transforms of the layout and cross spectra of the targets.
+    sht: Sht,
+    k: usize,
+    spin2: bool,
+    edges: Vec<usize>,
+    /// `mean(m^2)` per mask.
+    w2: Vec<f64>,
+    /// `[K][nb]`.
+    modes: Vec<f64>,
+    /// Half missions `(d1, d2)` of the joint pair, `[2, npix]` each (spin 2).
+    hm: Option<(Vec<f64>, Vec<f64>)>,
+    /// `(target, variance)` `[K][comp][nb]` per unit (a field, or [`JOINT`]).
+    targets: HashMap<u32, (Vec<f64>, Vec<f64>)>,
+}
+
+impl ClTerm {
+    fn comps(&self) -> usize {
+        if self.spin2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn nb(&self) -> usize {
+        self.edges.len() - 1
+    }
+
+    /// `[rows][K][comp][nb]` of the `C_l` `[rows][K][comp][lmax + 1]`.
+    fn bin(&self, cl: &[f64]) -> Vec<f64> {
+        let (nl, c) = (self.sht.lmax + 1, self.comps());
+        cl.chunks(nl)
+            .enumerate()
+            .flat_map(|(i, row)| {
+                let w2 = self.w2[(i / c) % self.k];
+                self.edges.windows(2).map(move |e| row[e[0]..e[1]].iter().sum::<f64>() / (e[1] - e[0]) as f64 / w2)
+            })
+            .collect()
+    }
+
+    /// `C_l` cotangents of the binned cotangents (transpose of [`bin`](Self::bin)).
+    fn bin_t(&self, cot: &[f64]) -> Vec<f64> {
+        let (nl, c, nb) = (self.sht.lmax + 1, self.comps(), self.nb());
+        let mut out = vec![0.0; cot.len() / nb * nl];
+        for (i, (row, o)) in cot.chunks(nb).zip(out.chunks_mut(nl)).enumerate() {
+            let w2 = self.w2[(i / c) % self.k];
+            for (e, &g) in self.edges.windows(2).zip(row) {
+                o[e[0]..e[1]].iter_mut().for_each(|x| *x = g / (e[1] - e[0]) as f64 / w2);
+            }
+        }
+        out
+    }
+
+    /// Target and variance of a unit from the `a_lm` `[2][K]` (spin 2:
+    /// `[2][K][E, B]`) of its half missions.
+    fn target(&self, alms: &[Vec<C64>]) -> (Vec<f64>, Vec<f64>) {
+        let h = alms.len() / 2;
+        let (a1, a2) = (&alms[..h], &alms[h..]);
+        let spectra = |x: &[Vec<C64>], y: &[Vec<C64>]| -> Vec<f64> { self.bin(&x.iter().zip(y).flat_map(|(p, q)| self.sht.cross_power(p, q)).collect::<Vec<_>>()) };
+        let (c12, c11, c22) = (spectra(a1, a2), spectra(a1, a1), spectra(a2, a2));
+        let (nb, c) = (self.nb(), self.comps());
+        let var = (0..c12.len()).map(|i| ((c11[i] * c22[i] + c12[i] * c12[i]) / self.modes[(i / (c * nb)) * nb + i % nb]).max(1e-300)).collect();
+        (c12, var)
+    }
+
+    /// `mean(r^2 / V)` of the binned spectra `cb` of a unit, and the binned
+    /// cotangent `2 r / V / n` times `s`.
+    fn chi2(&self, unit: u32, cb: &[f64], s: f64) -> (f64, Vec<f64>) {
+        let (t, v) = &self.targets[&unit];
+        let n = t.len() as f64;
+        let mut loss = 0.0;
+        let cot = cb
+            .iter()
+            .zip(t.iter().zip(v))
+            .map(|(m, (a, b))| {
+                let r = m - a;
+                loss += r * r / b;
+                s * 2.0 * r / b / n
+            })
+            .collect();
+        (loss / n, cot)
+    }
+}
+
 struct Trainer<B: Backend> {
     back: B,
     weights: Weights,
@@ -570,6 +854,7 @@ struct Trainer<B: Backend> {
     /// Estimate the bias of every coefficient (else zero where there is no
     /// noise bias, [`Stats::exact`]).
     bias_all: bool,
+    cl: Option<ClTerm>,
 }
 
 /// `(w_c)` of `DenoiseLoss.weights`: `N_c / V_c / n`, the largest weight
@@ -607,9 +892,9 @@ fn add(a: &[C64], b: &[C64]) -> Vec<C64> {
     a.iter().zip(b).map(|(x, y)| x + y).collect()
 }
 
-/// `total = sum_t w_t terms[t]` of terms `[total, data, l1, l2, l3]`.
-fn total(w: &Weights, terms: &mut [f64; 5]) {
-    terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4];
+/// `total = sum_t w_t terms[t]` of terms `[total, data, l1, l2, l3, cl]`.
+fn total(w: &Weights, terms: &mut [f64; 6]) {
+    terms[0] = w.data * terms[1] + w.l1 * terms[2] + w.l2 * terms[3] + w.l3 * terms[4] + w.cl * terms[5];
 }
 
 impl<B: Backend> Trainer<B> {
@@ -810,15 +1095,15 @@ impl<B: Backend> Trainer<B> {
     }
 
     /// The loss of `f` (a field, or the sum over the fields of the joint
-    /// pair): terms `[total, data, l1, l2, l3]`; `live = Some((data draws,
+    /// pair): terms `[total, data, l1, l2, l3, cl]`; `live = Some((data draws,
     /// hm draws))` for the live-bias loss (else the frozen biases); with
     /// `backward`, the parameter cotangents of the total are added.
-    fn loss_of(&mut self, f: u32, live: Option<(&[(usize, f64)], &[(usize, f64)])>, backward: bool) -> [f64; 5] {
+    fn loss_of(&mut self, f: u32, live: Option<(&[(usize, f64)], &[(usize, f64)])>, backward: bool) -> [f64; 6] {
         let (u, tape, scales) = self.output(f);
         let y = self.front(f, &u);
         let n = self.npix();
         let (fields, wt) = self.parts(f);
-        let mut terms = [0.0; 5];
+        let mut terms = [0.0; 6];
         let mut du = Vec::new();
         for (k, g) in fields.into_iter().enumerate() {
             let x = y.as_ref().unwrap_or(&u);
@@ -829,12 +1114,88 @@ impl<B: Backend> Trainer<B> {
             terms.iter_mut().zip(&t).for_each(|(a, b)| *a += b);
             du.extend(d);
         }
+        // The cl term: on the fields (spin 0) or on the output (spin 2).
+        let spin2 = self.cl.as_ref().is_some_and(|c| c.spin2);
+        let cl = (self.cl.is_some() && self.weights.cl != 0.0).then(|| self.cl_term(f, if spin2 { &u } else { y.as_ref().unwrap_or(&u) }, backward));
+        if let Some((v, _)) = &cl {
+            terms[5] = *v;
+            terms[0] += self.weights.cl * v;
+        }
         if backward {
-            let du = self.stack(du);
-            let du = self.front_adjoint(f, du);
+            let mut du = self.stack(du);
+            if let Some((_, Some(g))) = &cl {
+                if !spin2 {
+                    self.back.axpy(&mut du, g, 1.0);
+                }
+            }
+            let mut du = self.front_adjoint(f, du);
+            if let Some((_, Some(g))) = &cl {
+                if spin2 {
+                    self.back.axpy(&mut du, g, 1.0);
+                }
+            }
             self.back.net_backward(&tape, &scales, &du);
         }
         terms
+    }
+
+    /// The units of the cl term of `f` (see [`ClTerm`]).
+    fn cl_units(&self, f: u32) -> Vec<u32> {
+        if self.cl.as_ref().unwrap().spin2 {
+            assert_eq!(f, JOINT, "the spin-2 cl term is a term of the joint pair");
+            vec![JOINT]
+        } else {
+            self.parts(f).0
+        }
+    }
+
+    /// Targets of the cl units of `f` (computed once from the half missions).
+    fn cl_targets(&mut self, f: u32) {
+        let n = self.npix();
+        for g in self.cl_units(f) {
+            if self.cl.as_ref().unwrap().targets.contains_key(&g) {
+                continue;
+            }
+            let (x, offs) = if g == JOINT {
+                let (h1, h2) = self.cl.as_ref().unwrap().hm.clone().expect("spin-2 cl: the half missions of the pair (stlp_train_set_cl)");
+                (self.back.upload(&[h1, h2].concat()), vec![0, 2 * n])
+            } else {
+                let fd = self.field(g);
+                let (d1, d2) = (fd.d1.as_ref().expect("cl: half mission d1"), fd.d2.as_ref().expect("cl: half mission d2"));
+                (self.back.combine(&[(d1, 0, None), (d2, 0, None)]), vec![0, n])
+            };
+            let alms = self.back.cl_alms(&x, &offs);
+            let c = self.cl.as_mut().unwrap();
+            let t = c.target(&alms);
+            c.targets.insert(g, t);
+        }
+    }
+
+    /// The cl term of `f` at `x` (the fields `[units, npix]`, or the output
+    /// pair with spin 2) and with `backward` its map cotangent at `x` (times
+    /// the weight of the term).
+    fn cl_term(&mut self, f: u32, x: &B::Map, backward: bool) -> (f64, Option<B::Map>) {
+        self.cl_targets(f);
+        let n = self.npix();
+        let units = self.cl_units(f);
+        let spin2 = self.cl.as_ref().unwrap().spin2;
+        let offs: Vec<usize> = (0..units.len()).map(|k| k * n * if spin2 { 2 } else { 1 }).collect();
+        let raw = self.back.cl_forward(x, &offs);
+        let c = self.cl.as_ref().unwrap();
+        let cb = c.bin(&raw);
+        let per = cb.len() / units.len();
+        let mut loss = 0.0;
+        let mut cot = Vec::with_capacity(cb.len());
+        for (g, part) in units.iter().zip(cb.chunks(per)) {
+            let (l, d) = c.chi2(*g, part, self.weights.cl);
+            loss += l;
+            cot.extend(d);
+        }
+        let g = backward.then(|| {
+            let dcl = c.bin_t(&cot);
+            self.back.cl_backward(&dcl)
+        });
+        (loss, g)
     }
 
     /// The live-bias terms of field `f` at the output `u[uo..uo + npix]`
@@ -845,12 +1206,12 @@ impl<B: Backend> Trainer<B> {
     /// (draws `hm`, full and half missions of one simulation); targets and
     /// weights as the frozen loss.
     #[allow(clippy::too_many_arguments)]
-    fn field_live(&mut self, f: u32, u: &B::Map, uo: usize, data: &[(usize, f64)], hm: &[(usize, f64)], wt: f64, backward: bool) -> ([f64; 5], Option<B::Map>) {
+    fn field_live(&mut self, f: u32, u: &B::Map, uo: usize, data: &[(usize, f64)], hm: &[(usize, f64)], wt: f64, backward: bool) -> ([f64; 6], Option<B::Map>) {
         self.targets(f);
         let w = self.weights.scaled(wt);
         let n = self.npix();
         let mut du = self.back.zeros(n);
-        let mut terms = [0.0; 5];
+        let mut terms = [0.0; 6];
         let targets = self.field(f).targets.as_ref().unwrap();
         let (data_t, l1_t, l3_t) = (targets.data.clone(), targets.l1.clone(), targets.l3.clone());
         let mean = |v: &[C64], k: usize, at: usize, h: usize| -> Vec<C64> {
@@ -944,12 +1305,12 @@ impl<B: Backend> Trainer<B> {
 
     /// The frozen-bias terms of field `f` at the output `u[uo..uo + npix]`,
     /// times `wt`, and with `backward` the map cotangent of their total.
-    fn field_loss(&mut self, f: u32, u: &B::Map, uo: usize, wt: f64, backward: bool) -> ([f64; 5], Option<B::Map>) {
+    fn field_loss(&mut self, f: u32, u: &B::Map, uo: usize, wt: f64, backward: bool) -> ([f64; 6], Option<B::Map>) {
         self.targets(f);
         let w = self.weights.scaled(wt);
         let n = self.npix();
         let mut du = self.back.zeros(n);
-        let mut terms = [0.0; 5];
+        let mut terms = [0.0; 6];
         let fd = self.fields.get(&f).unwrap();
         let bias = fd.bias.clone().expect("frozen biases (stlp_train_bias) before the loss");
         let targets = fd.targets.as_ref().unwrap();
@@ -1002,12 +1363,12 @@ impl<B: Backend> Trainer<B> {
     }
 
     /// The frozen-bias loss of `f` (see [`loss_of`](Self::loss_of)).
-    fn loss(&mut self, f: u32, backward: bool) -> [f64; 5] {
+    fn loss(&mut self, f: u32, backward: bool) -> [f64; 6] {
         self.loss_of(f, None, backward)
     }
 
     /// The live-bias loss of `f` (see [`loss_of`](Self::loss_of)).
-    fn loss_live(&mut self, f: u32, data: &[(usize, f64)], hm: &[(usize, f64)], backward: bool) -> [f64; 5] {
+    fn loss_live(&mut self, f: u32, data: &[(usize, f64)], hm: &[(usize, f64)], backward: bool) -> [f64; 6] {
         self.loss_of(f, Some((data, hm)), backward)
     }
 }
@@ -1111,19 +1472,20 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
         let stats = Stats::new(nside, j, integer(&v, "block_pixels", 4096));
         let levels = stats.cfg.levels();
         let l = &v["loss"];
-        let weights = Weights { data: real(l, "data", 0.0), l1: real(l, "l1", 0.0), l2: real(l, "l2", 0.0), l3: real(l, "l3", 0.0) };
+        let weights = Weights { data: real(l, "data", 0.0), l1: real(l, "l1", 0.0), l2: real(l, "l2", 0.0), l3: real(l, "l3", 0.0), cl: real(l, "cl", 0.0) };
         let bias_batch = integer(&v, "bias_batch", 5);
         let bias_all = v["bias_all"].as_bool().unwrap_or(false);
         let backend = v["backend"].as_str().unwrap_or("cpu");
         let inner = match backend {
             "cpu" => AnyTrainer::Cpu(Trainer {
-                back: CpuBack { engines: HashMap::new(), adam: Adam::new(size), g: vec![0.0; size], w, cond: vec![Vec::new(); net.stencils.len()], net, stats, eb: None },
+                back: CpuBack { engines: HashMap::new(), adam: Adam::new(size), g: vec![0.0; size], w, cond: vec![Vec::new(); net.stencils.len()], net, stats, eb: None, cl: None },
                 weights,
                 t857: None,
                 fields: HashMap::new(),
                 joint: None,
                 bias_batch,
                 bias_all,
+                cl: None,
             }),
             #[cfg(feature = "gpu")]
             "gpu" => {
@@ -1142,7 +1504,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats, eb: None }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all })
+                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats, eb: None, cl: None }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all, cl: None })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
@@ -1369,6 +1731,9 @@ pub unsafe extern "C" fn stlp_train_set_field(
                 bias: None,
             };
             t.fields.insert(field, fd);
+            if let Some(c) = t.cl.as_mut() {
+                c.targets.remove(&field);
+            }
         });
         0
     })
@@ -1422,6 +1787,56 @@ pub unsafe extern "C" fn stlp_train_set_joint(p: *mut UNetHandle, d: *const f64,
     })
 }
 
+/// The cl term of the loss (see `ClTerm`, weight `loss.cl`): JSON `config`
+/// `lmax` (`2 nside - 1`), `edges` (the multipole bin edges, `[lmin,
+/// lmin + width, ..., lmax + 1]`), `spin` (0: the scalar spectra of the
+/// fields of the terms, targets from their half missions; 2: the EE and BB
+/// spectra of the joint pair's output `(Q, U)`, targets from the half
+/// missions `d1`, `d2` `[2, 12 nside^2]` given here); the `k` apodised mask
+/// weights `masks` `[k, 12 nside^2]`; `k = 0` drops the term (the driver
+/// may then compute it).  0, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_train_set_cl(p: *mut UNetHandle, config: *const c_char, masks: *const f64, k: usize, d1: *const f64, d2: *const f64) -> i32 {
+    guard(-1, || {
+        let h = &mut *p;
+        let n = h.npix;
+        let nside = h.config["nside"].as_u64().unwrap() as usize;
+        if k == 0 {
+            with!(h, t => {
+                t.cl = None;
+                t.back.set_cl(None);
+            });
+            return 0;
+        }
+        let v = parse(config);
+        let lmax = integer(&v, "lmax", 2 * nside - 1);
+        assert!(lmax < 4 * nside, "lmax must be below 4 nside");
+        let edges: Vec<usize> = v["edges"].as_array().expect("edges: the bin edges").iter().map(|e| e.as_u64().expect("bin edge") as usize).collect();
+        assert!(edges.len() >= 2 && edges.windows(2).all(|e| e[0] < e[1]) && *edges.last().unwrap() <= lmax + 1, "edges: increasing, at most lmax + 1");
+        let spin = integer(&v, "spin", 0);
+        assert!(spin == 0 || spin == 2, "spin 0 or 2");
+        let w: Vec<Vec<f64>> = std::slice::from_raw_parts(masks, k * n).chunks(n).map(<[f64]>::to_vec).collect();
+        assert!(w.iter().flatten().all(|x| x.is_finite()), "mask weights must be finite");
+        let hm = (spin == 2).then(|| {
+            assert!(!d1.is_null() && !d2.is_null(), "spin-2 cl: the half missions d1, d2 of the pair");
+            (std::slice::from_raw_parts(d1, 2 * n).to_vec(), std::slice::from_raw_parts(d2, 2 * n).to_vec())
+        });
+        let w2: Vec<f64> = w.iter().map(|m| m.iter().map(|x| x * x).sum::<f64>() / n as f64).collect();
+        let w4: Vec<f64> = w.iter().map(|m| m.iter().map(|x| x.powi(4)).sum::<f64>() / n as f64).collect();
+        let modes: Vec<f64> = (0..k)
+            .flat_map(|i| {
+                let fsky = w2[i] * w2[i] / w4[i];
+                edges.windows(2).map(move |e| fsky * (e[0]..e[1]).map(|l| (2 * l + 1) as f64).sum::<f64>()).collect::<Vec<_>>()
+            })
+            .collect();
+        with!(h, t => {
+            t.back.set_cl(Some((lmax, &w, spin == 2)));
+            t.cl = Some(ClTerm { sht: Sht::new(nside, lmax), k, spin2: spin == 2, edges: edges.clone(), w2: w2.clone(), modes: modes.clone(), hm: hm.clone(), targets: HashMap::new() });
+        });
+        0
+    })
+}
+
 /// The front end of the joint pair (or its transpose with `adjoint`) on
 /// `b` pairs `x` `[b, 2, 12 nside^2]` to `out` (same shape): to bring
 /// observations and noise pools to the domain of the fields.  0, or -1 on
@@ -1458,7 +1873,7 @@ pub unsafe extern "C" fn stlp_train_bias(p: *mut UNetHandle, field: u32, sims: *
     })
 }
 
-/// Loss terms `[total, data, l1, l2, l3]` of `field` (`0xFFFFFFFF`: the
+/// Loss terms `[total, data, l1, l2, l3, cl]` of `field` (`0xFFFFFFFF`: the
 /// joint pair, the terms summed over its fields) to `out`; with
 /// `backward`, the parameter cotangents of the total are added.  0, or -1
 /// on failure.
@@ -1467,12 +1882,12 @@ pub unsafe extern "C" fn stlp_train_loss(p: *mut UNetHandle, field: u32, backwar
     guard(-1, || {
         let h = &mut *p;
         let terms = with!(h, t => t.loss(field, backward));
-        std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&terms);
+        std::slice::from_raw_parts_mut(out, 6).copy_from_slice(&terms);
         0
     })
 }
 
-/// Live-bias loss terms of `field` (`[total, data, l1, l2, l3]` to `out`):
+/// Live-bias loss terms of `field` (`[total, data, l1, l2, l3, cl]` to `out`):
 /// the `kd` draws `(dsims, dsigns)` of the data term, the `kh` draws
 /// `(hsims, hsigns)` of the `l` terms; with `backward` the parameter
 /// cotangents are added, and with `lr > 0` an Adam step follows (the
@@ -1516,14 +1931,14 @@ pub unsafe extern "C" fn stlp_train_live(
             }
             terms
         });
-        std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&terms);
+        std::slice::from_raw_parts_mut(out, 6).copy_from_slice(&terms);
         0
     })
 }
 
 /// One Adam step on `field`: zeroes the cotangents, loss and its gradient,
 /// update with learning rate `lr`; the terms (before the update) to `out`
-/// (`[total, data, l1, l2, l3]`).  0, or -1 on failure.
+/// (`[total, data, l1, l2, l3, cl]`).  0, or -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn stlp_train_step(p: *mut UNetHandle, field: u32, lr: f64, out: *mut f64) -> i32 {
     guard(-1, || {
@@ -1535,7 +1950,7 @@ pub unsafe extern "C" fn stlp_train_step(p: *mut UNetHandle, field: u32, lr: f64
             t.back.adam(lr);
             terms
         });
-        std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&terms);
+        std::slice::from_raw_parts_mut(out, 6).copy_from_slice(&terms);
         0
     })
 }
@@ -1568,7 +1983,7 @@ pub unsafe extern "C" fn stlp_train_lbfgs(p: *mut UNetHandle, fields: *const u32
                 let w: Vec<f32> = q.iter().map(|&a| a as f32).collect();
                 t.back.set_params(&w);
                 t.back.zero_grad();
-                let mut total = [0.0; 5];
+                let mut total = [0.0; 6];
                 for &fi in &fields {
                     let terms = t.loss(fi, true);
                     total.iter_mut().zip(&terms).for_each(|(a, b)| *a += b);
@@ -1586,7 +2001,7 @@ pub unsafe extern "C" fn stlp_train_lbfgs(p: *mut UNetHandle, fields: *const u32
             (evals, history, terms_history)
         });
         let report = json!({"evaluations": evals, "loss_history": history, "terms_history": terms_history,
-            "terms": ["total", "data", "l1", "l2", "l3"], "optimizer": "native STL L-BFGS (strong Wolfe)"});
+            "terms": ["total", "data", "l1", "l2", "l3", "cl"], "optimizer": "native STL L-BFGS (strong Wolfe)"});
         CString::new(report.to_string()).unwrap().into_raw()
     })
 }
