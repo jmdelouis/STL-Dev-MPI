@@ -425,6 +425,19 @@ pub(crate) struct Contrib {
     /// Mask indicator at the first pixel (0: every pixel).
     pub(crate) mask: u64,
 }
+/// A contribution of `coef_reverse_k`: its cotangents under the masks of the
+/// block, `g[m] / N_m`, at `gs[g0 + 2m]`, `gs[g0 + 2m + 1]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContribK {
+    pub(crate) kind: i32,
+    pub(crate) pad: i32,
+    pub(crate) a: Operand,
+    pub(crate) b: Operand,
+    pub(crate) g0: u64,
+}
+
+unsafe impl DeviceRepr for ContribK {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -1603,6 +1616,10 @@ impl<'a> GpuEngine<'a> {
                 let mut gmod: BTreeMap<usize, CudaSlice<f64>> = BTreeMap::new();
                 // Targets of the coefficient cotangents, contributions in plan order.
                 let mut targets: Vec<(u64, i64, Vec<Contrib>)> = Vec::new();
+                // The masks merged per contribution (coef_reverse_k), up to 8 masks.
+                let merged = (1..=8).contains(&k_count);
+                let mut targets_k: Vec<(u64, i64, Vec<ContribK>)> = Vec::new();
+                let mut gs: Vec<f64> = Vec::new();
                 let mut index: HashMap<u64, usize> = HashMap::new();
                 let f64s = std::mem::size_of::<f64>() as u64;
                 let dg = self.cfg.j_to_dg.clone();
@@ -1676,6 +1693,29 @@ impl<'a> GpuEngine<'a> {
                             }
                         }
                         let mut at: [Option<usize>; 2] = [None, None];
+                        if merged {
+                            // One contribution per target for all the masks: g[m] / N_m in gs.
+                            if k_count > 1 && (0..k_count).all(|k| gradient[(bi * k_count + k) * np + i] == zero) {
+                                continue;
+                            }
+                            let g0 = gs.len() as u64;
+                            for (k, &(_, n_total)) in masks.iter().enumerate() {
+                                let g = gradient[(bi * k_count + k) * np + i];
+                                let inv_n = 1.0 / n_total;
+                                gs.push(g.re * inv_n);
+                                gs.push(g.im * inv_n);
+                            }
+                            for (s, &((ptr, im), kind)) in slots.iter().enumerate() {
+                                let t = *at[s].get_or_insert_with(|| {
+                                    *index.entry(ptr).or_insert_with(|| {
+                                        targets_k.push((ptr, im, Vec::new()));
+                                        targets_k.len() - 1
+                                    })
+                                });
+                                targets_k[t].2.push(ContribK { kind, pad: 0, a, b: bo, g0 });
+                            }
+                            continue;
+                        }
                         for k in 0..k_count {
                             let g = gradient[(bi * k_count + k) * np + i];
                             if k_count > 1 && g == zero {
@@ -1693,6 +1733,36 @@ impl<'a> GpuEngine<'a> {
                                 targets[t].2.push(Contrib { kind, pad: 0, a, b: bo, g_re: g.re, g_im: g.im, inv_n, mask });
                             }
                         }
+                    }
+                }
+                if !targets_k.is_empty() && nf > 0 {
+                    let mut flat_t = Vec::with_capacity(targets_k.len());
+                    let mut flat_c = Vec::new();
+                    for (ptr, im, cs) in &targets_k {
+                        let start = flat_c.len() as u32;
+                        flat_c.extend_from_slice(cs);
+                        flat_t.push(Target { ptr: *ptr, im_off: *im, start, end: flat_c.len() as u32 });
+                    }
+                    let lists = t.elapsed().as_secs_f64();
+                    *self.timers.entry("gpu_host_lists").or_default() += lists;
+                    *self.timers.entry("count_reverse_contribs").or_default() += flat_c.len() as f64;
+                    *self.timers.entry("count_reverse_pixels_x_contribs").or_default() += (flat_c.len() * nf) as f64;
+                    *self.timers.entry("gpu_host_lists_reverse").or_default() += lists;
+                    let dc = self.gpu.upload(&flat_c);
+                    let dg = self.gpu.upload(&gs);
+                    let mut mp = [0u64; 8];
+                    for (k, &(mask, _)) in masks.iter().enumerate() {
+                        mp[k] = mask;
+                    }
+                    let dm = self.gpu.upload(&mp);
+                    for part in flat_t.chunks(65535) {
+                        let dt = self.gpu.upload(part);
+                        self.gpu.launch(
+                            "coef_reverse_k",
+                            (nf.div_ceil(256) as u32, part.len() as u32),
+                            256,
+                            &[self.gpu.a(&dt), self.gpu.a(&dc), self.gpu.a(&dg), self.gpu.a(&dm), (k_count as i32).into(), nf.into()],
+                        );
                     }
                 }
                 if !targets.is_empty() && nf > 0 {

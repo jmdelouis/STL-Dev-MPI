@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"), include_str!("nn.cu"));
 
-const KERNELS: [&str; 119] = [
+const KERNELS: [&str; 120] = [
     "disc_terms",
     "disc_terms_rev",
     "ring_thetas",
@@ -48,6 +48,7 @@ const KERNELS: [&str; 119] = [
     "coef_partial",
     "coef_partial_k",
     "coef_reverse",
+    "coef_reverse_k",
     "kappa_pchip",
     "quad_mean",
     "detail_moments",

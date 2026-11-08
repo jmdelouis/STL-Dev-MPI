@@ -1428,6 +1428,14 @@ struct Contrib {
     u64 mask;   // as in ForwardItem: no contribution where the mask is 0
 };
 
+struct ContribK {
+    int kind;
+    int pad;
+    Operand a;
+    Operand b;
+    u64 g0;     // its cotangents g[m] / N_m under the k masks: gs[g0 + 2m], gs[g0 + 2m + 1]
+};
+
 struct Target {
     u64 ptr;      // re at pixel 0
     i64 im_off;   // < 0: real target (receives the real part)
@@ -1525,6 +1533,98 @@ extern "C" __global__ void coef_reverse(const Target* targets, const Contrib* co
                 double pi = gr * aim + gi * are;
                 vr = pr * c.inv_n;
                 vi = pi * c.inv_n;
+            }
+        }
+        dre += vr;
+        dim += vi;
+    }
+    d[i] = dre;
+    if (t.im_off >= 0) d[t.im_off + i] = dim;
+}
+
+// coef_reverse with the masks merged: a contribution carries its cotangent
+// under each of the k <= 8 masks of the block, g[m] / N_m (gs[g0 + 2m],
+// gs[g0 + 2m + 1]); every contribution being linear in its cotangent, the
+// pixel receives the one with g_eff = sum over the masks that keep it of
+// g[m] / N_m.  The k mask indicators of the block (masks[m], 0: every
+// pixel) are read once per pixel.  The same values as coef_reverse to
+// rounding (the masks are summed before the product).
+extern "C" __global__ void coef_reverse_k(const Target* targets, const ContribK* contribs, const double* gs,
+                                          const u64* masks, int k, i64 n) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    bool keep[8];
+    bool any = false;
+    _Pragma("unroll") for (int m = 0; m < 8; m++) {
+        keep[m] = m < k && !(masks[m] && ((const double*)masks[m])[i] == 0.0);
+        any = any || keep[m];
+    }
+    if (!any) return;
+    Target t = targets[blockIdx.y];
+    double* d = (double*)t.ptr;
+    double dre = d[i];
+    double dim = t.im_off >= 0 ? d[t.im_off + i] : 0.0;
+    u64 pa = 0, pb = 0;
+    double ca_re = 0.0, ca_im = 0.0, cb_re = 0.0, cb_im = 0.0;
+    for (u32 q = t.start; q < t.end; q++) {
+        ContribK c = contribs[q];
+        double gre = 0.0, gim = 0.0;
+        _Pragma("unroll") for (int m = 0; m < 8; m++) {
+            if (keep[m]) {
+                gre += gs[c.g0 + 2 * m];
+                gim += gs[c.g0 + 2 * m + 1];
+            }
+        }
+        double are = 0.0, aim = 0.0, bre = 0.0, bim = 0.0, vr = 0.0, vi = 0.0;
+        if (c.kind != R_MEAN && c.kind != R_GA) {
+            if (c.a.ptr != pa) { load(c.a, i, &ca_re, &ca_im); pa = c.a.ptr; }
+            are = ca_re;
+            aim = ca_im;
+        }
+        if (c.kind == R_S1X_A || c.kind == R_S1X_B || c.kind == R_GA) {
+            if (c.b.ptr != pb) { load(c.b, i, &cb_re, &cb_im); pb = c.b.ptr; }
+            bre = cb_re;
+            bim = cb_im;
+        }
+        switch (c.kind) {
+            case R_MEAN:
+                vr = gre;
+                break;
+            case R_VAR:
+                vr = 2.0 * gre * are;
+                break;
+            case R_S1SAME: {
+                double mag = hypot(are, aim);
+                double dd = mag == 0.0 ? 1.0 : mag;
+                vr = (gre * are) / dd;
+                vi = (gre * aim) / dd;
+                break;
+            }
+            case R_S2SAME:
+                vr = 2.0 * gre * are;
+                vi = 2.0 * gre * aim;
+                break;
+            case R_S1X_A: {
+                double yr, yi;
+                root_normalise(bre, bim, &yr, &yi);
+                root_modulus_vjp(are, aim, gre * yr - gim * yi, gre * yi + gim * yr, &vr, &vi);
+                break;
+            }
+            case R_S1X_B: {
+                double yr, yi;
+                root_normalise(are, aim, &yr, &yi);
+                double gr = gre, gi = -gim;
+                root_modulus_vjp(bre, bim, gr * yr - gi * yi, gr * yi + gi * yr, &vr, &vi);
+                break;
+            }
+            case R_GA:
+                vr = gre * bre - gim * bim;
+                vi = gre * bim + gim * bre;
+                break;
+            default: {
+                double gr = gre, gi = -gim;
+                vr = gr * are - gi * aim;
+                vi = gr * aim + gi * are;
             }
         }
         dre += vr;
