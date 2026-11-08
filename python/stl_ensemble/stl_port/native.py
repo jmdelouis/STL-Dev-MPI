@@ -108,6 +108,7 @@ def _library(path=None):
         "stlp_train_set_joint": ([_VOID, _DOUBLE, _DOUBLE, C.c_uint32, C.c_uint32, C.c_char_p, C.c_double], C.c_int),
         "stlp_train_front": ([_VOID, _DOUBLE, C.c_size_t, C.c_bool, _DOUBLE], C.c_int),
         "stlp_train_set_cl": ([_VOID, C.c_char_p, _DOUBLE, C.c_size_t, _DOUBLE, _DOUBLE], C.c_int),
+        "stlp_train_profile": ([_VOID], _VOID),
     }
     for name, (argtypes, restype) in signatures.items():
         fn = getattr(lib, name)
@@ -999,6 +1000,20 @@ class NativeUNet:
                                                   _pointer(dg), ds.size, hs.ctypes.data_as(_UINT64), _pointer(hg),
                                                   hs.size, bool(backward), float(lr), _pointer(out)))
             return self._terms(out)
+
+    def profile(self):
+        """The phase timers of the trainer and of the GPU network, {name: (seconds, count)},
+        then reset; empty unless the process runs with STL_PROFILE=1 (each mark then waits
+        for the device, so that the time is charged to the phase that launched the work)."""
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_train_profile(self._handle)
+            if not p:
+                raise _error(self._lib)
+            try:
+                return {k: tuple(v) for k, v in json.loads(C.string_at(p)).items()}
+            finally:
+                self._lib.stlp_string_free(p)
 
     def lbfgs(self, names, options=None):
         """Native strong-Wolfe L-BFGS on the parameters for the sum of the

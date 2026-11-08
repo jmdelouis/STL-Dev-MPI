@@ -1,0 +1,28 @@
+{
+ "nside": 256,
+ "pol": "ebqu",
+ "sims": 6,
+ "channels": [
+  16,
+  32,
+  48,
+  64,
+  64,
+  64
+ ],
+ "profile": "0",
+ "cache_bytes": 1073741824,
+ "setup_s": 217.86968187615275,
+ "frozen_step": {
+  "wall_s": 15.614259301995238,
+  "phases": {}
+ },
+ "live_step": {
+  "wall_s": 40.88893882961323,
+  "phases": {}
+ },
+ "bias_estimate": {
+  "wall_s": 103.79348778212443,
+  "phases": {}
+ }
+}

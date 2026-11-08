@@ -310,6 +310,7 @@ impl GpuUNet {
         let (s0, s1) = self.scale_pair(scales);
         let n0 = self.stencils[0].n;
         assert_eq!(d.len(), m * n0, "one input of maps");
+        let mut t0 = stl_core::prof::start(|| g.sync());
         let x = g.zeros::<f32>(n0 * (m + nc));
         g.launch1("nn_input", n0, &[g.a(d), s0.into(), s1.into(), if nc > 0 { g.a(&cond[0]) } else { NULL }, n0.into(), m.into(), nc.into(), g.a(&x)]);
         let mut h = x;
@@ -324,6 +325,7 @@ impl GpuUNet {
             let t = self.block(b, h);
             h = g.copy(&t.out);
             enc.push(t);
+            stl_core::prof::mark(&mut t0, &format!("unet.fwd.enc.L{k}"), || g.sync());
         }
         let ch = &self.net.cfg.channels;
         let mut dec = Vec::new();
@@ -343,12 +345,14 @@ impl GpuUNet {
             let t = self.block(b, x);
             h = g.copy(&t.out);
             dec.push(t);
+            stl_core::prof::mark(&mut t0, &format!("unet.fwd.dec.L{k}"), || g.sync());
         }
         let c0 = ch[0];
         let r = g.zeros::<f32>(m * n0);
         g.launch1("nn_head", m * n0, &[g.a(&h), self.wp(self.net.head[0]), self.wp(self.net.head[1]), n0.into(), c0.into(), m.into(), g.a(&r)]);
         let u = g.zeros::<f64>(m * n0);
         g.launch1("nn_output", m * n0, &[g.a(d), g.a(&r), s0.into(), s1.into(), n0.into(), m.into(), g.a(&u)]);
+        stl_core::prof::mark(&mut t0, "unet.fwd.head", || g.sync());
         (u, Tape { enc, dec })
     }
 
@@ -362,6 +366,7 @@ impl GpuUNet {
         let ch = &self.net.cfg.channels;
         let n0 = self.stencils[0].n;
         let c0 = ch[0];
+        let mut t0 = stl_core::prof::start(|| g.sync());
         let dr = g.zeros::<f32>(m * n0);
         g.launch1("nn_output_back", m * n0, &[g.a(du), s0.into(), s1.into(), n0.into(), m.into(), g.a(&dr)]);
         let last = &tape.dec.last().map_or(&tape.enc[0].out, |t| &t.out);
@@ -375,6 +380,7 @@ impl GpuUNet {
         }
         let mut dh = g.zeros::<f32>(n0 * c0);
         g.launch1("nn_head_back", n0 * c0, &[g.a(&dr), self.wp(self.net.head[0]), n0.into(), c0.into(), m.into(), g.a(&dh)]);
+        stl_core::prof::mark(&mut t0, "unet.bwd.head", || g.sync());
         let levels = self.stencils.len();
         let mut dskip: Vec<Option<CudaSlice<f32>>> = (0..levels).map(|_| None).collect();
         for i in (0..self.net.dec.len()).rev() {
@@ -391,6 +397,7 @@ impl GpuUNet {
             dskip[k] = Some(ds);
             dh = g.zeros::<f32>(n / 4 * cprev);
             g.launch1("nn_unpool_back", n / 4 * cprev, &[g.a(&dup), (n / 4).into(), cprev.into(), g.a(&dh)]);
+            stl_core::prof::mark(&mut t0, &format!("unet.bwd.dec.L{k}"), || g.sync());
         }
         for k in (0..levels).rev() {
             let b = &self.net.enc[k];
@@ -404,6 +411,7 @@ impl GpuUNet {
                 dh = g.zeros::<f32>(4 * n * c);
                 g.launch1("nn_pool_back", 4 * n * c, &[g.a(&din), n.into(), c.into(), g.a(&dh)]);
             }
+            stl_core::prof::mark(&mut t0, &format!("unet.bwd.enc.L{k}"), || g.sync());
         }
     }
 }

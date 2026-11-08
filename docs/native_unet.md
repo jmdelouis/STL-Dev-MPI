@@ -509,3 +509,27 @@ trajectories at step 300:
 | ebqu | trainer, `1 + 1e-7` | 0.5255 | 0.0018 | 0.460, 0.442, 0.431, 0.411 |
 
 The two paths lie within the spread that a relative 1e-7 perturbation produces.
+
+### Where a step goes (`--pol ebqu`, cl in the trainer, one T4)
+
+`STL_PROFILE=1` turns on the phase timers of the trainer and of the GPU network
+(`stl_core::prof`, read with `NativeUNet.profile()`; each mark waits for the device):
+`tests/profile_native_step.py`, the options of `n256_eb_c16` with `--pol ebqu`, channels
+16-64, stat masks 0, 20, 30, 45°, cl masks 0, 30, 45, 60°, cond log857+sigma, 4 live draws,
+40-draw bias estimate. JSON in `docs/runs/native_step_profile/`. Seconds (% of the step):
+
+| | frozen n128 | live n128 | frozen n256 | live n256 |
+|---|---|---|---|---|
+| U-Net forward (top level / coarser) | 0.056 (1.9 %) 0.034 / 0.022 | 0.057 (0.6 %) | 0.217 (1.4 %) 0.142 / 0.075 | 0.214 (0.5 %) |
+| U-Net backward (top level / coarser) | 0.130 (4.4 %) 0.057 / 0.073 | 0.130 (1.3 %) | 0.411 (2.6 %) 0.226 / 0.185 | 0.413 (1.0 %) |
+| E/B front + transpose | 0.397 (13.4 %) | 0.399 (4.1 %) | 1.376 (8.8 %) | 1.375 (3.3 %) |
+| statistics, forward + VJP | 2.319 (78.3 %) 0.65 + 1.67 | 9.040 (93.3 %) 2.22 + 6.81 | 13.48 (85.9 %) 4.76 + 8.72 | 39.41 (94.7 %) 10.89 + 28.51 |
+| cl | 0.056 (1.9 %) | 0.058 (0.6 %) | 0.184 (1.2 %) | 0.187 (0.4 %) |
+| Adam, zero_grad, rest | 0.003 | 0.002 | 0.023 | 0.019 |
+| step (without the timers) | 2.96 (2.95) | 9.69 (9.60) | 15.69 (15.61) | 41.62 (40.89) |
+| bias estimate, 40 draws (per step, every 50) | 21.2 (0.42) | | 103.1 (2.06) | |
+
+The statistics (the live step: of `(d, u)` and of the 4 draws, data and pairs) take 78-95 % of
+a step; the U-Net, forward and backward, 2-6 % at nside 128 and 1-4 % at nside 256. nside 256
+ran with 10 simulations in the pools and a 1 GiB geometry cache (16 GB T4); nside 128 with the
+6 simulations of garoupe's data and the cache sized from the free memory.

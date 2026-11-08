@@ -103,6 +103,8 @@ trait Backend {
     /// device, `stl_gpu::GpuEb`).
     fn eb(&self, x: &Self::Map, adjoint: bool) -> Self::Map;
     /// `dst += s src` over the whole buffer.
+    /// Waits for the device (the phase timers, `stl_core::prof`).
+    fn sync(&self);
     fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64);
     /// Builds (`Some`) or drops the pseudo-spectra of the cl term: anafast
     /// (`iter = 0`) up to `lmax` of the maps times each of the weights
@@ -402,6 +404,8 @@ impl Backend for CpuBack {
         }
     }
 
+    fn sync(&self) {}
+
     fn axpy(&self, dst: &mut Vec<f64>, src: &Vec<f64>, s: f64) {
         assert_eq!(dst.len(), src.len());
         dst.iter_mut().zip(src).for_each(|(a, b)| *a += s * b);
@@ -609,6 +613,10 @@ impl Backend for GpuBack {
         } else {
             t.apply(&self.gpu, x)
         }
+    }
+
+    fn sync(&self) {
+        self.gpu.sync();
     }
 
     fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64) {
@@ -1010,12 +1018,15 @@ impl<B: Backend> Trainer<B> {
         for (s, _) in draws {
             assert!(*s < sims, "simulation {s} of {sims}");
         }
+        let mut t0 = self.tstart();
         let (u, _, _) = self.output(f);
         let y = self.front(f, &u);
+        self.tmark(&mut t0, "bias.unet_forward_and_front");
         let n = self.npix();
         for (k, g) in self.parts(f).0.into_iter().enumerate() {
             self.field_bias(g, y.as_ref().unwrap_or(&u), k * n, draws);
         }
+        self.tmark(&mut t0, "bias.stats");
     }
 
     /// Frozen biases of field `f` at the output `u[uo..uo + npix]`.
@@ -1099,8 +1110,11 @@ impl<B: Backend> Trainer<B> {
     /// hm draws))` for the live-bias loss (else the frozen biases); with
     /// `backward`, the parameter cotangents of the total are added.
     fn loss_of(&mut self, f: u32, live: Option<(&[(usize, f64)], &[(usize, f64)])>, backward: bool) -> [f64; 6] {
+        let mut t0 = self.tstart();
         let (u, tape, scales) = self.output(f);
+        self.tmark(&mut t0, "step.unet_forward");
         let y = self.front(f, &u);
+        self.tmark(&mut t0, "step.front");
         let n = self.npix();
         let (fields, wt) = self.parts(f);
         let mut terms = [0.0; 6];
@@ -1114,6 +1128,7 @@ impl<B: Backend> Trainer<B> {
             terms.iter_mut().zip(&t).for_each(|(a, b)| *a += b);
             du.extend(d);
         }
+        self.tmark(&mut t0, if live.is_some() { "step.stats_live" } else { "step.stats_frozen" });
         // The cl term: on the fields (spin 0) or on the output (spin 2).
         let spin2 = self.cl.as_ref().is_some_and(|c| c.spin2);
         let cl = (self.cl.is_some() && self.weights.cl != 0.0).then(|| self.cl_term(f, if spin2 { &u } else { y.as_ref().unwrap_or(&u) }, backward));
@@ -1121,6 +1136,7 @@ impl<B: Backend> Trainer<B> {
             terms[5] = *v;
             terms[0] += self.weights.cl * v;
         }
+        self.tmark(&mut t0, "step.cl");
         if backward {
             let mut du = self.stack(du);
             if let Some((_, Some(g))) = &cl {
@@ -1128,15 +1144,27 @@ impl<B: Backend> Trainer<B> {
                     self.back.axpy(&mut du, g, 1.0);
                 }
             }
+            self.tmark(&mut t0, "step.cotangent_sum");
             let mut du = self.front_adjoint(f, du);
             if let Some((_, Some(g))) = &cl {
                 if spin2 {
                     self.back.axpy(&mut du, g, 1.0);
                 }
             }
+            self.tmark(&mut t0, "step.front_adjoint");
             self.back.net_backward(&tape, &scales, &du);
+            self.tmark(&mut t0, "step.unet_backward");
         }
         terms
+    }
+
+    /// A phase timer start (`stl_core::prof`; `None` when off).
+    fn tstart(&self) -> Option<std::time::Instant> {
+        stl_core::prof::start(|| self.back.sync())
+    }
+
+    fn tmark(&self, t0: &mut Option<std::time::Instant>, name: &str) {
+        stl_core::prof::mark(t0, name, || self.back.sync());
     }
 
     /// The units of the cl term of `f` (see [`ClTerm`]).
@@ -1208,6 +1236,7 @@ impl<B: Backend> Trainer<B> {
     #[allow(clippy::too_many_arguments)]
     fn field_live(&mut self, f: u32, u: &B::Map, uo: usize, data: &[(usize, f64)], hm: &[(usize, f64)], wt: f64, backward: bool) -> ([f64; 6], Option<B::Map>) {
         self.targets(f);
+        let mut tp = self.tstart();
         let w = self.weights.scaled(wt);
         let n = self.npix();
         let mut du = self.back.zeros(n);
@@ -1230,6 +1259,7 @@ impl<B: Backend> Trainer<B> {
             let x = self.back.combine(&rows);
             let k = data.len();
             let (v, _) = self.back.stats(Kind::Auto, k, x, false);
+            self.tmark(&mut tp, "stats.live.data.forward");
             let h = v.len() / k;
             let (t, tv) = data_t.unwrap();
             let wc = chi2_weights(&tv, &self.back.stats_pixels(Kind::Auto));
@@ -1239,6 +1269,7 @@ impl<B: Backend> Trainer<B> {
                 let one: Vec<C64> = cot.iter().map(|c| c * (w.data / k as f64)).collect();
                 let all: Vec<C64> = (0..k).flat_map(|_| one.iter().cloned()).collect();
                 let g = self.back.stats_grad(Kind::Auto, k, &all);
+            self.tmark(&mut tp, "stats.live.data.vjp");
                 for i in 0..k {
                     self.back.add_scaled(&mut du, &g, i * n, 1.0);
                 }
@@ -1266,6 +1297,7 @@ impl<B: Backend> Trainer<B> {
             let x = self.back.combine(&rows);
             let batch = 1 + 3 * k;
             let (v, var) = self.back.stats(Kind::Cross, batch, x, true);
+            self.tmark(&mut tp, "stats.live.cross.forward");
             let h = v.len() / batch;
             let pix = self.back.stats_pixels(Kind::Cross);
             let (t1, v1) = l1_t.unwrap();
@@ -1286,6 +1318,7 @@ impl<B: Backend> Trainer<B> {
                     }
                 }
                 let g = self.back.stats_grad(Kind::Cross, batch, &cot);
+            self.tmark(&mut tp, "stats.live.cross.vjp");
                 // [pair, channel, npix]: u is channel 1 of (d, u), both channels of the l1
                 // and l2 pairs, channel 1 of the l3 pairs.
                 self.back.add_scaled(&mut du, &g, n, 1.0);
@@ -1307,6 +1340,7 @@ impl<B: Backend> Trainer<B> {
     /// times `wt`, and with `backward` the map cotangent of their total.
     fn field_loss(&mut self, f: u32, u: &B::Map, uo: usize, wt: f64, backward: bool) -> ([f64; 6], Option<B::Map>) {
         self.targets(f);
+        let mut tp = self.tstart();
         let w = self.weights.scaled(wt);
         let n = self.npix();
         let mut du = self.back.zeros(n);
@@ -1320,12 +1354,14 @@ impl<B: Backend> Trainer<B> {
             let (t, tv) = data_t.unwrap();
             let x = self.back.combine(&[(u, uo, None)]);
             let (v, _) = self.back.stats(Kind::Auto, 1, x, false);
+            self.tmark(&mut tp, "stats.frozen.data.forward");
             let wc = chi2_weights(&tv, &self.back.stats_pixels(Kind::Auto));
             let (l, cot) = chi2(&add(&v, &bias.data), &t, &wc);
             terms[1] = l;
             if backward {
                 let cot: Vec<C64> = cot.iter().map(|c| c * w.data).collect();
                 let g = self.back.stats_grad(Kind::Auto, 1, &cot);
+            self.tmark(&mut tp, "stats.frozen.data.vjp");
                 self.back.add_scaled(&mut du, &g, 0, 1.0);
             }
         }
@@ -1334,6 +1370,7 @@ impl<B: Backend> Trainer<B> {
             let t857 = self.t857.as_ref().unwrap();
             let x = self.back.combine(&[(&fd.d, 0, None), (u, uo, None), (u, uo, None), (u, uo, None), (t857, 0, None), (u, uo, None)]);
             let (v, var) = self.back.stats(Kind::Cross, 3, x, true);
+            self.tmark(&mut tp, "stats.frozen.cross.forward");
             let h = v.len() / 3;
             let pix = self.back.stats_pixels(Kind::Cross);
             let (du_t, uu, tu) = (&v[..h], &v[h..2 * h], &v[2 * h..]);
@@ -1351,6 +1388,7 @@ impl<B: Backend> Trainer<B> {
                 cot.extend(c1.iter().zip(&c2).map(|(a, b)| a * w.l1 + b * w.l2));
                 cot.extend(c3.iter().map(|c| c * w.l3));
                 let g = self.back.stats_grad(Kind::Cross, 3, &cot);
+            self.tmark(&mut tp, "stats.frozen.cross.vjp");
                 // [pair, channel, npix]: u is channel 1 of (d, u), both of (u, u), channel 1 of (T, u).
                 for (pair, ch) in [(0, 1), (1, 0), (1, 1), (2, 1)] {
                     self.back.add_scaled(&mut du, &g, (2 * pair + ch) * n, 1.0);
@@ -1921,14 +1959,18 @@ pub unsafe extern "C" fn stlp_train_live(
             for &(s, _) in dd.iter().chain(&hd) {
                 assert!(s < sims, "simulation {s} out of the pool");
             }
+            let mut t0 = t.tstart();
             if lr > 0.0 {
                 t.back.zero_grad();
             }
+            t.tmark(&mut t0, "step.zero_grad");
             let terms = t.loss_live(field, &dd, &hd, backward || lr > 0.0);
             assert!(terms.iter().all(|v| v.is_finite()), "non-finite loss");
+            let mut t0 = t.tstart();
             if lr > 0.0 {
                 t.back.adam(lr);
             }
+            t.tmark(&mut t0, "step.adam");
             terms
         });
         std::slice::from_raw_parts_mut(out, 6).copy_from_slice(&terms);
@@ -1944,10 +1986,14 @@ pub unsafe extern "C" fn stlp_train_step(p: *mut UNetHandle, field: u32, lr: f64
     guard(-1, || {
         let h = &mut *p;
         let terms = with!(h, t => {
+            let mut t0 = t.tstart();
             t.back.zero_grad();
+            t.tmark(&mut t0, "step.zero_grad");
             let terms = t.loss(field, true);
             assert!(terms.iter().all(|v| v.is_finite()), "non-finite loss");
+            let mut t0 = t.tstart();
             t.back.adam(lr);
+            t.tmark(&mut t0, "step.adam");
             terms
         });
         std::slice::from_raw_parts_mut(out, 6).copy_from_slice(&terms);
@@ -2003,5 +2049,18 @@ pub unsafe extern "C" fn stlp_train_lbfgs(p: *mut UNetHandle, fields: *const u32
         let report = json!({"evaluations": evals, "loss_history": history, "terms_history": terms_history,
             "terms": ["total", "data", "l1", "l2", "l3", "cl"], "optimizer": "native STL L-BFGS (strong Wolfe)"});
         CString::new(report.to_string()).unwrap().into_raw()
+    })
+}
+
+/// The phase timers (`STL_PROFILE=1`, `stl_core::prof`) as JSON `{name:
+/// [seconds, count]}`, then reset; `{}` when profiling is off.  Free with
+/// `stlp_string_free`; null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_train_profile(p: *mut UNetHandle) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let h = &mut *p;
+        with!(h, t => t.back.sync());
+        let tab: serde_json::Map<String, Value> = stl_core::prof::take().into_iter().map(|(k, (s, c))| (k, json!([s, c]))).collect();
+        CString::new(Value::Object(tab).to_string()).unwrap().into_raw()
     })
 }
