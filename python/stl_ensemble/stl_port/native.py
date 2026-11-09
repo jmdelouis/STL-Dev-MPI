@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 import numpy as np
 
-SCRIPT_VERSION = "2026-11-10-v14"
+SCRIPT_VERSION = "2026-11-10-v15"
 print(f"SCRIPT VERSION: stl_port.native {SCRIPT_VERSION}", flush=True)
 
 _DOUBLE = C.POINTER(C.c_double)
@@ -109,8 +109,11 @@ def _library(path=None):
         "stlp_train_front": ([_VOID, _DOUBLE, C.c_size_t, C.c_bool, _DOUBLE], C.c_int),
         "stlp_train_set_cl": ([_VOID, C.c_char_p, _DOUBLE, C.c_size_t, _DOUBLE, _DOUBLE], C.c_int),
         "stlp_train_profile": ([_VOID], _VOID),
+        "stlp_train_memory": ([_VOID, C.c_bool], _VOID),
     }
     for name, (argtypes, restype) in signatures.items():
+        if not hasattr(lib, name):  # an older library: the newer calls fail when used
+            continue
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = argtypes, restype
     _LIBRARIES[path] = lib
@@ -918,15 +921,21 @@ class NativeUNet:
             self._check(self._lib.stlp_train_set_joint(self._handle, _pointer(x), None if s is None else _pointer(s),
                                                        ids[0], ids[1], (front or "none").encode(), float(weight)))
 
-    def front(self, x, adjoint=False):
-        """The front end of the joint pair (or its transpose) on pairs x [B, 2, npix] or [2, npix]."""
+    def front(self, x, adjoint=False, chunk=4):
+        """The front end of the joint pair (or its transpose) on pairs x [B, 2, npix] or [2, npix],
+        `chunk` pairs per call (the device holds those only; the pairs are transformed one by one)."""
         with self._lock:
             self._open()
             a = np.ascontiguousarray(x, dtype=np.float64)
             flat = a.reshape(-1, 2 * self.npix)
             out = np.empty_like(flat)
-            self._check(self._lib.stlp_train_front(self._handle, _pointer(flat), flat.shape[0], bool(adjoint),
-                                                   _pointer(out)))
+            step = max(1, int(chunk)) if chunk else flat.shape[0]
+            for i in range(0, flat.shape[0], step):
+                part = np.ascontiguousarray(flat[i:i + step])
+                res = np.empty_like(part)
+                self._check(self._lib.stlp_train_front(self._handle, _pointer(part), part.shape[0], bool(adjoint),
+                                                       _pointer(res)))
+                out[i:i + step] = res
             return out.reshape(a.shape)
 
     def set_cl(self, masks, edges, lmax=None, spin=0, d1=None, d2=None):
@@ -1012,6 +1021,22 @@ class NativeUNet:
                 raise _error(self._lib)
             try:
                 return {k: tuple(v) for k, v in json.loads(C.string_at(p)).items()}
+            finally:
+                self._lib.stlp_string_free(p)
+
+    def memory(self, reset=True):
+        """Memory of the trainer since the last reset, then (``reset``) start again: ``host``
+        (``rss_bytes``, ``rss_high_bytes``), ``device`` (allocator use and high-water marks,
+        the device's total use and its estimate at the allocator's peak, the statistics
+        engines' parts; None on the CPU backend) and ``trainer`` (noise pools and
+        observations, bytes).  Called after each phase, it gives that phase's peaks."""
+        with self._lock:
+            self._open()
+            p = self._lib.stlp_train_memory(self._handle, bool(reset))
+            if not p:
+                raise _error(self._lib)
+            try:
+                return json.loads(C.string_at(p))
             finally:
                 self._lib.stlp_string_free(p)
 

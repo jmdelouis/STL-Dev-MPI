@@ -59,6 +59,52 @@ enum Kind {
 /// A row of a batch of maps: `a[off..] + s b[off..]`.
 type Row<'a, M> = (&'a M, usize, Option<(&'a M, usize, f64)>);
 
+/// A noise pool `[sims, npix]`: on the backend (uploaded once), or on the
+/// host (`noise_pools: "host"`), the simulations of each statistics call
+/// then uploaded for that call only ([`stage`]).
+enum Pool<M> {
+    Dev(M),
+    Host(Vec<f64>),
+}
+
+/// The simulations of a pool that one statistics call reads: the pool
+/// itself (on the backend), or a map of those simulations only.
+enum Staged<'a, M> {
+    Dev(&'a M),
+    Own(M, Vec<usize>),
+}
+
+impl<M> Staged<'_, M> {
+    /// The map and the offset of simulation `s` (`npix` values).
+    fn at(&self, s: usize, npix: usize) -> (&M, usize) {
+        match self {
+            Staged::Dev(m) => (m, s * npix),
+            Staged::Own(m, sims) => (m, sims.iter().position(|&q| q == s).expect("simulation not staged") * npix),
+        }
+    }
+}
+
+/// The simulations `sims` of `pool` on the backend (each once, in order of
+/// first appearance; the values are those of the pool).
+fn stage<'a, B: Backend>(back: &B, pool: &'a Pool<B::Map>, sims: impl IntoIterator<Item = usize>, npix: usize) -> Staged<'a, B::Map> {
+    match pool {
+        Pool::Dev(m) => Staged::Dev(m),
+        Pool::Host(h) => {
+            let mut order: Vec<usize> = Vec::new();
+            for s in sims {
+                if !order.contains(&s) {
+                    order.push(s);
+                }
+            }
+            let mut x = Vec::with_capacity(order.len() * npix);
+            for &s in &order {
+                x.extend_from_slice(&h[s * npix..(s + 1) * npix]);
+            }
+            Staged::Own(back.upload(&x), order)
+        }
+    }
+}
+
 /// What the trainer needs from a backend.
 trait Backend {
     type Map;
@@ -80,6 +126,10 @@ trait Backend {
     fn stats(&mut self, kind: Kind, batch: usize, x: Self::Map, moments: bool) -> (Vec<C64>, Vec<f64>);
     /// Map cotangent of the last [`stats`](Self::stats) of this kind and batch.
     fn stats_grad(&mut self, kind: Kind, batch: usize, cot: &[C64]) -> Self::Map;
+    /// Frees the level fields of the statistics engines (their values and
+    /// gradients are done): they exist only during one loss, bias estimate
+    /// or target evaluation.
+    fn release(&mut self) {}
     fn params(&self) -> Vec<f32>;
     fn set_params(&mut self, w: &[f32]);
     fn grads(&self) -> Vec<f32>;
@@ -107,6 +157,11 @@ trait Backend {
     fn sync(&self);
     /// Cumulative phase seconds of the GPU statistics engines (`engine.<kind>.<phase>`).
     fn engine_timers(&self) -> Vec<(String, f64)>;
+    /// Device memory (`stlp_train_memory`): the allocator's use and
+    /// high-water marks since the last reset (`reset`: start again), the
+    /// device's total use, and the parts held by the statistics engines;
+    /// `null` on the host backend.
+    fn memory(&self, reset: bool) -> Value;
     fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64);
     /// Builds (`Some`) or drops the pseudo-spectra of the cl term: anafast
     /// (`iter = 0`) up to `lmax` of the maps times each of the weights
@@ -410,6 +465,10 @@ impl Backend for CpuBack {
         Vec::new()
     }
 
+    fn memory(&self, _reset: bool) -> Value {
+        Value::Null
+    }
+
     fn sync(&self) {}
 
     fn axpy(&self, dst: &mut Vec<f64>, src: &Vec<f64>, s: f64) {
@@ -451,6 +510,14 @@ struct GpuBack {
     stats: Stats,
     eb: Option<stl_gpu::GpuEb>,
     cl: Option<ClDev>,
+    /// Largest batches of the auto and cross statistics (`bias_batch`
+    /// draws, `live_draws` draws per live step): the engines are sized for
+    /// them.
+    max_batch: (usize, usize),
+    /// With an automatic geometry cache (`cache_bytes` 0): the field store
+    /// and the cache bytes of each engine, planned once for both engines
+    /// at the first statistics (their level fields never coexist).
+    plan: Option<(FieldStore, usize)>,
 }
 
 #[cfg(feature = "gpu")]
@@ -458,10 +525,19 @@ impl GpuBack {
     fn eval(&mut self, kind: Kind, batch: usize) -> &mut stl_gpu::GpuEvaluator<'static> {
         if !self.evals.contains_key(&(kind, batch)) {
             let base = self.evals.iter().find(|((k, _), _)| *k == kind).map(|(_, e)| e.share(self.stats.plan(kind), batch));
+            if base.is_none() && (self.opts.cache_bytes == 0 || self.opts.fields == FieldStore::Auto) && self.plan.is_none() {
+                self.plan = Some(self.plan_memory());
+            }
             let ev = base.unwrap_or_else(|| {
                 let (geo, cfg) = unsafe { self.stats.refs() };
                 let channels = if kind == Kind::Cross { 2 } else { 1 };
-                let opts = self.opts.clone();
+                let mut opts = self.opts.clone();
+                if let Some((store, cache)) = self.plan {
+                    opts.fields = store;
+                    if opts.cache_bytes == 0 {
+                        opts.cache_bytes = cache;
+                    }
+                }
                 let mut e = GpuEngine::new(self.gpu.clone(), geo, cfg, Partition::serial(geo, cfg.levels()), batch, channels, &opts);
                 e.set_masks(self.stats.masks.as_ref());
                 stl_gpu::GpuEvaluator::new(e, self.stats.plan(kind))
@@ -469,6 +545,34 @@ impl GpuBack {
             self.evals.insert((kind, batch), ev);
         }
         self.evals.get_mut(&(kind, batch)).unwrap()
+    }
+
+    /// The field store and the geometry cache of each statistics engine
+    /// from the free device memory: the level fields of the larger engine
+    /// at its largest batch (one engine's fields at a time) and a margin
+    /// for the transients of the blocks and the trainer's maps are set
+    /// aside (three network tapes among them); `Keep` if its fields take at
+    /// most half of what is free, and the cache (when automatic) gets 4/5
+    /// of the rest, shared by the two engines.
+    fn plan_memory(&self) -> (FieldStore, usize) {
+        let (geo, cfg) = unsafe { self.stats.refs() };
+        let part = Partition::serial(geo, cfg.levels());
+        let (free, _) = self.gpu.memory();
+        let (ba, bx) = self.max_batch;
+        let need = |s: FieldStore| GpuEngine::field_bytes(&part, ba, 1, geo.l, s).max(GpuEngine::field_bytes(&part, bx, 2, geo.l, s));
+        // The network's tape (one input: the inputs and the four
+        // activations of every block, f32), its reverse transients and the
+        // E/B front come after this plan: three tapes are set aside for them.
+        let net = &self.net.net;
+        let tape: usize = net.enc.iter().chain(&net.dec).map(|b| (b.cin + 4 * b.cout) * net.stencils[b.level].n * 4).sum();
+        let margin = free / 10 + (1 << 30) + 3 * tape;
+        let store = match self.opts.fields {
+            FieldStore::Auto if need(FieldStore::Keep) + margin <= free / 2 => FieldStore::Keep,
+            FieldStore::Auto => FieldStore::Recompute,
+            f => f,
+        };
+        let cache = (free.saturating_sub(need(store) + margin) * 4 / 5 / 2).max(256 << 20);
+        (store, cache)
     }
 
     /// The device `a_lm` of the rows of `x` at `offs` times each mask (see
@@ -541,7 +645,18 @@ impl Backend for GpuBack {
     }
 
     fn stats(&mut self, kind: Kind, batch: usize, x: Self::Map, moments: bool) -> (Vec<C64>, Vec<f64>) {
+        // The other kind's fields are not needed any more (its gradient, if
+        // any, came before): one set of level fields on the device at a time.
+        if let Some((_, ev)) = self.evals.iter().find(|((k, _), _)| *k != kind) {
+            ev.release_fields();
+        }
         self.eval(kind, batch).forward_device(&Serial, x, moments)
+    }
+
+    fn release(&mut self) {
+        for ev in self.evals.values() {
+            ev.release_fields();
+        }
     }
 
     fn stats_grad(&mut self, kind: Kind, batch: usize, cot: &[C64]) -> Self::Map {
@@ -634,6 +749,50 @@ impl Backend for GpuBack {
 
     fn sync(&self) {
         self.gpu.sync();
+    }
+
+    fn memory(&self, reset: bool) -> Value {
+        let [used, used_high, reserved, reserved_high] = self.gpu.pool_memory(reset);
+        let (free, total) = self.gpu.memory();
+        let device_used = (total - free) as u64;
+        let mut engines = serde_json::Map::new();
+        for kind in [Kind::Auto, Kind::Cross] {
+            let batches: Vec<usize> = self.evals.keys().filter(|(k, _)| *k == kind).map(|(_, b)| *b).collect();
+            if let Some((_, ev)) = self.evals.iter().find(|((k, _), _)| *k == kind) {
+                let e = ev.engine();
+                let (fields, csr) = e.memory_parts();
+                let (mode, budget, cached) = e.geometry_cache();
+                let name = if kind == Kind::Auto { "auto" } else { "cross" };
+                engines.insert(
+                    name.into(),
+                    json!({
+                        "batches": batches,
+                        "field_store": format!("{:?}", e.field_store()),
+                        "field_bytes_estimate": fields,
+                        "field_bytes_now": e.field_bytes_now(),
+                        "decimation_bytes": csr,
+                        "geometry_cache": format!("{:?}", mode),
+                        "geometry_cache_budget_bytes": budget,
+                        "geometry_cache_used_bytes": cached,
+                        "block_rows": e.block_rows(),
+                    }),
+                );
+            }
+        }
+        json!({
+            "pool_used_bytes": used,
+            "pool_used_high_bytes": used_high,
+            "pool_reserved_bytes": reserved,
+            "pool_reserved_high_bytes": reserved_high,
+            "device_used_bytes": device_used,
+            // The device's total use at the allocator's peak: what is not
+            // in the pool now (context, modules, cuBLAS / cuFFT) plus the
+            // pool's reserved high-water mark.
+            "device_used_high_bytes": device_used.saturating_sub(reserved) + reserved_high,
+            "device_total_bytes": total,
+            "engines": engines,
+            "plan": self.plan.map(|(s, c)| json!({"field_store": format!("{s:?}"), "cache_bytes_per_engine": c, "max_batch": [self.max_batch.0, self.max_batch.1]})),
+        })
     }
 
     fn axpy(&self, dst: &mut Self::Map, src: &Self::Map, s: f64) {
@@ -739,7 +898,7 @@ struct Field<M> {
     d: M,
     d1: Option<M>,
     d2: Option<M>,
-    noise: [Option<M>; 3],
+    noise: [Option<Pool<M>>; 3],
     sims: usize,
     scale: f64,
     targets: Option<Targets>,
@@ -876,6 +1035,11 @@ struct Trainer<B: Backend> {
     /// Draws per statistics call of the bias estimates (`bias_batch` maps,
     /// or `3 bias_batch` pairs).
     bias_batch: usize,
+    /// Pairs per statistics call of the live cross terms (0: the `1 + 3 k`
+    /// pairs of a live step in one call). Smaller: the level fields of fewer
+    /// pairs on the device, at the cost of one more forward per call but the
+    /// last in the gradient.
+    live_batch: usize,
     /// Estimate the bias of every coefficient (else zero where there is no
     /// noise bias, [`Stats::exact`]).
     bias_all: bool,
@@ -1024,6 +1188,7 @@ impl<B: Backend> Trainer<B> {
             None => (None, None),
         };
         self.fields.get_mut(&f).unwrap().targets = Some(Targets { data, l1, l3 });
+        self.back.release();
     }
 
     /// Frozen biases of `f` (a field, or both fields of the joint pair) at
@@ -1055,10 +1220,17 @@ impl<B: Backend> Trainer<B> {
         let mut bias = Bias::default();
         let bb = self.bias_batch.max(1);
         if w.data != 0.0 {
-            let noise = fd.noise[0].as_ref().expect("noise pool");
+            let pool = fd.noise[0].as_ref().expect("noise pool");
             let mut acc: Vec<C64> = Vec::new();
             for chunk in draws.chunks(bb) {
-                let rows: Vec<Row<B::Map>> = chunk.iter().map(|&(s, sg)| (u, uo, Some((noise, s * n, sg)))).collect();
+                let noise = stage(&self.back, pool, chunk.iter().map(|d| d.0), n);
+                let rows: Vec<Row<B::Map>> = chunk
+                    .iter()
+                    .map(|&(s, sg)| {
+                        let (m, o) = noise.at(s, n);
+                        (u, uo, Some((m, o, sg)))
+                    })
+                    .collect();
                 let x = self.back.combine(&rows);
                 let (v, _) = self.back.stats(Kind::Auto, chunk.len(), x, false);
                 let per = v.len() / chunk.len();
@@ -1076,25 +1248,30 @@ impl<B: Backend> Trainer<B> {
         if w.cross() {
             let fd = self.fields.get(&f).unwrap();
             let t = self.t857.as_ref().expect("857 map");
-            let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
+            let pools = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
             let x = self.back.combine(&[(u, uo, None), (u, uo, None), (t, 0, None), (u, uo, None)]);
             let (phi, _) = self.back.stats(Kind::Cross, 2, x, false);
             let h = phi.len() / 2;
             let (uu, tu) = (&phi[..h], &phi[h..]);
             let mut acc = [vec![C64::default(); h], vec![C64::default(); h], vec![C64::default(); h]];
             for chunk in draws.chunks(bb) {
+                let [n0, n1, n2] = pools.map(|p| stage(&self.back, p, chunk.iter().map(|d| d.0), n));
                 let mut rows: Vec<Row<B::Map>> = Vec::new();
                 for &(s, sg) in chunk {
-                    rows.push((u, uo, Some((n1, s * n, sg))));
-                    rows.push((u, uo, Some((n2, s * n, sg))));
+                    let (a, oa) = n1.at(s, n);
+                    rows.push((u, uo, Some((a, oa, sg))));
+                    let (b, ob) = n2.at(s, n);
+                    rows.push((u, uo, Some((b, ob, sg))));
                 }
                 for &(s, sg) in chunk {
-                    rows.push((u, uo, Some((n0, s * n, sg))));
+                    let (a, oa) = n0.at(s, n);
+                    rows.push((u, uo, Some((a, oa, sg))));
                     rows.push((u, uo, None));
                 }
                 for &(s, sg) in chunk {
                     rows.push((t, 0, None));
-                    rows.push((u, uo, Some((n0, s * n, sg))));
+                    let (a, oa) = n0.at(s, n);
+                    rows.push((u, uo, Some((a, oa, sg))));
                 }
                 let k = chunk.len();
                 let x = self.back.combine(&rows);
@@ -1120,6 +1297,7 @@ impl<B: Backend> Trainer<B> {
             }
         }
         self.fields.get_mut(&f).unwrap().bias = Some(bias);
+        self.back.release();
     }
 
     /// The loss of `f` (a field, or the sum over the fields of the joint
@@ -1271,8 +1449,14 @@ impl<B: Backend> Trainer<B> {
         if w.data != 0.0 {
             assert!(!data.is_empty(), "live data term: no draws");
             let fd = self.fields.get(&f).unwrap();
-            let noise = fd.noise[0].as_ref().expect("noise pool");
-            let rows: Vec<Row<B::Map>> = data.iter().map(|&(s, sg)| (u, uo, Some((noise, s * n, sg)))).collect();
+            let noise = stage(&self.back, fd.noise[0].as_ref().expect("noise pool"), data.iter().map(|d| d.0), n);
+            let rows: Vec<Row<B::Map>> = data
+                .iter()
+                .map(|&(s, sg)| {
+                    let (m, o) = noise.at(s, n);
+                    (u, uo, Some((m, o, sg)))
+                })
+                .collect();
             let x = self.back.combine(&rows);
             let k = data.len();
             let (v, _) = self.back.stats(Kind::Auto, k, x, false);
@@ -1297,23 +1481,40 @@ impl<B: Backend> Trainer<B> {
             let k = hm.len();
             let fd = self.fields.get(&f).unwrap();
             let t857 = self.t857.as_ref().expect("857 map");
-            let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]].map(|p| p.as_ref().expect("full and half-mission noise pools"));
+            let [n0, n1, n2] = [&fd.noise[0], &fd.noise[1], &fd.noise[2]]
+                .map(|p| stage(&self.back, p.as_ref().expect("full and half-mission noise pools"), hm.iter().map(|d| d.0), n));
             let mut rows: Vec<Row<B::Map>> = vec![(&fd.d, 0, None), (u, uo, None)];
             for &(s, sg) in hm {
-                rows.push((u, uo, Some((n1, s * n, sg))));
-                rows.push((u, uo, Some((n2, s * n, sg))));
+                let (a, oa) = n1.at(s, n);
+                rows.push((u, uo, Some((a, oa, sg))));
+                let (b, ob) = n2.at(s, n);
+                rows.push((u, uo, Some((b, ob, sg))));
             }
             for &(s, sg) in hm {
-                rows.push((u, uo, Some((n0, s * n, sg))));
+                let (a, oa) = n0.at(s, n);
+                rows.push((u, uo, Some((a, oa, sg))));
                 rows.push((u, uo, None));
             }
             for &(s, sg) in hm {
                 rows.push((t857, 0, None));
-                rows.push((u, uo, Some((n0, s * n, sg))));
+                let (a, oa) = n0.at(s, n);
+                rows.push((u, uo, Some((a, oa, sg))));
             }
-            let x = self.back.combine(&rows);
             let batch = 1 + 3 * k;
-            let (v, var) = self.back.stats(Kind::Cross, batch, x, true);
+            // Pairs [start, end) per statistics call; pairs are independent,
+            // so the values do not depend on the split.
+            let cb = if self.live_batch == 0 { batch } else { self.live_batch.min(batch) };
+            let spans: Vec<(usize, usize)> = (0..batch).step_by(cb).map(|s| (s, (s + cb).min(batch))).collect();
+            let mut v: Vec<C64> = Vec::new();
+            let mut var: Vec<f64> = Vec::new();
+            for (i, &(s, e)) in spans.iter().enumerate() {
+                let x = self.back.combine(&rows[2 * s..2 * e]);
+                let (vc, mc) = self.back.stats(Kind::Cross, e - s, x, i == 0);
+                v.extend(vc);
+                if i == 0 {
+                    var = mc;
+                }
+            }
             self.tmark(&mut tp, "stats.live.cross.forward");
             let h = v.len() / batch;
             let pix = self.back.stats_pixels(Kind::Cross);
@@ -1334,22 +1535,30 @@ impl<B: Backend> Trainer<B> {
                         cot.extend(c.iter().map(|x| x * (s / kf)));
                     }
                 }
-                let g = self.back.stats_grad(Kind::Cross, batch, &cot);
+                // The last span's fields are still those of the engine: its
+                // gradient first, the others after a forward again.
+                for (i, &(s, e)) in spans.iter().enumerate().rev() {
+                    if i + 1 < spans.len() {
+                        let x = self.back.combine(&rows[2 * s..2 * e]);
+                        self.back.stats(Kind::Cross, e - s, x, false);
+                    }
+                    let g = self.back.stats_grad(Kind::Cross, e - s, &cot[s * h..e * h]);
+                    // [pair, channel, npix]: u is channel 1 of (d, u), both channels of the l1
+                    // and l2 pairs, channel 1 of the l3 pairs.
+                    for pair in s..e {
+                        let at = 2 * (pair - s) * n;
+                        if (1..1 + 2 * k).contains(&pair) {
+                            self.back.add_scaled(&mut du, &g, at, 1.0);
+                        }
+                        self.back.add_scaled(&mut du, &g, at + n, 1.0);
+                    }
+                }
             self.tmark(&mut tp, "stats.live.cross.vjp");
-                // [pair, channel, npix]: u is channel 1 of (d, u), both channels of the l1
-                // and l2 pairs, channel 1 of the l3 pairs.
-                self.back.add_scaled(&mut du, &g, n, 1.0);
-                for pair in 1..1 + 2 * k {
-                    self.back.add_scaled(&mut du, &g, 2 * pair * n, 1.0);
-                    self.back.add_scaled(&mut du, &g, (2 * pair + 1) * n, 1.0);
-                }
-                for pair in 1 + 2 * k..batch {
-                    self.back.add_scaled(&mut du, &g, (2 * pair + 1) * n, 1.0);
-                }
             }
         }
         terms[1..].iter_mut().for_each(|t| *t *= wt);
         total(&self.weights, &mut terms);
+        self.back.release();
         (terms, backward.then_some(du))
     }
 
@@ -1414,6 +1623,7 @@ impl<B: Backend> Trainer<B> {
         }
         terms[1..].iter_mut().for_each(|t| *t *= wt);
         total(&self.weights, &mut terms);
+        self.back.release();
         (terms, backward.then_some(du))
     }
 
@@ -1529,6 +1739,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
         let l = &v["loss"];
         let weights = Weights { data: real(l, "data", 0.0), l1: real(l, "l1", 0.0), l2: real(l, "l2", 0.0), l3: real(l, "l3", 0.0), cl: real(l, "cl", 0.0) };
         let bias_batch = integer(&v, "bias_batch", 5);
+        let live_batch = integer(&v, "live_batch", 0);
         let bias_all = v["bias_all"].as_bool().unwrap_or(false);
         let backend = v["backend"].as_str().unwrap_or("cpu");
         let inner = match backend {
@@ -1539,6 +1750,7 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 fields: HashMap::new(),
                 joint: None,
                 bias_batch,
+                live_batch,
                 bias_all,
                 cl: None,
             }),
@@ -1559,7 +1771,11 @@ pub unsafe extern "C" fn stlp_unet_new(config: *const c_char) -> *mut UNetHandle
                 if let Some(s) = v["fields"].as_str() {
                     opts.fields = FieldStore::parse(s).expect("fields: auto, keep or recompute");
                 }
-                AnyTrainer::Gpu(Trainer { back: GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats, eb: None, cl: None }, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, bias_all, cl: None })
+                let live = integer(&v, "live_draws", 4);
+                let live_pairs = if live_batch == 0 { 1 + 3 * live } else { live_batch.min(1 + 3 * live) };
+                let max_batch = (bias_batch.max(live).max(1), (3 * bias_batch).max(live_pairs).max(3));
+                let back = GpuBack { evals: HashMap::new(), net: dev, cond: Vec::new(), gpu, opts, stats, eb: None, cl: None, max_batch, plan: None };
+                AnyTrainer::Gpu(Trainer { back, weights, t857: None, fields: HashMap::new(), joint: None, bias_batch, live_batch, bias_all, cl: None })
             }
             #[cfg(not(feature = "gpu"))]
             "gpu" => panic!("GPU backend not compiled: build stl-bridge with --features gpu"),
@@ -1773,13 +1989,16 @@ pub unsafe extern "C" fn stlp_train_set_field(
         for x in parts.iter().chain(pools.iter()).flatten().chain(std::iter::once(&dv)) {
             assert!(x.iter().all(|v| v.is_finite()), "non-finite observation or noise");
         }
+        // The noise pools on the host: each statistics call uploads its draws only.
+        let host = h.config["noise_pools"].as_str() == Some("host") && h.backend == "gpu";
         with!(h, t => {
             let up = |x: Option<&[f64]>| x.map(|x| t.back.upload(x));
+            let pool = |x: Option<&[f64]>| x.map(|x| if host { Pool::Host(x.to_vec()) } else { Pool::Dev(t.back.upload(x)) });
             let fd = Field {
                 d: t.back.upload(dv),
                 d1: up(parts[0]),
                 d2: up(parts[1]),
-                noise: [up(pools[0]), up(pools[1]), up(pools[2])],
+                noise: [pool(pools[0]), pool(pools[1]), pool(pools[2])],
                 sims,
                 scale,
                 targets: None,
@@ -2085,5 +2304,67 @@ pub unsafe extern "C" fn stlp_train_profile(p: *mut UNetHandle) -> *mut c_char {
             }
         }
         CString::new(Value::Object(tab).to_string()).unwrap().into_raw()
+    })
+}
+
+/// Resident set size of the process and its high-water mark, bytes
+/// (`/proc/self/status`: `VmRSS`, `VmHWM`; zeros elsewhere); `reset`
+/// starts the high-water mark again from now (`/proc/self/clear_refs`).
+fn host_memory(reset: bool) -> (u64, u64) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |key: &str| -> u64 {
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
+    let out = (kb("VmRSS:"), kb("VmHWM:"));
+    if reset {
+        let _ = std::fs::write("/proc/self/clear_refs", "5");
+    }
+    out
+}
+
+/// Memory of the trainer as JSON, then (`reset`) the high-water marks start
+/// again: `host` (`rss_bytes`, `rss_high_bytes`), `device` (the allocator's
+/// use and high-water marks, the device's total use and its estimate at the
+/// allocator's peak, the statistics engines' parts: [`Backend::memory`];
+/// `null` on the host backend) and `trainer` (bytes of the noise pools and
+/// of the observations, on the backend's side).  Called by the driver
+/// after each phase (setup, bias estimate, steps) with `reset`, it gives
+/// the peaks of each phase.  Free with `stlp_string_free`; null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn stlp_train_memory(p: *mut UNetHandle, reset: bool) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let h = &mut *p;
+        let device = with!(h, t => t.back.memory(reset));
+        let (rss, rss_high) = host_memory(reset);
+        let npix = h.npix as u64;
+        let (pools, obs) = with!(h, t => {
+            let mut pools = (0u64, 0u64);
+            let mut obs = 0u64;
+            for f in t.fields.values() {
+                for p in f.noise.iter().flatten() {
+                    match p {
+                        Pool::Dev(_) => pools.0 += f.sims as u64 * npix * 8,
+                        Pool::Host(_) => pools.1 += f.sims as u64 * npix * 8,
+                    }
+                }
+                obs += (1 + f.d1.is_some() as u64 + f.d2.is_some() as u64) * npix * 8;
+            }
+            if t.joint.is_some() {
+                obs += 2 * npix * 8;
+            }
+            (pools, obs)
+        });
+        let report = json!({
+            "host": {"rss_bytes": rss, "rss_high_bytes": rss_high},
+            "device": device,
+            "trainer": {"noise_pool_backend_bytes": pools.0, "noise_pool_host_bytes": pools.1, "observation_bytes": obs},
+        });
+        CString::new(report.to_string()).unwrap().into_raw()
     })
 }

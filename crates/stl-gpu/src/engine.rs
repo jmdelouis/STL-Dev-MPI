@@ -560,6 +560,11 @@ pub struct GpuEngine<'a> {
     /// Masks of the averages ([`set_masks`](Self::set_masks)): pixel counts
     /// `[K][level]` and indicators `[K][level]` (full-sky NESTED).
     masks: Option<(Vec<Vec<usize>>, Vec<Vec<CudaSlice<f64>>>)>,
+    /// The masks by pattern, per level (2 to 8 masks, at most 16 patterns
+    /// per level): the code of every pixel (the index of the set of masks
+    /// that keep it, 255: none) on the device, and the sets as bits (bit
+    /// `m`: mask `m`) on the device and on the host.
+    codes: Option<Vec<(CudaSlice<u8>, CudaSlice<u8>, Vec<u8>)>>,
 }
 
 impl<'a> GpuEngine<'a> {
@@ -700,6 +705,7 @@ impl<'a> GpuEngine<'a> {
             holder: 0,
             phase_sync: std::env::var("STL_GPU_PHASE_SYNC").map_or(true, |v| v != "0"),
             masks: None,
+            codes: None,
         }
     }
 
@@ -712,6 +718,37 @@ impl<'a> GpuEngine<'a> {
             assert!(m.counts.iter().all(|c| c.len() == self.levels()), "mask levels");
             (m.counts.clone(), m.weights.iter().map(|w| w.iter().map(|l| self.gpu.upload(l)).collect()).collect())
         });
+        self.codes = masks.filter(|m| (2..=8).contains(&m.weights.len())).and_then(|m| {
+            let mut out = Vec::with_capacity(self.levels());
+            for n in 0..self.levels() {
+                let len = m.weights[0][n].len();
+                let mut pats: Vec<u8> = Vec::new();
+                let mut codes = vec![255u8; len];
+                for (i, code) in codes.iter_mut().enumerate() {
+                    let bits = (0..m.weights.len()).fold(0u8, |b, k| b | (((m.weights[k][n][i] != 0.0) as u8) << k));
+                    if bits == 0 {
+                        continue;
+                    }
+                    *code = match pats.iter().position(|&p| p == bits) {
+                        Some(p) => p as u8,
+                        None if pats.len() < 16 => {
+                            pats.push(bits);
+                            (pats.len() - 1) as u8
+                        }
+                        None => return None,
+                    };
+                }
+                let dev_pats = self.gpu.upload(if pats.is_empty() { &[0u8][..] } else { &pats[..] });
+                out.push((self.gpu.upload(&codes), dev_pats, pats));
+            }
+            Some(out)
+        });
+    }
+
+    /// The pattern codes of the masks from the NESTED id `id` of level `n`
+    /// and the patterns ([`set_masks`](Self::set_masks)), if any.
+    fn codes_at(&self, n: usize, id: i64) -> Option<(u64, u64)> {
+        self.codes.as_ref().map(|c| (self.gpu.ptr(&c[n].0) + id as u64, self.gpu.ptr(&c[n].1)))
     }
 
     /// Number of averages per coefficient: `K` masks, or 1.
@@ -726,6 +763,17 @@ impl<'a> GpuEngine<'a> {
             None => (0, self.geo.pixels(n) as f64),
             Some((counts, w)) => (self.gpu.ptr(&w[k][n]) + 8 * id as u64, counts[k][n] as f64),
         }
+    }
+
+    /// Frees the level fields (maps, wavelet fields, stored moduli) until
+    /// the next forward sweep, which allocates them again: the evaluators
+    /// of this engine then need a forward sweep before a gradient.
+    pub fn release_fields(&mut self) {
+        self.maps.clear();
+        self.z.clear();
+        self.absz.clear();
+        self.m.clear();
+        self.holder = 0;
     }
 
     /// Evaluates `batch` maps from now on: the level fields are reallocated
@@ -757,6 +805,14 @@ impl<'a> GpuEngine<'a> {
         }
     }
 
+    /// Peak bytes of the level fields of an engine on `part` for `batch`
+    /// maps of `channels` channels and `l` orientations with `store` (`Keep`
+    /// or `Recompute`; plans with S3 or S4), as the engine estimates them.
+    pub fn field_bytes(part: &Partition, batch: usize, channels: usize, l: usize, store: FieldStore) -> usize {
+        let held: Vec<usize> = part.layouts.iter().map(|x| x.len()).collect();
+        Self::field_doubles(&held, batch * channels, l, store) * 8
+    }
+
     /// Kept or recomputed wavelet fields (`Keep` or `Recompute`).
     pub fn field_store(&self) -> FieldStore {
         self.fields
@@ -766,6 +822,12 @@ impl<'a> GpuEngine<'a> {
     /// bytes of the decimation rows and their transposes on the device.
     pub fn memory_parts(&self) -> (usize, usize) {
         (self.field_bytes, self.down.iter().chain(&self.up).map(DevCsr::bytes).sum())
+    }
+
+    /// Bytes of the level fields held now (maps, wavelet fields, moduli,
+    /// stored moduli).
+    pub fn field_bytes_now(&self) -> usize {
+        8 * (self.maps.iter().chain(&self.z).chain(&self.absz).map(|f| f.len()).sum::<usize>() + self.m.values().map(|f| f.len()).sum::<usize>())
     }
 
     /// Owned cells per device block.
@@ -1425,7 +1487,7 @@ impl<'a> GpuEngine<'a> {
                         }
                     }
                     *self.timers.entry("gpu_host_lists").or_default() += t.elapsed().as_secs_f64();
-                    let sums = self.partial_sums(&items, k_count, nf, moments);
+                    let sums = self.partial_sums(&items, k_count, nf, moments, self.codes_at(n, start));
                     for (q, &i) in idx.iter().enumerate() {
                         for bi in 0..self.batch {
                             for (k, &(_, n_total)) in masks.iter().enumerate() {
@@ -1491,14 +1553,31 @@ impl<'a> GpuEngine<'a> {
     /// `(sum re, sum im, sum |f|^2)` per item over `n` pixels; the items come
     /// in groups of `k` that differ only by their mask (`k <= 8`: one pass
     /// per group, `coef_partial_k`; the same sums as item by item).
-    fn partial_sums(&self, items: &[ForwardItem], k: usize, n: usize, moments: bool) -> Vec<(f64, f64, f64)> {
+    fn partial_sums(&self, items: &[ForwardItem], k: usize, n: usize, moments: bool, codes: Option<(u64, u64)>) -> Vec<(f64, f64, f64)> {
         let n_chunks = n.div_ceil(CHUNK);
         let k = if (2..=8).contains(&k) && items.len() % k == 0 { k } else { 1 };
+        let codes = codes.filter(|_| k > 1);
         let mut out = Vec::with_capacity(items.len());
         for part in items.chunks(65535 / k * k) {
             let dev_items = self.gpu.upload(part);
             let buf = self.gpu.zeros::<f64>(part.len() * n_chunks * 3);
-            if k > 1 {
+            if let Some((codes, pats)) = codes {
+                self.gpu.launch(
+                    "coef_partial_p",
+                    (n_chunks as u32, (part.len() / k) as u32),
+                    256,
+                    &[
+                        self.gpu.a(&dev_items),
+                        (k as i32).into(),
+                        Arg::Ptr(codes),
+                        Arg::Ptr(pats),
+                        n.into(),
+                        CHUNK.into(),
+                        (moments as i32).into(),
+                        self.gpu.a(&buf),
+                    ],
+                );
+            } else if k > 1 {
                 self.gpu.launch(
                     "coef_partial_k",
                     (n_chunks as u32, (part.len() / k) as u32),
@@ -1620,10 +1699,14 @@ impl<'a> GpuEngine<'a> {
                 let merged = (1..=8).contains(&k_count);
                 let mut targets_k: Vec<(u64, i64, Vec<ContribK>)> = Vec::new();
                 let mut gs: Vec<f64> = Vec::new();
+                let pats: Option<Vec<u8>> = self.codes.as_ref().filter(|_| merged).map(|c| c[n].2.clone());
+                let codes = self.codes_at(n, blk.start).filter(|_| merged);
                 let mut index: HashMap<u64, usize> = HashMap::new();
                 let f64s = std::mem::size_of::<f64>() as u64;
                 let dg = self.cfg.j_to_dg.clone();
                 let ch = self.channels;
+                // The cotangents of the second wavelets and of the moduli that
+                // this block's coefficients write, allocated before the lists.
                 for &i in &idx {
                     let c = plan[i];
                     for d in [
@@ -1639,6 +1722,11 @@ impl<'a> GpuEngine<'a> {
                     if c.family == Family::S4 && self.cfg.fewer {
                         gmod.entry(dg[c.j1.unwrap()]).or_insert_with(|| self.gpu.zeros::<f64>(rows * na1));
                     }
+                }
+                self.tick("gpu_reverse_alloc", t);
+                let t = Instant::now();
+                for &i in &idx {
+                    let c = plan[i];
                     for bi in 0..self.batch {
                         // The operands and the targets of this (coefficient, member),
                         // once for all the masks; contributions pushed in (mask, target)
@@ -1699,11 +1787,32 @@ impl<'a> GpuEngine<'a> {
                                 continue;
                             }
                             let g0 = gs.len() as u64;
-                            for (k, &(_, n_total)) in masks.iter().enumerate() {
-                                let g = gradient[(bi * k_count + k) * np + i];
-                                let inv_n = 1.0 / n_total;
-                                gs.push(g.re * inv_n);
-                                gs.push(g.im * inv_n);
+                            match &pats {
+                                // The cotangent of every pattern: the sum over its masks
+                                // in the order of coef_reverse_k.
+                                Some(pats) => {
+                                    for &bits in pats.iter() {
+                                        let (mut re, mut im) = (0.0, 0.0);
+                                        for (k, &(_, n_total)) in masks.iter().enumerate() {
+                                            if (bits >> k) & 1 == 1 {
+                                                let g = gradient[(bi * k_count + k) * np + i];
+                                                let inv_n = 1.0 / n_total;
+                                                re += g.re * inv_n;
+                                                im += g.im * inv_n;
+                                            }
+                                        }
+                                        gs.push(re);
+                                        gs.push(im);
+                                    }
+                                }
+                                None => {
+                                    for (k, &(_, n_total)) in masks.iter().enumerate() {
+                                        let g = gradient[(bi * k_count + k) * np + i];
+                                        let inv_n = 1.0 / n_total;
+                                        gs.push(g.re * inv_n);
+                                        gs.push(g.im * inv_n);
+                                    }
+                                }
                             }
                             for (s, &((ptr, im), kind)) in slots.iter().enumerate() {
                                 let t = *at[s].get_or_insert_with(|| {
@@ -1749,6 +1858,9 @@ impl<'a> GpuEngine<'a> {
                     *self.timers.entry("count_reverse_pixels_x_contribs").or_default() += (flat_c.len() * nf) as f64;
                     *self.timers.entry("gpu_host_lists_reverse").or_default() += lists;
                     let dc = self.gpu.upload(&flat_c);
+                    if gs.is_empty() {
+                        gs.push(0.0);
+                    }
                     let dg = self.gpu.upload(&gs);
                     let mut mp = [0u64; 8];
                     for (k, &(mask, _)) in masks.iter().enumerate() {
@@ -1757,6 +1869,15 @@ impl<'a> GpuEngine<'a> {
                     let dm = self.gpu.upload(&mp);
                     for part in flat_t.chunks(65535) {
                         let dt = self.gpu.upload(part);
+                        if let Some((codes, _)) = codes {
+                            self.gpu.launch(
+                                "coef_reverse_p",
+                                (nf.div_ceil(256) as u32, part.len() as u32),
+                                256,
+                                &[self.gpu.a(&dt), self.gpu.a(&dc), self.gpu.a(&dg), Arg::Ptr(codes), nf.into()],
+                            );
+                            continue;
+                        }
                         self.gpu.launch(
                             "coef_reverse_k",
                             (nf.div_ceil(256) as u32, part.len() as u32),
@@ -2014,6 +2135,11 @@ impl<'a> GpuEvaluator<'a> {
     /// The engine (shared with the other evaluators made by [`share`](Self::share)).
     pub fn engine(&self) -> std::cell::Ref<'_, GpuEngine<'a>> {
         self.engine.borrow()
+    }
+
+    /// Frees the engine's level fields ([`GpuEngine::release_fields`]).
+    pub fn release_fields(&self) {
+        self.engine.borrow_mut().release_fields();
     }
 
     /// The engine's device.

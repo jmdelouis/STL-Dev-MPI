@@ -117,6 +117,11 @@ p.add_argument("--steps", type=int, default=3000, help="Adam steps (cosine sched
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--bias-every", type=int, default=50)
 p.add_argument("--bias-realizations", type=int, default=40)
+p.add_argument("--bias-batch", type=int, default=5,
+               help="draws per statistics call of a bias estimate (the cross terms: 3 pairs per draw); smaller: less GPU memory")
+p.add_argument("--live-batch", type=int, default=0,
+               help="pairs per statistics call of the live cross terms (0: the 1 + 3 realizations pairs at once); "
+                    "smaller: less GPU memory, one more forward per extra call")
 p.add_argument("--bias-all", action="store_true", help="estimate the bias of every coefficient (train_denoise.py --bias-all)")
 p.add_argument("--rounds", type=int, default=20)
 p.add_argument("--lbfgs-iter", type=int, default=20)
@@ -134,6 +139,11 @@ p.add_argument("--seed", type=int, default=0)
 p.add_argument("--init", default=None, help="model.pt of a network trained at a lower (or the same) nside: coarse-to-fine start")
 p.add_argument("--device", type=int, default=0)
 p.add_argument("--backend", default="gpu")
+p.add_argument("--noise-pools", default="device", choices=["device", "host"],
+               help="noise simulations on the GPU (uploaded once) or on the host (each statistics call uploads its draws)")
+p.add_argument("--mem-trace", action="store_true",
+               help="peak device and host memory per phase (setup, bias_estimate, live_step, frozen_step, eval), "
+                    "printed when a phase's peak grows and saved in train.json")
 a = p.parse_args()
 os.makedirs(a.out, exist_ok=True)
 n = a.nside
@@ -158,9 +168,16 @@ py_cl = bool(w_cl) and a.cl_engine == "python"
 joint = a.pol != "qu"
 pol_weight = a.pol_weight if a.pol_weight is not None else (0.5 if a.pol == "spin" else 1.0)
 engine = {} if a.engine_cache_bytes is None else {"cache_bytes": a.engine_cache_bytes}
+if a.noise_pools == "host":
+    engine["noise_pools"] = "host"
+# the statistics engines are sized for the largest batches (bias estimates, live steps)
+engine["live_draws"] = a.realizations if a.bias_warmup else 0
+if a.live_batch:
+    engine["live_batch"] = a.live_batch
 kinds = [] if a.cond == "none" else a.cond.split("+")
 net = NativeUNet(n, channels, ksz=a.ksz, gauge=a.gauge, cond=len(kinds), j=j, loss=weights, backend=a.backend,
-                 device=a.device, seed=a.seed, engine=engine, bias_all=a.bias_all, maps=2 if joint else 1)
+                 device=a.device, seed=a.seed, engine=engine, bias_all=a.bias_all, maps=2 if joint else 1,
+                 bias_batch=a.bias_batch)
 
 
 def coarse_to_fine(path):
@@ -375,6 +392,34 @@ def evaluate(step, save=False):
         + " " + " ".join(f"{f} loss {rec[f]:.5g}" for f in names)
         + (f" | fixed draws {rec['fixed_draws']['total']:.5g}" if a.eval_draws else ""), flush=True)
     np.save(os.path.join(a.out, "params.npy"), net.get_params())
+    mem_mark("eval")
+
+
+MEM_KEYS = (("device", "pool_used_high_bytes"), ("device", "pool_reserved_high_bytes"),
+            ("device", "device_used_high_bytes"), ("host", "rss_high_bytes"))
+memory = {"phases": {}, "peak": {}}
+
+
+def mem_mark(phase):
+    """With --mem-trace: the peaks since the previous mark, charged to `phase` (the work just done)."""
+    if not a.mem_trace:
+        return
+    m = net.memory(reset=True)
+    rec = {f"{part}.{k}": (m.get(part) or {}).get(k, 0) for part, k in MEM_KEYS}
+    ph = memory["phases"].setdefault(phase, {"count": 0, **{k: 0 for k in rec}})
+    ph["count"] += 1
+    grew = [k for k, v in rec.items() if v > ph[k]]
+    for k in grew:
+        ph[k] = rec[k]
+    for k, v in rec.items():
+        if v > memory["peak"].get(k, (0, None))[0]:
+            memory["peak"][k] = (v, phase)
+    memory["last"] = {"device": m.get("device"), "trainer": m.get("trainer"), "host": m.get("host")}
+    if grew:
+        gb = lambda v: f"{v / 2**30:.2f}"  # noqa: E731
+        print(f"memory {phase}: device pool used {gb(rec['device.pool_used_high_bytes'])} GiB, "
+              f"reserved {gb(rec['device.pool_reserved_high_bytes'])} GiB, device total {gb(rec['device.device_used_high_bytes'])} GiB, "
+              f"host rss {gb(rec['host.rss_high_bytes'])} GiB", flush=True)
 
 
 def log(step, terms):
@@ -394,8 +439,10 @@ def timed_eval(step):
         clock["next_eval"] = clock["train"] + a.eval_seconds
 
 
+mem_mark("setup")
 for f in ["joint"] if joint else fields:  # biases of the untrained network, for the first evaluation
     net.estimate_bias(f, *draws())
+mem_mark("bias_estimate")
 evaluate(0)
 last = 0
 if a.optimizer == "adam":
@@ -406,6 +453,7 @@ if a.optimizer == "adam":
         # alternate fields: each refreshed once per period; joint: both together
         if not live and (step - 1 - a.bias_warmup) % a.bias_every < (1 if joint else len(fields)):
             net.estimate_bias(f, *draws())
+            mem_mark("bias_estimate")
         lr = a.lr * 0.5 * (1 + math.cos(math.pi * (step - 1) / a.steps))
         if live or py_cl:
             net.zero_grad()
@@ -417,6 +465,7 @@ if a.optimizer == "adam":
             net.adam_step(lr)
         else:
             terms = net.step(f, lr)
+        mem_mark("live_step" if live else "frozen_step")
         clock["train"] += time.perf_counter() - t0
         native["steps"].append({"step": step, "field": f, "seconds": clock["train"], "live": live, **terms})
         last = step
@@ -438,7 +487,9 @@ else:
         t0 = time.perf_counter()
         for f in names:
             net.estimate_bias(f, *draws())
+        mem_mark("bias_estimate")
         rep = net.lbfgs(names, opts)
+        mem_mark("lbfgs_round")
         clock["train"] += time.perf_counter() - t0
         h = rep["loss_history"]
         native["steps"].append({"round": r, "fields": names, "seconds": clock["train"], "evaluations": rep["evaluations"],
@@ -458,7 +509,8 @@ with open(os.path.join(a.out, "train.json"), "w") as fh:
     json.dump({"args": vars(a), "j": j, "coefficients": net.info()["coefficients"], "parameters": net.size,
                "noise_rms": rms, "loss_weights": weights, "seconds": time.time() - started,
                "train_seconds": clock["train"], "loss_history": hist, "evals": evals,
-               "implementation": "STL-Dev-MPI native U-Net (NativeUNet)", "library": net.info()["version"]}, fh, indent=1)
+               "implementation": "STL-Dev-MPI native U-Net (NativeUNet)", "library": net.info()["version"],
+               **({"memory": memory} if a.mem_trace else {})}, fh, indent=1)
 with open(os.path.join(a.out, "history.json"), "w") as fh:
     json.dump({"args": vars(a), "params": net.size, "sims": sims, **native}, fh, indent=1)
 try:

@@ -533,3 +533,66 @@ The statistics (the live step: of `(d, u)` and of the 4 draws, data and pairs) t
 a step; the U-Net, forward and backward, 2-6 % at nside 128 and 1-4 % at nside 256. nside 256
 ran with 10 simulations in the pools and a 1 GiB geometry cache (16 GB T4); nside 128 with the
 6 simulations of garoupe's data and the cache sized from the free memory.
+
+After this profile, two changes to the coefficient kernels, bit-identical on the dumps:
+- one kernel for the reverse contributions of all the masks of a coefficient
+  (`coef_reverse_k`);
+- masks coded per pixel by the set of masks that keep it, with at most 16 patterns per level
+  (`coef_partial_p`, `coef_reverse_p`): one byte per pixel instead of one double per mask.
+
+On a T4 at nside 128, the frozen step goes from 2.54 to 2.22 s and the live step from 7.72 to
+6.22 s (5.93 s with `STL_GPU_PHASE_SYNC=0`). At nside 64, a 300-step Adam run ends at loss
+0.536, against 0.503 for 3d82af3 and 0.515-0.533 for the four 1e-7 perturbation controls. The
+first difference is at step 8 (1e-5 relative); after that the trajectories diverge
+chaotically. The eval errors are 0.40-0.47 in every run. Step time: 1.67 s against 2.29 s.
+
+### Memory: trace, plan and the nside 512 / 1024 runs
+
+Options of the driver (all exact: the losses are the same to the printed digits, the
+statistics dump of `tests/dump_native_step.py` at nside 128 differs from 3d82af3 by 1e-19):
+
+- `--mem-trace`: peak device memory (the allocator high-water mark of the CUDA memory pool, and
+  the device total as `nvidia-smi` counts it) and peak host RSS, per phase (setup,
+  bias_estimate, live_step, frozen_step, eval, lbfgs_round), printed when a phase's peak grows
+  and saved as `memory` in `train.json` with the phase of the global peak
+  (`NativeUNet.memory(reset)`, `stlp_train_memory`).
+- `--noise-pools host`: the noise simulations stay in host memory; each statistics call copies
+  only its draws to the device (2 fields x 3 kinds x sims x npix doubles: 24 GB at nside 1024 with
+  40 simulations).
+- `--engine-cache-bytes 0`: the field store (`Keep`/`Recompute`) and the geometry caches are
+  planned once for both statistics engines from the free memory, after setting aside the level
+  fields of the largest batch, three network tapes and a margin. The store is planned also with
+  a fixed cache.
+- `--live-batch P`: the live cross terms take `1 + 3 x realizations` pairs; with `P > 0` they are
+  evaluated `P` pairs per call (the gradient recomputes the forward of every call but the last).
+  The cost of the split is 6.2 -> 7.5 s (`P = 5`, 3 calls) and 8.4 s (`P = 2`, 7 calls) per live
+  step at nside 128 on a T4.
+- `--bias-batch B` (default 5): draws per call of a bias estimate (cross: `3 B` pairs).
+
+The engines also free their level fields at the end of every loss, bias estimate and target
+evaluation: before, the fields of the last call stayed on the device under every later call
+(2.7 GiB at nside 512).
+
+Peak memory per trainer call (`tests/memory_native_calls.py`, one T4 16 GB, the reference
+options: `--pol ebqu`, channels 16-64, stat masks 0, 20, 30, 45°, cl masks 0, 30, 45, 60°, cond
+log857+sigma, 4 live draws, 40-draw bias estimates, in-engine cl; garoupe has 6 simulations at
+nside 256, 4 for the nside 512 maps upgraded from 256). GiB, resident = in use before the call,
+transient = peak above it:
+
+| | nside 256, 3d82af3, 1 GiB caches | nside 256, now, planned | nside 512, now, `--live-batch 4 --bias-batch 2` |
+|---|---|---|---|
+| network, stencils, masks (setup) | | 0.88 | 3.50 |
+| resident during the steps | | 6.26 (caches 2 x 2.45) | 5.90 (caches 2 x 0.25, decimations 2 x 0.70) |
+| transient: bias estimate / apply / live | | 6.77 / 1.11 / 2.24 | 4.62 / 4.43 / 6.45 |
+| device peak | 9.33 (`nvidia-smi`) | 8.77 | 13.63 |
+| host peak RSS | | 2.1 | 6.4 |
+| live step / frozen step / bias estimate + step, s | 35.5 / 14.4 / 117 | 28.2 / 11.5 / 94 | 207 / 59 / 592 |
+
+Without the split (`--live-batch 0`) nside 512 runs out of memory in the live step on the T4.
+
+Extrapolation to nside 1024 (4x the pixels): resident without the caches about 22 GiB (network
+and its stencils about 10, decimations 5.6), live transient with `--live-batch 4` about 26 GiB,
+so a peak of about 50 GiB plus the caches. That fits an A100 80 GB, and the plan gives the
+rest to the caches. Without the split, the 13 pairs of the live step add about 13 GiB (`Recompute`
+store). Host memory: about 26 GiB for the process at 4 simulations, plus the 24 GB of host pools
+at 40 simulations and the driver's own copies of the noise maps: ask for 160 GB.

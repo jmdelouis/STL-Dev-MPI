@@ -1634,6 +1634,163 @@ extern "C" __global__ void coef_reverse_k(const Target* targets, const ContribK*
     if (t.im_off >= 0) d[t.im_off + i] = dim;
 }
 
+// The masks by pattern: codes[i] is the index of the set of masks that keep
+// pixel i among the distinct sets of the level (255: none).  pats[p] is the
+// set as bits (bit m: mask m).  The same sums as coef_partial_k /
+// coef_reverse_k with one byte read per pixel instead of k doubles.
+extern "C" __global__ void coef_partial_p(const ForwardItem* items, int k, const unsigned char* codes, const unsigned char* pats,
+                                          i64 n, i64 chunk, int moments, double* out) {
+    __shared__ double sre[256], sim[256], ssq[256];
+    int g = blockIdx.y;
+    i64 c = blockIdx.x;
+    i64 n_chunks = gridDim.x;
+    ForwardItem it = items[(i64)g * k];
+    i64 lo = c * chunk, hi = lo + chunk < n ? lo + chunk : n;
+    double tre[8], tim[8], tsq[8];
+    for (int m = 0; m < 8; m++) { tre[m] = 0.0; tim[m] = 0.0; tsq[m] = 0.0; }
+    for (i64 i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+        unsigned char code = codes[i];
+        if (code == 255) continue;
+        unsigned int bits = pats[code];
+        double are, aim, bre, bim;
+        load(it.a, i, &are, &aim);
+        double vre = 0.0, vim = 0.0, sq = 0.0;
+        switch (it.kind) {
+            case F_MEAN:
+                vre = are;
+                sq = are * are + aim * aim;
+                break;
+            case F_SQ: {
+                double r = hypot(are, aim);
+                vre = r * r;
+                sq = vre * vre;
+                break;
+            }
+            case F_ABS:
+                vre = hypot(are, aim);
+                sq = are * are + aim * aim;
+                break;
+            case F_S1X: {
+                load(it.b, i, &bre, &bim);
+                double xr, xi, yr, yi;
+                root_normalise(are, aim, &xr, &xi);
+                root_normalise(bre, bim, &yr, &yi);
+                mul_conj(xr, xi, yr, yi, &vre, &vim);
+                sq = vre * vre + vim * vim;
+                break;
+            }
+            default:
+                load(it.b, i, &bre, &bim);
+                mul_conj(are, aim, bre, bim, &vre, &vim);
+                sq = vre * vre + vim * vim;
+        }
+        _Pragma("unroll") for (int m = 0; m < 8; m++) if (m < k) {
+            if (!((bits >> m) & 1u)) continue;
+            tre[m] += vre;
+            tim[m] += vim;
+            if (moments) tsq[m] += sq;
+        }
+    }
+    _Pragma("unroll") for (int m = 0; m < 8; m++) if (m < k) {
+        sre[threadIdx.x] = tre[m];
+        sim[threadIdx.x] = tim[m];
+        ssq[threadIdx.x] = tsq[m];
+        __syncthreads();
+        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (threadIdx.x < s) {
+                sre[threadIdx.x] += sre[threadIdx.x + s];
+                sim[threadIdx.x] += sim[threadIdx.x + s];
+                ssq[threadIdx.x] += ssq[threadIdx.x + s];
+            }
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+            double* o = out + (((i64)g * k + m) * n_chunks + c) * 3;
+            o[0] = sre[0];
+            o[1] = sim[0];
+            o[2] = ssq[0];
+        }
+        __syncthreads();
+    }
+}
+
+// coef_reverse_k with the cotangent of every pattern summed on the host (in
+// the order of coef_reverse_k): gs[g0 + 2p], gs[g0 + 2p + 1] for pattern p.
+extern "C" __global__ void coef_reverse_p(const Target* targets, const ContribK* contribs, const double* gs,
+                                          const unsigned char* codes, i64 n) {
+    i64 i = (i64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned char code = codes[i];
+    if (code == 255) return;
+    Target t = targets[blockIdx.y];
+    double* d = (double*)t.ptr;
+    double dre = d[i];
+    double dim = t.im_off >= 0 ? d[t.im_off + i] : 0.0;
+    u64 pa = 0, pb = 0;
+    double ca_re = 0.0, ca_im = 0.0, cb_re = 0.0, cb_im = 0.0;
+    for (u32 q = t.start; q < t.end; q++) {
+        ContribK c = contribs[q];
+        double gre = gs[c.g0 + 2 * code];
+        double gim = gs[c.g0 + 2 * code + 1];
+        double are = 0.0, aim = 0.0, bre = 0.0, bim = 0.0, vr = 0.0, vi = 0.0;
+        if (c.kind != R_MEAN && c.kind != R_GA) {
+            if (c.a.ptr != pa) { load(c.a, i, &ca_re, &ca_im); pa = c.a.ptr; }
+            are = ca_re;
+            aim = ca_im;
+        }
+        if (c.kind == R_S1X_A || c.kind == R_S1X_B || c.kind == R_GA) {
+            if (c.b.ptr != pb) { load(c.b, i, &cb_re, &cb_im); pb = c.b.ptr; }
+            bre = cb_re;
+            bim = cb_im;
+        }
+        switch (c.kind) {
+            case R_MEAN:
+                vr = gre;
+                break;
+            case R_VAR:
+                vr = 2.0 * gre * are;
+                break;
+            case R_S1SAME: {
+                double mag = hypot(are, aim);
+                double dd = mag == 0.0 ? 1.0 : mag;
+                vr = (gre * are) / dd;
+                vi = (gre * aim) / dd;
+                break;
+            }
+            case R_S2SAME:
+                vr = 2.0 * gre * are;
+                vi = 2.0 * gre * aim;
+                break;
+            case R_S1X_A: {
+                double yr, yi;
+                root_normalise(bre, bim, &yr, &yi);
+                root_modulus_vjp(are, aim, gre * yr - gim * yi, gre * yi + gim * yr, &vr, &vi);
+                break;
+            }
+            case R_S1X_B: {
+                double yr, yi;
+                root_normalise(are, aim, &yr, &yi);
+                double gr = gre, gi = -gim;
+                root_modulus_vjp(bre, bim, gr * yr - gi * yi, gr * yi + gi * yr, &vr, &vi);
+                break;
+            }
+            case R_GA:
+                vr = gre * bre - gim * bim;
+                vi = gre * bim + gim * bre;
+                break;
+            default: {
+                double gr = gre, gi = -gim;
+                vr = gr * are - gi * aim;
+                vi = gr * aim + gi * are;
+            }
+        }
+        dre += vr;
+        dim += vi;
+    }
+    d[i] = dre;
+    if (t.im_off >= 0) d[t.im_off + i] = dim;
+}
+
 // ---------------------------------------------------------------------------
 // Terms of the synthesis objective on the members' maps (stl-cli): kappa
 // transform, 4-children pyramid (level power, kurtosis per level), pixel

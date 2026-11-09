@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const SOURCE: &str = concat!(include_str!("kernels.cu"), include_str!("harmonic.cu"), include_str!("planar.cu"), include_str!("disc.cu"), include_str!("nn.cu"));
 
-const KERNELS: [&str; 120] = [
+const KERNELS: [&str; 122] = [
     "disc_terms",
     "disc_terms_rev",
     "ring_thetas",
@@ -47,8 +47,10 @@ const KERNELS: [&str; 120] = [
     "unpack_rows",
     "coef_partial",
     "coef_partial_k",
+    "coef_partial_p",
     "coef_reverse",
     "coef_reverse_k",
+    "coef_reverse_p",
     "kappa_pchip",
     "quad_mean",
     "detail_moments",
@@ -287,6 +289,39 @@ impl Gpu {
     pub fn memory(&self) -> (usize, usize) {
         self.ctx.bind_to_thread().unwrap();
         self.ctx.mem_get_info().unwrap()
+    }
+
+    /// Memory of the stream-ordered allocator (the device's current memory
+    /// pool, where every buffer of the rank is allocated), bytes: `[used now,
+    /// used high-water mark, reserved now, reserved high-water mark]`, the
+    /// high-water marks since the last reset (`reset`: start again from now).
+    /// After a synchronisation, so the frees of the stream are counted.
+    pub fn pool_memory(&self, reset: bool) -> [u64; 4] {
+        self.sync();
+        self.ctx.bind_to_thread().unwrap();
+        let mut out = [0u64; 4];
+        unsafe {
+            let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+            if sys::cuDeviceGetMemPool(&mut pool, self.ctx.cu_device()) != sys::CUresult::CUDA_SUCCESS {
+                return out;
+            }
+            let attrs = [
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+            ];
+            for (o, a) in out.iter_mut().zip(attrs) {
+                sys::cuMemPoolGetAttribute(pool, a, o as *mut u64 as *mut c_void);
+            }
+            if reset {
+                for a in [attrs[1], attrs[3]] {
+                    let mut zero = 0u64;
+                    sys::cuMemPoolSetAttribute(pool, a, &mut zero as *mut u64 as *mut c_void);
+                }
+            }
+        }
+        out
     }
 
     /// A new device buffer holding `v` (a null buffer if `v` is empty).
