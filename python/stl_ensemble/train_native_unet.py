@@ -113,6 +113,9 @@ p.add_argument("--cl-engine", default="native", choices=["native", "python"],
                help="native: the cl term in the trainer (spectra on the device, one network pass per step); "
                     "python: SpectrumLoss from the driver (an extra network forward and backward per step)")
 p.add_argument("--optimizer", choices=["adam", "lbfgs"], default="adam")
+p.add_argument("--spike-guard", type=float, default=0.0,
+               help="Adam: a frozen step whose loss exceeds this factor times the running loss restores the parameters "
+                    "of the last good snapshot (every --log-every steps), resets Adam and halves the learning rate (0: off)")
 p.add_argument("--steps", type=int, default=3000, help="Adam steps (cosine schedule length)")
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--bias-every", type=int, default=50)
@@ -445,6 +448,7 @@ for f in ["joint"] if joint else fields:  # biases of the untrained network, for
 mem_mark("bias_estimate")
 evaluate(0)
 last = 0
+guard = {"ema": None, "snap": None, "scale": 1.0, "events": []}
 if a.optimizer == "adam":
     for step in range(1, a.steps + 1):
         f = "joint" if joint else fields[step % 2]
@@ -454,7 +458,7 @@ if a.optimizer == "adam":
         if not live and (step - 1 - a.bias_warmup) % a.bias_every < (1 if joint else len(fields)):
             net.estimate_bias(f, *draws())
             mem_mark("bias_estimate")
-        lr = a.lr * 0.5 * (1 + math.cos(math.pi * (step - 1) / a.steps))
+        lr = guard["scale"] * a.lr * 0.5 * (1 + math.cos(math.pi * (step - 1) / a.steps))
         if live or py_cl:
             net.zero_grad()
             if live:
@@ -466,6 +470,23 @@ if a.optimizer == "adam":
         else:
             terms = net.step(f, lr)
         mem_mark("live_step" if live else "frozen_step")
+        if a.spike_guard and not live:
+            # the loss of a frozen step jumps with the biases refreshed at that step: compare within a bias period only
+            fresh = (step - 1 - a.bias_warmup) % a.bias_every < (1 if joint else len(fields))
+            if guard["ema"] is not None and not fresh and terms["total"] > a.spike_guard * guard["ema"]:
+                if guard["snap"] is not None:
+                    net.set_params(guard["snap"])
+                net.reset_adam()
+                guard["scale"] *= 0.5
+                guard["events"].append({"step": step, "loss": terms["total"], "running": guard["ema"],
+                                        "lr_scale": guard["scale"]})
+                print(f"spike guard: step {step} loss {terms['total']:.6g} > {a.spike_guard} x {guard['ema']:.6g}, "
+                      f"parameters restored, Adam reset, lr scale {guard['scale']:g}", flush=True)
+                guard["ema"] = None  # the next step, from the restored parameters, sets the running loss again
+            else:
+                guard["ema"] = terms["total"] if guard["ema"] is None or fresh else 0.9 * guard["ema"] + 0.1 * terms["total"]
+                if step % a.log_every == 0 or guard["snap"] is None:
+                    guard["snap"] = net.get_params()
         clock["train"] += time.perf_counter() - t0
         native["steps"].append({"step": step, "field": f, "seconds": clock["train"], "live": live, **terms})
         last = step
@@ -512,7 +533,7 @@ with open(os.path.join(a.out, "train.json"), "w") as fh:
                "implementation": "STL-Dev-MPI native U-Net (NativeUNet)", "library": net.info()["version"],
                **({"memory": memory} if a.mem_trace else {})}, fh, indent=1)
 with open(os.path.join(a.out, "history.json"), "w") as fh:
-    json.dump({"args": vars(a), "params": net.size, "sims": sims, **native}, fh, indent=1)
+    json.dump({"args": vars(a), "params": net.size, "sims": sims, "spike_guard": guard["events"], **native}, fh, indent=1)
 try:
     import torch
     state = {k: torch.as_tensor(v) for k, v in net.state_dict().items()}
