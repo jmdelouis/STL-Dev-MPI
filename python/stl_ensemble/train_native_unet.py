@@ -17,8 +17,12 @@ bias unless --bias-all (train_denoise.py >= a2141c1); the first
 --bias-warmup steps use live biases (--realizations fresh draws per step,
 gradient through them), the frozen estimates start at step warmup + 1.
 L-BFGS: round r trains field fields[r % 2] (or both with --lbfgs-fields
-joint) for --lbfgs-iter iterations after a refresh of the biases (no cl, no
-warmup). --seconds stops the training at that wall time.
+joint; the joint networks train both) for --lbfgs-iter iterations after a
+refresh of the biases, on the same loss as the Adam steps (cl included);
+the --bias-warmup live steps run with Adam first. adam+lbfgs: the --steps
+Adam steps, then L-BFGS rounds. At nside 64 neither trains faster than
+Adam. --spike-guard F (Adam): see its help. --seconds stops the training
+at that wall time.
 
 Options with the names and meaning of train_denoise.py: --loss terms data,
 l1, l2, l3 and cl (the binned half-mission cross spectrum C_b(m d1, m d2)
@@ -112,7 +116,10 @@ p.add_argument("--cl-apod", type=float, default=5.0, help="FWHM (deg) of the mas
 p.add_argument("--cl-engine", default="native", choices=["native", "python"],
                help="native: the cl term in the trainer (spectra on the device, one network pass per step); "
                     "python: SpectrumLoss from the driver (an extra network forward and backward per step)")
-p.add_argument("--optimizer", choices=["adam", "lbfgs"], default="adam")
+p.add_argument("--optimizer", choices=["adam", "lbfgs", "adam+lbfgs"], default="adam",
+               help="lbfgs: the --bias-warmup live steps with Adam, then L-BFGS rounds; "
+                    "adam+lbfgs: the --steps Adam steps, then L-BFGS rounds")
+p.add_argument("--lbfgs-lr", type=float, default=1.0, help="L-BFGS: step scale (lr of the strong-Wolfe search)")
 p.add_argument("--spike-guard", type=float, default=0.0,
                help="Adam: a frozen step whose loss exceeds this factor times the running loss restores the parameters "
                     "of the last good snapshot (every --log-every steps), resets Adam and halves the learning rate (0: off)")
@@ -139,6 +146,9 @@ p.add_argument("--eval-seconds", type=float, default=None, help="also evaluate e
 p.add_argument("--eval-draws", type=int, default=0, help="draws of the fixed-bias common objective (0: not computed)")
 p.add_argument("--engine-cache-bytes", type=int, default=None, help="GPU geometry cache (0: from the free memory)")
 p.add_argument("--seed", type=int, default=0)
+p.add_argument("--init-cascade", action="store_true",
+               help="--init: the new coarse levels start as copies of the coarsest level of the small network "
+                    "(its encoder block, and its coarsest reverse block for the new reverse blocks), not fresh")
 p.add_argument("--init", default=None, help="model.pt of a network trained at a lower (or the same) nside: coarse-to-fine start")
 p.add_argument("--device", type=int, default=0)
 p.add_argument("--backend", default="gpu")
@@ -165,8 +175,7 @@ for item in a.loss.split(","):
     assert k in ("data", "l1", "l2", "l3", "cl"), f"loss term {k}: data, l1, l2, l3 or cl in the native trainer"
     weights[k] = float(v or 1)
 w_cl = weights.get("cl", 0.0)
-assert a.optimizer == "adam" or ((not w_cl or a.cl_engine == "native") and not a.bias_warmup), \
-    "L-BFGS: no bias warmup, cl only in the trainer (--cl-engine native)"
+assert a.optimizer == "adam" or not w_cl or a.cl_engine == "native", "L-BFGS: cl only in the trainer (--cl-engine native)"
 py_cl = bool(w_cl) and a.cl_engine == "python"
 joint = a.pol != "qu"
 pol_weight = a.pol_weight if a.pol_weight is not None else (0.5 if a.pol == "spin" else 1.0)
@@ -211,7 +220,52 @@ def coarse_to_fine(path):
         assert state[target].shape == v.shape, f"--init: {name} -> {target}: {v.shape} vs {state[target].shape}"
         state[target] = v
         copied += v.size
-    if lb > ls:
+    if lb > ls and a.init_cascade:
+        # a cascade: every new coarse level k starts as the coarsest level of the small network,
+        # enc.k <- enc.(ls - 1), and every new reverse block (levels ls - 1 .. lb - 2, dec.0 ..
+        # dec.(lb - 1 - ls)) <- the coarsest reverse block of the small network (dec.0, level ls - 2).
+        # Weights [cout, taps, cin]; the inputs of a reverse block are (up, skip, cond); where the
+        # channels differ, the common part is copied and the rest is zero.
+        nc = len(kinds)
+        csm = [int(c) for c in ck["channels"]]
+
+        def segs(cin_parts):
+            out, o = [], 0
+            for c in cin_parts:
+                out.append((o, c))
+                o += c
+            return out
+
+        def copy_block(dst, src, dsegs, ssegs):
+            for q in ("c1", "c2", "n1", "n2"):
+                for kind in ("weight", "bias"):
+                    d, v = state[f"{dst}.{q}.{kind}"], small[f"{src}.{q}.{kind}"]
+                    v = v.detach().cpu().numpy() if hasattr(v, "detach") else np.asarray(v)
+                    co = min(d.shape[0], v.shape[0])
+                    if q.startswith("n") or kind == "bias":
+                        d[:] = 1.0 if (q.startswith("n") and kind == "weight") else 0.0
+                        d[:co] = v[:co]
+                        continue
+                    di = dsegs if q == "c1" else [(0, d.shape[0])]
+                    si = ssegs if q == "c1" else [(0, v.shape[0])]
+                    taps = d.shape[1] // sum(c for _, c in di)
+                    dd = d.reshape(d.shape[0], taps, -1)
+                    vv = v.reshape(v.shape[0], taps, -1)
+                    dd[:] = 0.0
+                    for (od, cd), (os_, cs) in zip(di, si):
+                        c = min(cd, cs)
+                        dd[:co, :, od:od + c] = vv[:co, :, os_:os_ + c]
+                    state[f"{dst}.{q}.{kind}"] = dd.reshape(d.shape)
+
+        src_enc = f"enc.{ls - 1}"
+        for k in range(ls, lb):
+            copy_block(f"enc.{k}", src_enc, segs([channels[k - 1]]), segs([csm[ls - 2]]))
+        for i in range(lb - ls):
+            k = lb - 2 - i  # level of the big reverse block dec.i
+            copy_block(f"dec.{i}", "dec.0", segs([channels[k + 1], channels[k], nc]), segs([csm[ls - 1], csm[ls - 2], nc]))
+        print(f"--init-cascade: enc.{ls}..enc.{lb - 1} <- {src_enc}, dec.0..dec.{lb - 1 - ls} <- dec.0 of the small network",
+              flush=True)
+    elif lb > ls:
         top = f"dec.{lb - 1 - ls}"  # the block of level ls - 1, which reads the new coarse levels
         for q in ("c2.weight", "c2.bias"):
             state[f"{top}.{q}"] = np.zeros_like(state[f"{top}.{q}"])
@@ -449,8 +503,9 @@ mem_mark("bias_estimate")
 evaluate(0)
 last = 0
 guard = {"ema": None, "snap": None, "scale": 1.0, "events": []}
-if a.optimizer == "adam":
-    for step in range(1, a.steps + 1):
+adam_end = a.bias_warmup if a.optimizer == "lbfgs" else a.steps
+if adam_end:
+    for step in range(1, adam_end + 1):
         f = "joint" if joint else fields[step % 2]
         t0 = time.perf_counter()
         live = step <= a.bias_warmup
@@ -499,8 +554,9 @@ if a.optimizer == "adam":
         timed_eval(step)
         if out_of_time():
             break
-else:
-    opts = {"max_iter": a.lbfgs_iter, "history_size": a.lbfgs_history}
+if a.optimizer != "adam" and not out_of_time():
+    r0 = last  # rounds numbered after the Adam steps
+    opts = {"max_iter": a.lbfgs_iter, "history_size": a.lbfgs_history, "lr": a.lbfgs_lr}
     if a.lbfgs_max_eval:
         opts["max_eval"] = a.lbfgs_max_eval
     for r in range(1, a.rounds + 1):
@@ -509,19 +565,23 @@ else:
         for f in names:
             net.estimate_bias(f, *draws())
         mem_mark("bias_estimate")
+        if r == 1:  # the objective of the rounds is the loss of the Adam steps
+            check = sum(net.loss(f)["total"] for f in names)
         rep = net.lbfgs(names, opts)
+        if r == 1:
+            print(f"L-BFGS objective at the start {rep['loss_history'][0]:.8g}, loss of the Adam steps {check:.8g}", flush=True)
         mem_mark("lbfgs_round")
         clock["train"] += time.perf_counter() - t0
         h = rep["loss_history"]
         native["steps"].append({"round": r, "fields": names, "seconds": clock["train"], "evaluations": rep["evaluations"],
                                 "loss_start": h[0], "loss_end": min(h)})
-        last = r
-        log(r, dict(zip(rep["terms"], rep["terms_history"][int(np.argmin(h))])))
+        last = r0 + r
+        log(r0 + r, dict(zip(rep["terms"], rep["terms_history"][int(np.argmin(h))])))
         print(f"round {r} {names} {h[0]:.6g} -> {min(h):.6g} in {rep['evaluations']} evaluations, "
               f"t={clock['train']:.1f}s", flush=True)
         if r % a.eval_every == 0 and r < a.rounds:
-            evaluate(r)
-        timed_eval(r)
+            evaluate(r0 + r)
+        timed_eval(r0 + r)
         if out_of_time():
             break
 evaluate(last, save=True)
